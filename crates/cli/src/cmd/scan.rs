@@ -58,7 +58,13 @@ where
     }
     validate_root(&args.root)?;
 
-    let volume_root = canonicalize_for_walk(&args.root)?;
+    // WHY: canonicalize once, then use the canonical form for BOTH
+    // the walk root and volume_root. On macOS, tempdir() returns
+    // /var/folders/... which is a symlink to /private/var/folders/...;
+    // without canonicalizing the walk root, walkdir produces paths
+    // under /var/ that fail strip_prefix against /private/var/.
+    let canonical_root = canonicalize_for_walk(&args.root)?;
+    let volume_root = canonical_root.clone();
     let mut count: u64 = 0;
     let stdout = std::io::stdout();
 
@@ -67,7 +73,7 @@ where
     // inner `take_while` polls between yielded items so a Ctrl-C
     // during walk short-circuits quickly.
     let discovered: Vec<DiscoveredFile> = scanner
-        .walk(&args.root, &volume_root)?
+        .walk(&canonical_root, &volume_root)?
         .take_while(|_| !cancel.cancelled())
         .collect();
 
