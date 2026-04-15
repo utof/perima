@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Git hooks run in non-interactive shells that may not source ~/.bashrc,
+# so cargo-installed binaries may not be on PATH. Prepend the standard
+# location explicitly to make this hook portable across shells / git GUIs.
+export PATH="$HOME/.cargo/bin:$PATH"
+just ci
