@@ -41,8 +41,9 @@ enum Command {
         /// Directory to walk.
         root: PathBuf,
 
-        /// Required in phase 1a (clap enforces); 1b makes optional.
-        #[arg(long, required = true)]
+        /// Dry-run mode: hash and print, skip DB writes.
+        /// In phase 1a this is the only supported mode; 1b makes it optional.
+        #[arg(long)]
         dry_run: bool,
 
         /// Suppress per-file stdout lines.
