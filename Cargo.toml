@@ -48,6 +48,12 @@ dunce        = "1"
 file-id      = "0.2"
 tauri        = { version = "2", features = [] }
 tauri-specta = "=2.0.0-rc.24"
+clap         = { version = "4", features = ["derive"] }
+tempfile     = "3"
+insta        = { version = "1", features = ["yaml", "filters"] }
+proptest     = "1"
+rayon        = "1"
+ctrlc        = { version = "3", features = ["termination"] }
 
 [profile.release]
 lto = "thin"

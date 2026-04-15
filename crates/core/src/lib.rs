@@ -1,8 +1,21 @@
 //! Domain types and trait ports for perima.
 //!
-//! This crate has zero framework dependencies. Every other crate in
-//! the workspace either defines types consumed here or adapts this
-//! crate's traits to a concrete backend.
+//! Zero framework dependencies.
 
-/// Marker placeholder. Replaced with real domain types in phase 1.
+pub mod errors;
+pub mod ids;
+pub mod types;
+
+pub use errors::CoreError;
+pub use types::{
+    BlakeHash, DeviceId, DiscoveredFile, FileLocationRecord, FileSize, HashedFile, LocationStatus,
+    MediaPath, UpsertOutcome, VolumeId, VolumeIdentifiers, VolumeRecord,
+};
+
+pub mod ports;
+pub use ports::{FileRepository, HashService, Scanner, VolumeRepository};
+
+/// Marker placeholder. Retained as a public symbol for phase-0
+/// compatibility tests; will be removed in phase 1b when the real
+/// public surface covers it.
 pub const CRATE_NAME: &str = "perima-core";
