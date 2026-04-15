@@ -1,0 +1,28 @@
+name: kani
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  kani:
+    name: cargo kani
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install kani
+        run: cargo install --locked kani-verifier && cargo kani setup
+
+      # Step-level continue-on-error so job result reflects reality
+      # but the workflow run never fails. Phase 1 adds the first
+      # actual proof; until then this is a wiring check.
+      - name: Run kani proofs
+        continue-on-error: true
+        run: cargo kani --workspace
