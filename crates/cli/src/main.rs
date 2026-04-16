@@ -13,7 +13,8 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use perima_core::MetadataRepository;
 use perima_db::{
-    SqliteFileRepository, SqliteMetadataRepository, SqliteVolumeRepository, open_and_migrate,
+    SqliteFileRepository, SqliteMetadataRepository, SqliteTagRepository, SqliteVolumeRepository,
+    open_and_migrate,
 };
 use perima_fs::WalkdirScanner;
 use perima_hash::Blake3Service;
@@ -83,7 +84,14 @@ enum Command {
         /// Include media metadata columns.
         #[arg(long)]
         with_metadata: bool,
+
+        /// Filter to files carrying this tag.
+        #[arg(long)]
+        tag: Option<String>,
     },
+
+    /// Tag management: add, remove, and list tags.
+    Tag(cmd::tag::TagArgs),
 
     /// List known volumes and their mount paths on this machine.
     Volumes,
@@ -164,7 +172,10 @@ async fn main() -> ExitCode {
             limit,
             json,
             with_metadata,
-        } => dispatch_ls(volume, limit, json, with_metadata, &config),
+            tag,
+        } => dispatch_ls(volume, limit, json, with_metadata, tag, &config),
+
+        Command::Tag(args) => dispatch_tag(&args, &config),
 
         Command::Volumes => dispatch_volumes(&config),
 
@@ -347,6 +358,7 @@ fn dispatch_ls(
     limit: usize,
     json: bool,
     with_metadata: bool,
+    tag: Option<String>,
     config: &Config,
 ) -> ExitCode {
     let volume_id = volume
@@ -378,15 +390,52 @@ fn dispatch_ls(
             return ExitCode::from(1);
         }
     };
+    let tag_conn = match open_and_migrate(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("perima: database (tag repo): {e}");
+            return ExitCode::from(1);
+        }
+    };
     let repo = SqliteFileRepository::new(file_conn);
     let metadata_repo = SqliteMetadataRepository::new(meta_conn);
+    let tag_repo = SqliteTagRepository::new(tag_conn);
     let ls_args = cmd::ls::LsArgs {
         volume: volume_id,
         limit,
         json,
         with_metadata,
+        tag,
     };
-    match cmd::ls::run(&repo, &metadata_repo, &ls_args) {
+    match cmd::ls::run(&repo, &metadata_repo, &tag_repo, &ls_args) {
+        Ok(()) => ExitCode::from(0),
+        Err(e) => {
+            eprintln!("perima: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Run the `tag` subcommand.
+fn dispatch_tag(args: &cmd::tag::TagArgs, config: &Config) -> ExitCode {
+    let db_path = config.data_dir.join("perima.db");
+    let tag_conn = match open_and_migrate(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("perima: database (tag repo): {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let file_conn = match open_and_migrate(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("perima: database (file repo): {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let tag_repo = SqliteTagRepository::new(tag_conn);
+    let file_repo = SqliteFileRepository::new(file_conn);
+    match cmd::tag::run(&tag_repo, &file_repo, config.device_id, args) {
         Ok(()) => ExitCode::from(0),
         Err(e) => {
             eprintln!("perima: {e}");

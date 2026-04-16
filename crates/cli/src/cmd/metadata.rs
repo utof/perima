@@ -179,7 +179,12 @@ fn validate_file(path: &Path) -> Result<(), CoreError> {
 ///
 /// WHY linear: a volume's location count is bounded in practice; an
 /// O(n) scan once per `perima metadata` invocation is negligible.
-fn find_by_absolute_suffix<'a>(
+///
+/// WHY `pub`: shared by `cmd::tag` for path→hash resolution
+/// without duplicating the suffix-match logic. The enclosing `cmd`
+/// module is private to the crate binary, so `pub` here is effectively
+/// crate-private.
+pub fn find_by_absolute_suffix<'a>(
     records: &'a [FileLocationRecord],
     absolute: &str,
 ) -> Option<&'a FileLocationRecord> {
