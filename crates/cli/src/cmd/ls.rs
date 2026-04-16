@@ -51,7 +51,7 @@ fn print_table(records: &[FileLocationRecord]) -> Result<(), CoreError> {
         let hash_short = &hash_hex[..8];
         let vol_str = r.volume_id.0.to_string();
         let vol_short = &vol_str[..8];
-        let size = format_size(r.size.0);
+        let size = super::format::format_size(r.size.0);
         writeln!(
             handle,
             "{hash_short}…  {size:<10} {vol_short}…  {}",
@@ -60,25 +60,4 @@ fn print_table(records: &[FileLocationRecord]) -> Result<(), CoreError> {
         .map_err(CoreError::Io)?;
     }
     Ok(())
-}
-
-/// Format a byte count as a human-readable string.
-///
-/// WHY `#[allow(cast_precision_loss)]`: display formatting for human-readable
-/// byte sizes inherently sacrifices precision for readability. A 1-decimal-
-/// place GB figure that is off by a few bytes is correct enough for the UI.
-#[allow(clippy::cast_precision_loss)]
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = 1024 * KB;
-    const GB: u64 = 1024 * MB;
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
-    }
 }

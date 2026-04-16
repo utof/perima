@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use perima_core::{
-    BlakeHash, CoreError, DeviceId, DiscoveredFile, FileRepository, HashService, Scanner,
-    UpsertOutcome, VolumeId,
+    BlakeHash, CoreError, DeviceId, DiscoveredFile, FileRepository, HashService, HashedFile,
+    MediaPath, Scanner, UpsertOutcome, VolumeId, VolumeRepository,
 };
 use rayon::prelude::*;
 
@@ -43,29 +43,51 @@ pub enum ExitCode {
     Interrupted,
 }
 
+/// Callback invoked after each successful file persist:
+/// `(relative_path, real_volume_id, device_id)`.
+///
+/// WHY type alias: the full `Option<&dyn Fn(...)>` signature trips
+/// `clippy::type_complexity`; a named alias keeps the `run` signature readable.
+pub type OnPersistFn<'a> = Option<&'a dyn Fn(&MediaPath, VolumeId, DeviceId)>;
+
 /// Execute `scan`.
 ///
-/// When `dry_run` is false, `repo` must be `Some`; each hashed file is
-/// persisted via [`FileRepository::upsert_file`] +
-/// [`FileRepository::upsert_location`]. When `dry_run` is true, pass
-/// `None` — no DB writes occur.
+/// When `dry_run` is false, `file_repo` and `volume_repo` must be `Some`;
+/// volume detection is performed via [`perima_fs::detect_volume`], the volume
+/// is resolved (or created) via [`VolumeRepository::find_or_create`], and each
+/// hashed file is persisted via [`FileRepository::upsert_file`] +
+/// [`FileRepository::upsert_location`]. After the persist loop,
+/// `.perima/manifest.db` is written at the volume root.
+///
+/// `on_persist` is an optional callback invoked after each successful location
+/// upsert with `(relative_path, real_volume_id, device_id)`. The production
+/// caller passes a closure that calls
+/// [`perima_db::SqliteFileRepository::migrate_sentinel_row`]; test callers
+/// may pass `None`.
+///
+/// When `dry_run` is true, pass `None` for all three optional arguments —
+/// no DB writes or volume detection occur.
 ///
 /// # Errors
 /// Returns `CoreError::InvalidPath` if `root` is not a directory;
-/// propagates `CoreError` from hashing and walking.
-pub fn run<S, H, R>(
+/// propagates `CoreError` from hashing, walking, and volume detection.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
+pub fn run<S, H, FR, VR>(
     scanner: &S,
     hasher: &H,
-    mut repo: Option<&mut R>,
+    mut file_repo: Option<&mut FR>,
+    mut volume_repo: Option<&mut VR>,
+    on_persist: OnPersistFn<'_>,
     device: DeviceId,
-    volume: VolumeId,
     cancel: &Cancellation,
     args: &ScanArgs,
 ) -> Result<(ExitCode, ScanStats), CoreError>
 where
     S: Scanner + ?Sized,
     H: HashService + ?Sized,
-    R: FileRepository + ?Sized,
+    FR: FileRepository + ?Sized,
+    VR: VolumeRepository + ?Sized,
 {
     validate_root(&args.root)?;
 
@@ -75,16 +97,38 @@ where
     // without canonicalizing the walk root, walkdir produces paths
     // under /var/ that fail strip_prefix against /private/var/.
     let canonical_root = canonicalize_for_walk(&args.root)?;
-    let volume_root = canonical_root.clone();
     let stdout = std::io::stdout();
     let mut stats = ScanStats::default();
+
+    // Resolve volume once before the scan loop (no-op in dry-run).
+    // WHY: detect+find_or_create happen here, outside the per-file loop, so
+    // the volume repo connection is not held across rayon's parallel hash phase.
+    let volume_info: Option<(VolumeId, String, PathBuf)> = if args.dry_run {
+        None
+    } else {
+        let detected = perima_fs::detect_volume(&canonical_root)?;
+        let label = detected
+            .identifiers
+            .label
+            .clone()
+            .unwrap_or_else(|| "unknown".to_owned());
+        let vol_id = volume_repo
+            .as_mut()
+            .ok_or_else(|| CoreError::Internal("volume_repo is None in live scan".into()))?
+            .find_or_create(&detected.identifiers, device)?;
+        volume_repo
+            .as_mut()
+            .expect("volume_repo checked above")
+            .record_mount(vol_id, device, &detected.mount_point)?;
+        Some((vol_id, label, detected.mount_point))
+    };
 
     // Collect up-front so rayon can parallelize hashing; the walker
     // iterator itself isn't Send across the par_iter boundary. The
     // inner `take_while` polls between yielded items so a Ctrl-C
     // during walk short-circuits quickly.
     let discovered: Vec<DiscoveredFile> = scanner
-        .walk(&canonical_root, &volume_root)?
+        .walk(&canonical_root, &canonical_root)?
         .take_while(|_| !cancel.cancelled())
         .collect();
 
@@ -105,6 +149,9 @@ where
         })
         .collect();
 
+    // Collect successfully persisted files for the manifest write after the loop.
+    let mut manifest_files: Vec<HashedFile> = Vec::new();
+
     let mut handle = stdout.lock();
     for res in results {
         match res {
@@ -119,14 +166,31 @@ where
                     )
                     .map_err(CoreError::Io)?;
                 }
-                if let Some(ref mut r) = repo {
-                    match persist_file(*r, &d, &h, device, volume) {
-                        Ok(outcome) => match outcome {
-                            UpsertOutcome::Inserted => stats.new += 1,
-                            UpsertOutcome::Updated | UpsertOutcome::Unchanged => {
-                                stats.existing += 1;
+                if let Some(ref mut fr) = file_repo {
+                    let volume = volume_info
+                        .as_ref()
+                        .map_or_else(|| VolumeId(uuid::Uuid::nil()), |(v, _, _)| *v);
+                    match persist_file(*fr, &d, &h, device, volume) {
+                        Ok(outcome) => {
+                            // WHY: sentinel migration runs per-file, scoped to
+                            // (relative_path, sentinel volume_id, deleted_at IS NULL).
+                            // Running it right after a successful upsert confirms
+                            // the file still exists on disk before we reattribute
+                            // its old row to the real volume.
+                            if let Some(cb) = on_persist {
+                                cb(&d.relative_path, volume, device);
                             }
-                        },
+                            manifest_files.push(HashedFile {
+                                discovered: d,
+                                hash: h,
+                            });
+                            match outcome {
+                                UpsertOutcome::Inserted => stats.new += 1,
+                                UpsertOutcome::Updated | UpsertOutcome::Unchanged => {
+                                    stats.existing += 1;
+                                }
+                            }
+                        }
                         Err(e) => {
                             tracing::warn!(error = %e, "persist failed");
                             stats.errors += 1;
@@ -146,16 +210,30 @@ where
     }
     drop(handle);
 
+    // Write manifest after the persist loop (non-dry-run only).
+    if let Some((vol_id, _, ref mount_point)) = volume_info {
+        perima_db::manifest::write_manifest(mount_point, vol_id, &manifest_files)?;
+    }
+
     let interrupted = cancel.cancelled();
     let suffix = if interrupted { " (interrupted)" } else { "" };
     if args.dry_run {
         let total = stats.new + stats.existing + stats.errors;
         eprintln!("scanned {total} files (dry-run; DB not wired){suffix}");
     } else {
-        let vol_str = volume.0.to_string();
-        let vol_short = &vol_str[..8];
+        let label_or_id = volume_info.as_ref().map_or_else(
+            || "?".to_owned(),
+            |(vol_id, label, _)| {
+                if label == "unknown" || label.is_empty() {
+                    let s = vol_id.0.to_string();
+                    s[..8].to_owned()
+                } else {
+                    label.clone()
+                }
+            },
+        );
         eprintln!(
-            "scanned {} files on volume {vol_short} ({} new, {} existing, {} errors){suffix}",
+            "scanned {} files on volume {label_or_id} ({} new, {} existing, {} errors){suffix}",
             stats.new + stats.existing + stats.errors,
             stats.new,
             stats.existing,

@@ -68,6 +68,60 @@ fn limit_to_i64(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
 }
 
+impl SqliteFileRepository {
+    /// Migrate a sentinel row from phase 1b to the real `volume`.
+    ///
+    /// WHY: scan in phase 1b wrote every `file_locations` row with
+    /// `volume_id = '00000000-0000-0000-0000-000000000000'` (the nil UUID).
+    /// Phase 1c resolves the real volume for each scan root. Rather than
+    /// a bulk UPDATE (which could race across concurrent scans), we update
+    /// one row at a time — scoped by `(relative_path, sentinel volume_id,
+    /// deleted_at IS NULL)` — immediately after the live upsert confirms
+    /// the path still exists on disk.
+    ///
+    /// Returns the number of rows updated (0 if no sentinel row existed).
+    ///
+    /// # Errors
+    /// `CoreError::Internal` on DB or mutex failure.
+    // WHY allow(significant_drop_tightening): the Mutex guard `conn` must
+    // outlive the `execute` call that borrows through it. This is the same
+    // pattern used throughout this file.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn migrate_sentinel_row(
+        &self,
+        path: &MediaPath,
+        real_volume: VolumeId,
+        device: DeviceId,
+    ) -> Result<u64, CoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
+        let now = now_iso();
+        let vol_str = real_volume.0.to_string();
+        let dev_str = device.0.to_string();
+        let path_str = path.as_str();
+        // WHY: nil UUID string literal is hard-coded here because this method
+        // is the *only* place we intentionally touch sentinel rows. Using a
+        // constant avoids importing VolumeId into a string constant but keeps
+        // the magic value visible and auditable.
+        let n = conn
+            .execute(
+                "UPDATE file_locations
+                 SET volume_id = ?1, updated_at = ?2, device_id = ?3
+                 WHERE volume_id = '00000000-0000-0000-0000-000000000000'
+                   AND relative_path = ?4 AND deleted_at IS NULL",
+                rusqlite::params![vol_str, now, dev_str, path_str],
+            )
+            .map_err(Error::from)?;
+        // WHY: `rusqlite::Connection::execute` returns `usize`; the schema
+        // guarantees at most 1 sentinel row per path, so the cast to u64 is
+        // safe on all supported platforms.
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(n as u64)
+    }
+}
+
 impl FileRepository for SqliteFileRepository {
     fn upsert_file(
         &mut self,
@@ -422,5 +476,62 @@ mod tests {
         let a_only = repo.list_file_locations(100, Some(vol_a)).expect("list");
         assert_eq!(a_only.len(), 1);
         assert_eq!(a_only[0].relative_path.as_str(), "a.txt");
+    }
+
+    #[test]
+    fn migrate_sentinel_row_updates_volume_id() {
+        let (_td, mut repo) = test_db();
+        let dev = device();
+        let sentinel = sentinel_volume();
+        let real_vol = VolumeId::new();
+
+        // Insert a file with the sentinel volume_id.
+        let f = sample_hashed_file(b"sentinel_test", "photo.jpg");
+        repo.upsert_file(&f, dev).expect("file");
+        repo.upsert_location(&f.hash, sentinel, &f.discovered.relative_path, dev)
+            .expect("location with sentinel");
+
+        // Migrate the sentinel row to the real volume.
+        let updated = repo
+            .migrate_sentinel_row(&f.discovered.relative_path, real_vol, dev)
+            .expect("migrate");
+        assert_eq!(updated, 1, "exactly 1 sentinel row must be migrated");
+
+        // Confirm the row now has the real volume_id.
+        let rows = repo
+            .list_file_locations(10, Some(real_vol))
+            .expect("list by real vol");
+        assert_eq!(rows.len(), 1, "row must be found under real volume");
+        assert_eq!(rows[0].relative_path.as_str(), "photo.jpg");
+
+        // Confirm it no longer appears under sentinel.
+        let sentinel_rows = repo
+            .list_file_locations(10, Some(sentinel))
+            .expect("list by sentinel");
+        assert_eq!(
+            sentinel_rows.len(),
+            0,
+            "no rows under sentinel after migration"
+        );
+    }
+
+    #[test]
+    fn migrate_sentinel_row_skips_non_sentinel() {
+        let (_td, mut repo) = test_db();
+        let dev = device();
+        let real_vol = VolumeId::new();
+        let other_vol = VolumeId::new();
+
+        // Insert a file with a real (non-sentinel) volume_id.
+        let f = sample_hashed_file(b"real_vol_test", "video.mp4");
+        repo.upsert_file(&f, dev).expect("file");
+        repo.upsert_location(&f.hash, real_vol, &f.discovered.relative_path, dev)
+            .expect("location");
+
+        // migrate_sentinel_row must not touch rows with a real volume_id.
+        let updated = repo
+            .migrate_sentinel_row(&f.discovered.relative_path, other_vol, dev)
+            .expect("migrate");
+        assert_eq!(updated, 0, "non-sentinel row must not be touched");
     }
 }
