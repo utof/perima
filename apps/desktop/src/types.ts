@@ -67,6 +67,17 @@ export interface FileWithMetadata {
   bitrate_bps: number | null;
   /** MIME type as detected at extraction time. */
   mime_type: string | null;
+  /**
+   * Absolute on-disk path to the generated WebP thumbnail. `null` until
+   * the backend queue worker has finished writing one (or if generation
+   * failed, in which case {@link thumbnail_status} is `"failed"`).
+   */
+  thumbnail_path: string | null;
+  /**
+   * Thumbnail lifecycle: `"pending"`, `"ready"`, `"failed"`, or `null`
+   * for metadata rows that predate v0.4.1.
+   */
+  thumbnail_status: string | null;
 }
 
 /** A storage volume known to perima. */

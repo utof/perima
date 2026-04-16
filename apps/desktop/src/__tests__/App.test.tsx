@@ -60,7 +60,7 @@ describe("App file-event debounce", () => {
 
     // Before advancing time, no list_files call should have gone out yet.
     const preCalls = (invoke as Mock).mock.calls.filter(
-      ([cmd]) => cmd === "list_files",
+      ([cmd]) => cmd === "list_files_with_metadata",
     );
     expect(preCalls).toHaveLength(0);
 
@@ -74,7 +74,7 @@ describe("App file-event debounce", () => {
     });
 
     const postCalls = (invoke as Mock).mock.calls.filter(
-      ([cmd]) => cmd === "list_files",
+      ([cmd]) => cmd === "list_files_with_metadata",
     );
     // Exactly one refresh for 5 rapid events — the whole point of debounce.
     expect(postCalls).toHaveLength(1);
