@@ -9,15 +9,126 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use perima_core::{DeviceId, VolumeId};
+use perima_core::{CoreError, DeviceId, EventBus, FileEvent, LocationStatus, VolumeId};
 use perima_db::{SqliteFileRepository, SqliteVolumeRepository, open_and_migrate};
-use perima_fs::WalkdirScanner;
+use perima_fs::{DebouncedWatcher, WalkdirScanner};
 use perima_hash::Blake3Service;
 use rayon::prelude::*;
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
-use crate::state::AppState;
+use crate::events::TauriEventEmitter;
+use crate::state::{AppState, WatcherState};
+
+// ---------------------------------------------------------------------------
+// Event handlers (duplicated from crates/cli/src/cmd/watch.rs)
+//
+// WHY duplicated: `crates/cli` is a binary crate shell; `crates/desktop`
+// cannot depend on it (that would create an unwanted coupling between two
+// app shells and pull in CLI-only dependencies). Consolidating these into a
+// shared crate (`crates/watch-handlers` or similar) is deferred to post-v1
+// once the API has stabilised. The duplication is intentional and small.
+// ---------------------------------------------------------------------------
+
+/// Fans out events to multiple [`EventBus`] implementations.
+///
+/// Individual handler errors are logged but do not abort the fan-out —
+/// all registered handlers always fire regardless of prior failures.
+///
+/// WHY lives in commands.rs (not core): `CompositeEventBus` uses
+/// `tracing::warn!` which requires the `tracing` crate. `crates/core`
+/// deliberately has zero framework dependencies.
+struct CompositeEventBus {
+    handlers: Vec<Arc<dyn EventBus>>,
+}
+
+impl CompositeEventBus {
+    /// Construct from a list of handlers.
+    fn new(handlers: Vec<Arc<dyn EventBus>>) -> Self {
+        Self { handlers }
+    }
+}
+
+impl EventBus for CompositeEventBus {
+    fn emit(&self, event: &FileEvent) -> Result<(), CoreError> {
+        for h in &self.handlers {
+            if let Err(e) = h.emit(event) {
+                tracing::warn!(error = %e, "event handler failed");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Updates the database in response to filesystem events.
+///
+/// WHY `Arc<SqliteFileRepository>`: `EventBus` requires `Send + Sync`.
+/// `SqliteFileRepository` uses `Mutex<Connection>` internally, satisfying both.
+struct DbEventHandler {
+    repo: Arc<SqliteFileRepository>,
+    device: DeviceId,
+}
+
+impl EventBus for DbEventHandler {
+    fn emit(&self, event: &FileEvent) -> Result<(), CoreError> {
+        match event {
+            FileEvent::Created { path, .. } => {
+                // WHY: we do not hash new files in watch mode. Hashing requires
+                // reading the entire file which could be slow or incomplete for
+                // large files mid-write. A subsequent `perima scan` will index it.
+                tracing::info!(
+                    path = path.as_str(),
+                    "new file detected; run scan to index it"
+                );
+                Ok(())
+            }
+            FileEvent::Modified { path, volume } => {
+                let n = self.repo.update_location_status(
+                    *volume,
+                    path,
+                    LocationStatus::Stale,
+                    self.device,
+                )?;
+                tracing::debug!(path = path.as_str(), rows_affected = n, "marked stale");
+                Ok(())
+            }
+            FileEvent::Deleted { path, volume } => {
+                let n = self.repo.update_location_status(
+                    *volume,
+                    path,
+                    LocationStatus::Missing,
+                    self.device,
+                )?;
+                tracing::debug!(path = path.as_str(), rows_affected = n, "marked missing");
+                Ok(())
+            }
+            FileEvent::Renamed { from, to, volume } => {
+                let n = self
+                    .repo
+                    .update_location_path(*volume, from, to, self.device)?;
+                tracing::debug!(
+                    from = from.as_str(),
+                    to = to.as_str(),
+                    rows_affected = n,
+                    "renamed location"
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Logs every filesystem event at INFO level.
+struct LogEventHandler;
+
+impl EventBus for LogEventHandler {
+    fn emit(&self, event: &FileEvent) -> Result<(), CoreError> {
+        tracing::info!(?event, "file event");
+        Ok(())
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Wire-types
@@ -272,6 +383,155 @@ pub fn list_volumes_inner(
     let repo = SqliteVolumeRepository::new(conn);
     let records = perima_core::VolumeRepository::list(&repo, device_id)?;
     Ok(records.into_iter().map(VolumeEntry::from).collect())
+}
+
+// ---------------------------------------------------------------------------
+// Watcher commands
+// ---------------------------------------------------------------------------
+
+/// Start watching `path` for filesystem changes.
+///
+/// Validates the path, detects the volume, opens the database, cancels any
+/// prior watcher, then starts a new [`DebouncedWatcher`] that emits
+/// `"file-event"` Tauri events and DB updates on every filesystem change.
+///
+/// # Errors
+/// Returns a `String` if the path is invalid, volume detection fails, or the
+/// database cannot be opened or migrated.
+// WHY allow needless_pass_by_value: Tauri's command dispatcher owns `State`
+// and `String` params; the signature cannot be changed.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn start_watch(
+    path: String,
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    watcher_state: tauri::State<'_, WatcherState>,
+) -> Result<(), String> {
+    let root = PathBuf::from(&path);
+    validate_root(&root).map_err(|e| e.to_string())?;
+    let canonical_root = dunce::canonicalize(&root).map_err(|e| format!("canonicalize: {e}"))?;
+
+    let detected = perima_fs::detect_volume(&canonical_root).map_err(|e| e.to_string())?;
+    let db_path = state.data_dir.join("perima.db");
+    let device_id = state.device_id;
+
+    // WHY two connections: SqliteVolumeRepository and SqliteFileRepository
+    // each take an owned Connection. Under WAL mode a second open is instant.
+    let vol_conn = open_and_migrate(&db_path).map_err(|e| e.to_string())?;
+    let file_conn = open_and_migrate(&db_path).map_err(|e| e.to_string())?;
+
+    let mut vol_repo = SqliteVolumeRepository::new(vol_conn);
+    let volume_id = perima_core::VolumeRepository::find_or_create(
+        &mut vol_repo,
+        &detected.identifiers,
+        device_id,
+    )
+    .map_err(|e| e.to_string())?;
+    perima_core::VolumeRepository::record_mount(
+        &mut vol_repo,
+        volume_id,
+        device_id,
+        &detected.mount_point,
+    )
+    .map_err(|e| e.to_string())?;
+    drop(vol_repo);
+
+    let file_repo = Arc::new(SqliteFileRepository::new(file_conn));
+
+    let db_handler: Arc<dyn EventBus> = Arc::new(DbEventHandler {
+        repo: Arc::clone(&file_repo),
+        device: device_id,
+    });
+    let tauri_emitter: Arc<dyn EventBus> = Arc::new(TauriEventEmitter {
+        app_handle: app_handle.clone(),
+    });
+    let log_handler: Arc<dyn EventBus> = Arc::new(LogEventHandler);
+
+    let composite = Arc::new(CompositeEventBus::new(vec![
+        db_handler,
+        tauri_emitter,
+        log_handler,
+    ]));
+
+    // Cancel any existing watcher before starting a new one.
+    {
+        let mut cancel_guard = watcher_state.cancel.lock().await;
+        if let Some(token) = cancel_guard.take() {
+            token.cancel();
+        }
+    }
+    // Drop any existing watcher so its OS registration is released.
+    {
+        let mut inner_guard = watcher_state.inner.lock().await;
+        *inner_guard = None;
+    }
+
+    let cancel = CancellationToken::new();
+
+    // WHY 1 s production debounce: short enough for responsive feedback,
+    // long enough to coalesce rapid saves (e.g. editors that write-then-chmod).
+    let watcher = DebouncedWatcher::start(
+        std::slice::from_ref(&canonical_root),
+        &canonical_root,
+        volume_id,
+        composite,
+        cancel.clone(),
+        Duration::from_secs(1),
+    )
+    .map_err(|e| e.to_string())?;
+
+    {
+        let mut cancel_guard = watcher_state.cancel.lock().await;
+        *cancel_guard = Some(cancel);
+    }
+    {
+        let mut inner_guard = watcher_state.inner.lock().await;
+        *inner_guard = Some(watcher);
+    }
+
+    Ok(())
+}
+
+/// Stop an active filesystem watcher, if any.
+///
+/// Cancels the background event loop and drops the watcher, releasing the
+/// OS-level watch registration.
+///
+/// # Errors
+/// This command is currently infallible; the `Result` signature is kept for
+/// consistency with `start_watch` and for forward-compatibility.
+// WHY allow needless_pass_by_value: Tauri's command dispatcher owns `State`.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn stop_watch(watcher_state: tauri::State<'_, WatcherState>) -> Result<(), String> {
+    {
+        let mut cancel_guard = watcher_state.cancel.lock().await;
+        if let Some(token) = cancel_guard.take() {
+            token.cancel();
+        }
+    }
+    {
+        let mut inner_guard = watcher_state.inner.lock().await;
+        *inner_guard = None;
+    }
+    Ok(())
+}
+
+/// Returns `true` if a filesystem watcher is currently active.
+///
+/// # Errors
+/// This command is currently infallible; the `Result` signature is kept for
+/// consistency with the other watcher commands.
+// WHY allow needless_pass_by_value: Tauri's command dispatcher owns `State`.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn is_watching(watcher_state: tauri::State<'_, WatcherState>) -> Result<bool, String> {
+    let inner_guard = watcher_state.inner.lock().await;
+    Ok(inner_guard.is_some())
 }
 
 // ---------------------------------------------------------------------------

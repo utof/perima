@@ -31,6 +31,8 @@ chrono.workspace            = true
 rayon.workspace             = true
 dunce.workspace             = true
 directories.workspace       = true
+tokio.workspace             = true
+tokio-util.workspace        = true
 
 [build-dependencies]
 tauri-build.workspace = true

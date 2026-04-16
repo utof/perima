@@ -1,18 +1,23 @@
 //! Tauri desktop backend for perima.
 //!
-//! Exposes `scan`, `list_files`, and `list_volumes` as Tauri IPC commands.
+//! Exposes `scan`, `list_files`, `list_volumes`, `start_watch`, `stop_watch`,
+//! and `is_watching` as Tauri IPC commands.
 //! `AppState` holds the resolved `Config` (data dir + device id) and is
 //! injected into every command via `tauri::State`.
+//! `WatcherState` holds the active [`perima_fs::DebouncedWatcher`] and its
+//! cancellation token.
 
 pub mod commands;
 pub mod config;
+pub mod events;
 pub mod state;
 
 use tauri_specta::{Builder, collect_commands};
 
 /// Build and run the Tauri application.
 ///
-/// Wires `AppState`, registers IPC commands, and starts the event loop.
+/// Wires `AppState` and `WatcherState`, registers IPC commands, and starts
+/// the event loop.
 ///
 /// # Panics
 /// Panics if platform directories cannot be resolved (only occurs on systems
@@ -39,6 +44,9 @@ pub fn run() -> Result<(), tauri::Error> {
         commands::scan,
         commands::list_files,
         commands::list_volumes,
+        commands::start_watch,
+        commands::stop_watch,
+        commands::is_watching,
     ]);
 
     // Export TypeScript bindings in debug builds only.
@@ -53,6 +61,7 @@ pub fn run() -> Result<(), tauri::Error> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(app_state)
+        .manage(state::WatcherState::new())
         .invoke_handler(specta_builder.invoke_handler())
         .setup(move |app| {
             specta_builder.mount_events(app);
