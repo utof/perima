@@ -108,6 +108,9 @@ impl TagRepository for SqliteTagRepository {
             .lock()
             .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
 
+        // WHY BEGIN IMMEDIATE: delete_tag is a pure UPDATE, but
+        // IMMEDIATE avoids a write-lock upgrade race that DEFERRED can
+        // trigger under WAL. Consistent with all other write paths.
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| CoreError::Internal(format!("begin immediate: {e}")))?;
@@ -185,8 +188,10 @@ impl TagRepository for SqliteTagRepository {
             .lock()
             .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
 
-        // WHY BEGIN IMMEDIATE: consistent with attach and upsert — all
-        // read-modify-write paths use the same pattern.
+        // WHY BEGIN IMMEDIATE: detach is a pure UPDATE (no preceding
+        // SELECT), but IMMEDIATE avoids a write-lock upgrade race that
+        // DEFERRED can trigger under WAL. Consistent with all other
+        // write paths in this repo.
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| CoreError::Internal(format!("begin immediate: {e}")))?;
