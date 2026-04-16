@@ -203,12 +203,25 @@ impl MetadataRepository for SqliteMetadataRepository {
                 // clobber the worker's state back to NULL, silently
                 // losing the thumbnail association. See utof/perima#15
                 // HIGH #4 for the regression this prevents.
+                //
+                // WHY `thumbnail_status` literal-default 'pending' on
+                // INSERT: V004 backfills the NULL rows left by v0.4.0–
+                // v0.4.1, and future INSERTs need to produce 'pending'
+                // on the same path so the
+                // `idx_file_metadata_thumbnail_pending` partial index
+                // stays populated. The literal lives in the SQL, not
+                // in `MediaMetadata`, because the UPDATE branch of
+                // this upsert deliberately never touches thumbnail
+                // columns (Task 2 decoupling). See utof/perima#15
+                // HIGH #3.
                 tx.execute(
                     "INSERT INTO file_metadata
                      (blake3_hash, width, height, duration_ms, captured_at,
                       camera_make, camera_model, codec, bitrate_bps, mime_type,
+                      thumbnail_status,
                       extracted_at, updated_at, device_id)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                             'pending',
                              ?11, ?11, ?12)",
                     rusqlite::params![
                         hash_hex,
@@ -604,6 +617,100 @@ mod tests {
         }
     }
 
+    /// Regression: the V004 backfill SQL must flip NULL
+    /// `thumbnail_status` rows to 'pending' without touching rows that
+    /// already have a real status. Models a v0.4.1 DB upgraded to
+    /// v0.4.2 — rows persisted before V004 carried NULL; the partial
+    /// index `idx_file_metadata_thumbnail_pending` excluded them.
+    /// See `utof/perima#15` HIGH #3.
+    #[test]
+    fn v004_backfills_null_thumbnail_status_to_pending() {
+        let td = tempfile::tempdir().expect("tempdir");
+        let db_path = td.path().join("test.db");
+        let conn = open_and_migrate(&db_path).expect("open");
+
+        // Insert a row with thumbnail_status = NULL directly via raw
+        // SQL, simulating a row that existed pre-V004.
+        // WHY raw insert: the production `upsert_metadata` path now
+        // seeds 'pending' on INSERT, so we cannot reproduce a NULL
+        // via the safe API. `extracted_at` is NOT NULL per V002 —
+        // supply an ISO timestamp.
+        conn.execute(
+            "INSERT INTO file_metadata
+             (blake3_hash, thumbnail_status, extracted_at, updated_at, device_id)
+             VALUES (?1, NULL, ?2, ?2, ?3)",
+            rusqlite::params![
+                "deadbeef".repeat(8), // 64 hex chars
+                "2026-04-16T00:00:00Z",
+                DeviceId::new().0.to_string(),
+            ],
+        )
+        .expect("insert legacy NULL row");
+
+        // Sanity: the row is indeed NULL.
+        let before: Option<String> = conn
+            .query_row(
+                "SELECT thumbnail_status FROM file_metadata
+                 WHERE blake3_hash = ?1",
+                [&"deadbeef".repeat(8)],
+                |r| r.get(0),
+            )
+            .expect("read before");
+        assert!(before.is_none(), "precondition: row starts at NULL");
+
+        // Re-run the V004 SQL verbatim (refinery only runs once; a
+        // fresh execution of the same UPDATE is idempotent and
+        // exercises the same statement).
+        let rows = conn
+            .execute(
+                "UPDATE file_metadata
+                    SET thumbnail_status = 'pending'
+                  WHERE thumbnail_status IS NULL
+                    AND deleted_at IS NULL",
+                [],
+            )
+            .expect("run V004 sql");
+        assert_eq!(rows, 1, "V004 must update exactly the 1 NULL row");
+
+        let after: Option<String> = conn
+            .query_row(
+                "SELECT thumbnail_status FROM file_metadata
+                 WHERE blake3_hash = ?1",
+                [&"deadbeef".repeat(8)],
+                |r| r.get(0),
+            )
+            .expect("read after");
+        assert_eq!(
+            after.as_deref(),
+            Some("pending"),
+            "V004 must flip NULL rows to 'pending'",
+        );
+    }
+
+    /// Regression: fresh INSERTs via `upsert_metadata` must seed
+    /// `thumbnail_status = 'pending'` so the partial index stays
+    /// populated for future rows. See `utof/perima#15` HIGH #3.
+    #[test]
+    fn upsert_metadata_insert_seeds_pending_thumbnail_status() {
+        let (_td, repo) = metadata_repo();
+        let dev = device();
+        let hash = BlakeHash::from_bytes(*blake3::hash(b"seed").as_bytes());
+        let meta = sample_metadata(hash);
+        repo.upsert_metadata(&meta, dev).expect("upsert insert");
+
+        let got = repo.find_by_hash(&hash).expect("find").expect("present");
+        assert_eq!(
+            got.thumbnail_status.as_deref(),
+            Some("pending"),
+            "fresh INSERT must seed thumbnail_status='pending', got {:?}",
+            got.thumbnail_status,
+        );
+        assert!(
+            got.thumbnail_path.is_none(),
+            "fresh INSERT must leave thumbnail_path = None",
+        );
+    }
+
     #[test]
     fn upsert_metadata_inserts_new() {
         let (_td, repo) = metadata_repo();
@@ -714,7 +821,20 @@ mod tests {
         let got = got_meta
             .as_ref()
             .expect("metadata present for file with file_metadata row");
-        assert_eq!(got, &meta, "round-tripped metadata must match");
+        // WHY expected-transform: since v0.4.2, `upsert_metadata`'s
+        // INSERT seeds `thumbnail_status = 'pending'` as a literal
+        // default so the partial index stays populated and the UI
+        // can distinguish "not yet attempted" from "nothing to
+        // attempt". `sample_metadata` still carries None in the
+        // struct (extractors produce None); after round-trip the
+        // stored row reads back as 'pending'. See `utof/perima#15`
+        // HIGH #3.
+        let mut expected = meta;
+        expected.thumbnail_status = Some("pending".into());
+        assert_eq!(
+            got, &expected,
+            "round-tripped metadata must match (with insert-seeded 'pending')",
+        );
     }
 
     #[test]
