@@ -16,6 +16,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # WHY pull-requests: write: release-plz queries commits->PRs to
+      # build changelog entries ("closes #N", etc). Without at least
+      # read, GitHub returns 403 on /commits/{sha}/pulls. Write is a
+      # superset granted for symmetry with the PR job.
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
