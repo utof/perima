@@ -4,8 +4,14 @@ import type { ScanResult } from "../types";
 
 /** Props for {@link ScanButton}. */
 interface ScanButtonProps {
-  /** Called when a scan completes successfully with the result summary. */
-  onScanComplete: (result: ScanResult) => void;
+  /**
+   * Called when a scan completes successfully with the result summary and
+   * the absolute path that was scanned.
+   *
+   * WHY path is passed: the parent needs it to auto-start the filesystem
+   * watcher on the folder that was just scanned (phase 3b).
+   */
+  onScanComplete: (result: ScanResult, path: string) => void;
   /** Called immediately before the scan starts (use to set loading state). */
   onScanStart: () => void;
   /** When true, show the disabled "Scanning..." state. */
@@ -30,7 +36,7 @@ export default function ScanButton({
 
     onScanStart();
     api.scan(selected, false).match(
-      (result) => onScanComplete(result),
+      (result) => onScanComplete(result, selected),
       (err) => window.alert(`Scan failed: ${err}`),
     );
   }

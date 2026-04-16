@@ -70,7 +70,9 @@ describe("ScanButton", () => {
       expect(mockOpen).toHaveBeenCalledWith({ directory: true, multiple: false });
       expect(mockScan).toHaveBeenCalledWith("/home/user/photos", false);
       expect(onScanStart).toHaveBeenCalled();
-      expect(onScanComplete).toHaveBeenCalledWith(mockResult);
+      // WHY: onScanComplete now receives (result, path) so App.tsx can
+      // auto-start the filesystem watcher on the scanned folder.
+      expect(onScanComplete).toHaveBeenCalledWith(mockResult, "/home/user/photos");
     });
   });
 });

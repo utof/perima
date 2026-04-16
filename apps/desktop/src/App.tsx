@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import * as api from "./api";
+import type { UnsubscribeFn } from "./api";
 import FileTable from "./components/FileTable";
 import ScanButton from "./components/ScanButton";
 import StatusBar from "./components/StatusBar";
@@ -35,18 +36,68 @@ export default function App() {
     );
   }, []);
 
+  useEffect(() => {
+    // WHY: Coalesce filesystem event bursts (e.g., saving a file triggers
+    // several low-level events) into a single `list_files` refresh. 300 ms
+    // was chosen in the spec — short enough to feel live, long enough to
+    // absorb typical editor save storms.
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let unsubscribe: UnsubscribeFn | null = null;
+    // WHY: Guard against setState after unmount when the subscribe promise
+    // or the debounced refresh resolves post-cleanup.
+    let active = true;
+
+    api
+      .subscribeToFileEvents(() => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+          api.listFiles(100).match(
+            (refreshed) => {
+              if (active) setFiles(refreshed);
+            },
+            (err) => {
+              if (active) setError(err);
+            },
+          );
+        }, 300);
+      })
+      .then((fn) => {
+        if (active) {
+          unsubscribe = fn;
+        } else {
+          // Already unmounted before the listener was registered; tear down.
+          fn();
+        }
+      })
+      .catch((err) => console.warn("subscribeToFileEvents failed:", err));
+
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+      if (unsubscribe) unsubscribe();
+    };
+  }, []);
+
   function handleScanStart() {
     setScanning(true);
     setError(null);
   }
 
-  function handleScanComplete(result: ScanResult) {
+  function handleScanComplete(result: ScanResult, path: string) {
     setScanResult(result);
     setScanning(false);
     // Refresh file list after a successful scan.
     api.listFiles(100).match(
       (refreshed) => setFiles(refreshed),
       (err) => setError(err),
+    );
+    // WHY: Auto-start the watcher on the folder we just scanned so live
+    // updates flow without an extra user gesture. Non-blocking: failures
+    // are logged but must not prevent the scan from being reported as
+    // complete.
+    api.startWatch(path).match(
+      () => {},
+      (err) => console.warn("startWatch failed:", err),
     );
   }
 

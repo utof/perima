@@ -11,3 +11,10 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: vi.fn(),
 }));
+
+// WHY: `@tauri-apps/api/event::listen` hits the Tauri runtime (WebView IPC).
+// The default mock returns an unsubscribe stub; individual tests override
+// it via `(listen as Mock).mockImplementation(...)` to capture the handler.
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async () => () => {}),
+}));

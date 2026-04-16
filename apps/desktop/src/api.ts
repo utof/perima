@@ -5,8 +5,9 @@
  * explicit and type-checked. `ResultAsync<T, string>` is the contract.
  */
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { ResultAsync } from "neverthrow";
-import type { FileEntry, ScanResult, VolumeEntry } from "./types";
+import type { FileEntry, FileEvent, ScanResult, VolumeEntry } from "./types";
 
 /**
  * Wraps a Tauri `invoke` call in a `ResultAsync`, mapping thrown errors to
@@ -54,4 +55,45 @@ export function listFiles(
  */
 export function listVolumes(): ResultAsync<VolumeEntry[], string> {
   return fromInvoke("list_volumes", {});
+}
+
+/**
+ * Start watching the given folder for filesystem changes.
+ *
+ * Cancels any currently active watcher. Events are emitted via the
+ * Tauri `file-event` channel; subscribe with {@link subscribeToFileEvents}.
+ */
+export function startWatch(path: string): ResultAsync<void, string> {
+  return fromInvoke("start_watch", { path });
+}
+
+/** Stop the active watcher, if any. No-op when nothing is watched. */
+export function stopWatch(): ResultAsync<void, string> {
+  return fromInvoke("stop_watch", {});
+}
+
+/** Query whether a watcher is currently active. */
+export function isWatching(): ResultAsync<boolean, string> {
+  return fromInvoke("is_watching", {});
+}
+
+/** Returned by {@link subscribeToFileEvents}; call to stop listening. */
+export type UnsubscribeFn = () => void;
+
+/**
+ * Subscribe to `file-event` notifications emitted by the backend watcher.
+ *
+ * Resolves to an unsubscribe function. Consumers MUST call it on cleanup
+ * to avoid leaks (e.g., from `useEffect` return).
+ *
+ * WHY wrap `listen`: the raw `@tauri-apps/api/event` listener passes a
+ * `{ payload, event, id, ... }` object to the callback; we unwrap the
+ * payload so consumers only deal with the typed `FileEvent`.
+ */
+export async function subscribeToFileEvents(
+  callback: (event: FileEvent) => void,
+): Promise<UnsubscribeFn> {
+  return listen<FileEvent>("file-event", (tauriEvent) => {
+    callback(tauriEvent.payload);
+  });
 }

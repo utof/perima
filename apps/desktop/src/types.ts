@@ -43,3 +43,16 @@ export interface VolumeEntry {
   /** ISO 8601 timestamp of last observation. */
   last_seen: string;
 }
+
+/**
+ * Filesystem event emitted by the backend watcher.
+ *
+ * WHY discriminated union with literal `type` tag: matches the Rust
+ * `FileEventPayload` which uses `#[serde(tag = "type")]`. TypeScript
+ * can narrow by `switch (e.type)` the same way Rust matches the enum.
+ */
+export type FileEvent =
+  | { type: "Created"; path: string; volume: string }
+  | { type: "Modified"; path: string; volume: string }
+  | { type: "Deleted"; path: string; volume: string }
+  | { type: "Renamed"; from: string; to: string; volume: string };

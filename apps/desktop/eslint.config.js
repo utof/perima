@@ -25,6 +25,10 @@ export default [
         window: "readonly",
         document: "readonly",
         console: "readonly",
+        // WHY: WebView environment exposes WHATWG timers; we use them for
+        // the 300ms file-event debounce in App.tsx.
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
       },
     },
     rules: {
