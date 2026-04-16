@@ -1,37 +1,75 @@
+# release-plz configuration.
+#
 # WHY release-pr mode (not direct): release commits must pass CI before
 # tagging. CLAUDE.md's rule "never commit unreviewed work" applies to
 # release commits too. Release-PR mode opens a PR, CI runs on PR open,
 # merge-after-green tags the release.
 
 [workspace]
-# WHY publish=false: no crates.io distribution in v0.x. When we choose
-# to publish perima-core, flip this in a targeted [[package]] block.
+# WHY publish=false: no crates.io distribution in v0.x. When we publish
+# perima-core, flip this in a targeted [[package]] block.
 publish = false
 
-# WHY git_tag/release=true: we want both git tags AND GitHub Releases.
-git_tag_enable = true
-git_release_enable = true
-
-# WHY this filter: chore/docs/ci/refactor/test alone should NOT cut a
-# release (otherwise every CI tweak bumps the version). Only feat/fix/
-# perf and their breaking variants (feat!) drive a release.
+# WHY this commit filter: chore/docs/ci/refactor/test alone should NOT
+# cut a release (otherwise every CI tweak bumps the version). Only
+# feat/fix/perf and breaking variants (feat!/perf!) drive a release.
 release_commits = "^(feat|fix|feat!|perf|perf!)"
 
-# WHY changelog path explicit: we already have CHANGELOG.md from v0.3.0;
-# release-plz will append to it in Keep-a-Changelog format.
+# WHY changelog path explicit: CHANGELOG.md exists from v0.3.0; release-plz
+# appends to it in Keep-a-Changelog format.
 changelog_path = "CHANGELOG.md"
 
-# WHY semver_check=false: `cargo-semver-checks` is great for public
-# crates on crates.io but noisy here — perima-core isn't published yet
-# and the tool flags API churn that is expected pre-1.0.
+# WHY semver_check=false: cargo-semver-checks is for published crates;
+# noise pre-1.0 where API churn is expected.
 semver_check = false
 
-# Pre-1.0 left-shift semantics.
-# WHY: cargo convention says "0.x.y → 0.x.(y+1) on feat; 0.x → 0.(x+1)
-# on feat!/BREAKING". release-plz honors this automatically on 0.x.
+# WHY git_tag/release disabled AT WORKSPACE level: we want ONE tag per
+# release (e.g. `v0.4.0`), NOT per-crate tags (`perima-core-v0.4.0`,
+# `perima-db-v0.4.0`, etc.). Enable + override only on the `perima`
+# CLI binary crate below. All other crates have `release = false`
+# (they still get version-bumped via workspace inheritance, but don't
+# create tags of their own).
+git_tag_enable = false
+git_release_enable = false
+
+# WHY single-source version: all crates inherit `version.workspace = true`
+# from the root Cargo.toml, so release-plz bumps the workspace version
+# exactly once per release regardless of how many crates have `feat:`
+# commits.
+
+# ---------------------------------------------------------------------------
+# Per-package overrides
+# ---------------------------------------------------------------------------
+
+# `perima` (the CLI binary crate) is the designated tagging package.
+# It owns the workspace-level tag `v{{ version }}` and the GH Release.
+[[package]]
+name = "perima"
+release = true
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_enable = true
+git_release_name = "v{{ version }}"
+
+# Library crates release in lockstep via workspace version but do NOT
+# create their own tags / releases.
+[[package]]
+name = "perima-core"
+release = false
 
 [[package]]
+name = "perima-db"
+release = false
+
+[[package]]
+name = "perima-fs"
+release = false
+
+[[package]]
+name = "perima-hash"
+release = false
+
+# perima-desktop is a Tauri shell; never publishable. No tags either.
+[[package]]
 name = "perima-desktop"
-# WHY release=false: never publishable (Tauri shell, not a library).
-# Versions still bump via workspace inheritance.
 release = false
