@@ -77,6 +77,29 @@ fn dry_run_prints_hashes_and_summary() {
 }
 
 #[test]
+fn scan_without_dry_run_succeeds() {
+    let td = tempfile::tempdir().expect("tempdir");
+    mk_fixture(td.path());
+    let tmp_env = tempfile::tempdir().expect("env dir");
+
+    let output = Command::new(bin())
+        .arg("scan")
+        .arg(td.path())
+        .env("PERIMA_CONFIG_DIR", tmp_env.path())
+        .env("PERIMA_DATA_DIR", tmp_env.path())
+        .output()
+        .expect("run perima");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).expect("utf8");
+    assert!(stderr.contains("scanned"), "missing summary in: {stderr}");
+}
+
+#[test]
 fn dry_run_is_deterministic_across_runs() {
     let td = tempfile::tempdir().expect("tempdir");
     mk_fixture(td.path());

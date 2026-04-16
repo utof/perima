@@ -867,6 +867,7 @@ dependencies = [
  "perima-fs",
  "perima-hash",
  "rayon",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
