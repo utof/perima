@@ -12,6 +12,34 @@ roadmap milestone triggers `1.0.0`.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-04-16
+
+Desktop tag UI layer on top of the v0.5.0 tag backend.
+
+### Added
+
+- **Tauri tag commands** (`perima-desktop`): `list_tags`, `attach_tag`,
+  `detach_tag`, `list_files_with_tags`. Two-query merge (metadata +
+  tags_for_hashes) with a WHY comment documenting the WAL race.
+- **`TagPayload` + `FileWithTagsPayload`** wire types in `payloads.rs`;
+  `FileWithTagsPayload` composes (not extends) `FileWithMetadataPayload`.
+- **TS `Tag` / `FileWithTags` types** + `api.ts` wrappers (`listTags`,
+  `attachTag`, `detachTag`, `listFilesWithTags`) following the existing
+  `fromInvoke` / neverthrow pattern.
+- **`TagChip` component** — colored pill with optional remove button.
+  Color index computed via byte-sum mod 12 (blake3 not available in TS
+  bundle; intentional deviation from spec; WHY comment explains).
+- **`TagSidebar` component** — "All" + per-tag rows with attachment counts
+  and `aria-pressed` accessibility. `totalCount` prop shows unfiltered
+  file count next to "All". Active-state count badge uses `text-blue-200`
+  for legibility on the blue background.
+- **`FileTable` / `FileGrid` tag rendering** — up to 3 `TagChip` instances
+  per row/tile with `+N` overflow badge.
+- **`App.tsx` client-side tag filter** — `selectedTagId: string | null`
+  state; `<TagSidebar>` shown when tags list is non-empty; `visibleFiles`
+  filters `files` by tag id. WHY comments explain single-select deferral
+  and 100-row cap effect on displayed counts.
+
 ## [0.5.0] — 2026-04-16
 
 First user-facing organization primitive: **tag-based file labeling**.
@@ -357,7 +385,8 @@ tuning filed as follow-up (see Project section below).
   `cli`, `desktop`, `ci`, `deps`, `docs`, `release`) rather than development
   milestones.
 
-[Unreleased]: https://github.com/utof/perima/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/utof/perima/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/utof/perima/releases/tag/v0.5.1
 [0.4.0]: https://github.com/utof/perima/releases/tag/v0.4.0
 [0.3.2]: https://github.com/utof/perima/releases/tag/v0.3.2
 [0.3.1]: https://github.com/utof/perima/releases/tag/v0.3.1
