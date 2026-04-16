@@ -1,0 +1,37 @@
+# WHY release-pr mode (not direct): release commits must pass CI before
+# tagging. CLAUDE.md's rule "never commit unreviewed work" applies to
+# release commits too. Release-PR mode opens a PR, CI runs on PR open,
+# merge-after-green tags the release.
+
+[workspace]
+# WHY publish=false: no crates.io distribution in v0.x. When we choose
+# to publish perima-core, flip this in a targeted [[package]] block.
+publish = false
+
+# WHY git_tag/release=true: we want both git tags AND GitHub Releases.
+git_tag_enable = true
+git_release_enable = true
+
+# WHY this filter: chore/docs/ci/refactor/test alone should NOT cut a
+# release (otherwise every CI tweak bumps the version). Only feat/fix/
+# perf and their breaking variants (feat!) drive a release.
+release_commits = "^(feat|fix|feat!|perf|perf!)"
+
+# WHY changelog path explicit: we already have CHANGELOG.md from v0.3.0;
+# release-plz will append to it in Keep-a-Changelog format.
+changelog_path = "CHANGELOG.md"
+
+# WHY semver_check=false: `cargo-semver-checks` is great for public
+# crates on crates.io but noisy here — perima-core isn't published yet
+# and the tool flags API churn that is expected pre-1.0.
+semver_check = false
+
+# Pre-1.0 left-shift semantics.
+# WHY: cargo convention says "0.x.y → 0.x.(y+1) on feat; 0.x → 0.(x+1)
+# on feat!/BREAKING". release-plz honors this automatically on 0.x.
+
+[[package]]
+name = "perima-desktop"
+# WHY release=false: never publishable (Tauri shell, not a library).
+# Versions still bump via workspace inheritance.
+release = false
