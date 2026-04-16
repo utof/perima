@@ -12,6 +12,49 @@ roadmap milestone triggers `1.0.0`.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-04-16
+
+### Added
+
+- **WebP thumbnails + grid view UI** (phase 4 user-visible tier).
+  - `perima-media::ThumbnailGenerator` writes 256px WebP thumbnails
+    (Lanczos3 resize, aspect-preserving) to
+    `<data_dir>/thumbnails/<aa>/<hash>.webp`. Atomic write via
+    `.tmp` + `fs::rename` — mid-write crashes cannot leave a
+    half-written file.
+  - V003 migration adds `thumbnail_path` + `thumbnail_status` to
+    `file_metadata` (nullable, additive; existing v0.4.0 rows
+    read as "not yet processed"). Partial index on
+    `thumbnail_status = 'pending' AND deleted_at IS NULL` supports
+    a future `perima thumbnail` retry command.
+  - `MetadataRepository::update_thumbnail` — separate trait method
+    so the queue worker's thumbnail result always persists without
+    colliding with `upsert_metadata`'s Unchanged equivalence proxy.
+    Wrapped in `BEGIN IMMEDIATE`.
+  - `MetadataQueue` worker now calls the thumbnailer after metadata
+    extraction for image/video MIMEs; on success writes
+    `thumbnail_status = 'ready'` + absolute path; on failure writes
+    `'failed'` and continues (no worker abort).
+  - `ThumbnailGenerator::disabled()` constructor + new
+    `perima scan --no-thumbnails` flag shortcircuit the thumbnail
+    write path for users wanting faster scans.
+- **Desktop grid view.** New `FileGrid` component renders 200px
+  tiles with thumbnails via Tauri's asset protocol
+  (`convertFileSrc`). Header gains a Table / Grid toggle; default is
+  Table for v0.3.x UX continuity. Placeholder icons for pending /
+  failed / unknown tiles. 3 new vitest tests (14 total).
+- `tauri.conf.json` enables `assetProtocol` with scope
+  `$APPDATA/perima/thumbnails/**` + broad `**` fallback.
+
+### Changed
+
+- Desktop app now calls `list_files_with_metadata` (added in v0.4.0)
+  for both Table and Grid views. `FileWithMetadataPayload` gains
+  `thumbnail_path` + `thumbnail_status` fields.
+- Tauri dep gains the `protocol-asset` feature flag.
+
+[0.4.1]: https://github.com/utof/perima/releases/tag/v0.4.1
+
 ## [0.4.0] — 2026-04-16
 
 First MINOR release under release-plz infrastructure (utof/perima#10).
@@ -178,7 +221,7 @@ tuning filed as follow-up (see Project section below).
   `cli`, `desktop`, `ci`, `deps`, `docs`, `release`) rather than development
   milestones.
 
-[Unreleased]: https://github.com/utof/perima/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/utof/perima/compare/v0.4.1...HEAD
 [0.4.0]: https://github.com/utof/perima/releases/tag/v0.4.0
 [0.3.2]: https://github.com/utof/perima/releases/tag/v0.3.2
 [0.3.1]: https://github.com/utof/perima/releases/tag/v0.3.1
