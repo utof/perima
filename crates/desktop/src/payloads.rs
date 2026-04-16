@@ -55,6 +55,12 @@ pub struct FileWithMetadataPayload {
     pub bitrate_bps: Option<u32>,
     /// MIME type as detected at extraction time.
     pub mime_type: Option<String>,
+    /// Absolute on-disk path to the generated WebP thumbnail; `None`
+    /// until the `MetadataQueue` worker writes the thumbnail.
+    pub thumbnail_path: Option<String>,
+    /// Thumbnail lifecycle: `"pending"`, `"ready"`, `"failed"`, or
+    /// `None` if the metadata row predates v0.4.1.
+    pub thumbnail_status: Option<String>,
 }
 
 impl From<(FileLocationRecord, Option<MediaMetadata>)> for FileWithMetadataPayload {
@@ -75,6 +81,8 @@ impl From<(FileLocationRecord, Option<MediaMetadata>)> for FileWithMetadataPaylo
             codec,
             bitrate_bps,
             mime_type,
+            thumbnail_path,
+            thumbnail_status,
         ) = match meta {
             Some(m) => (
                 m.width,
@@ -86,8 +94,12 @@ impl From<(FileLocationRecord, Option<MediaMetadata>)> for FileWithMetadataPaylo
                 m.codec,
                 m.bitrate_bps,
                 m.mime_type,
+                m.thumbnail_path,
+                m.thumbnail_status,
             ),
-            None => (None, None, None, None, None, None, None, None, None),
+            None => (
+                None, None, None, None, None, None, None, None, None, None, None,
+            ),
         };
         Self {
             hash: loc.hash.to_hex(),
@@ -105,6 +117,8 @@ impl From<(FileLocationRecord, Option<MediaMetadata>)> for FileWithMetadataPaylo
             codec,
             bitrate_bps,
             mime_type,
+            thumbnail_path,
+            thumbnail_status,
         }
     }
 }
