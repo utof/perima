@@ -148,7 +148,7 @@ pub fn scan(
 /// # Errors
 /// Returns [`perima_core::CoreError`] on filesystem, volume detection, hash,
 /// or database failures.
-pub(crate) fn run_scan_inner(
+pub fn run_scan_inner(
     root: &Path,
     dry_run: bool,
     data_dir: &Path,
@@ -221,13 +221,26 @@ pub fn list_files(
                 .map_err(|e| format!("bad volume UUID: {e}"))
         })
         .transpose()?;
+    list_files_inner(&state.data_dir, limit, volume_id).map_err(|e| e.to_string())
+}
 
-    let db_path = state.data_dir.join("perima.db");
-    let conn = open_and_migrate(&db_path).map_err(|e| e.to_string())?;
+/// Inner list-files logic extracted for testability without a live Tauri state.
+///
+/// WHY: mirrors `run_scan_inner` — allows integration tests to exercise the
+/// list path without constructing `tauri::State`.
+///
+/// # Errors
+/// Returns [`perima_core::CoreError`] on database open or query failure.
+pub fn list_files_inner(
+    data_dir: &Path,
+    limit: u32,
+    volume_id: Option<VolumeId>,
+) -> Result<Vec<FileEntry>, perima_core::CoreError> {
+    let db_path = data_dir.join("perima.db");
+    let conn = open_and_migrate(&db_path)?;
     let repo = SqliteFileRepository::new(conn);
     let records =
-        perima_core::FileRepository::list_file_locations(&repo, limit as usize, volume_id)
-            .map_err(|e| e.to_string())?;
+        perima_core::FileRepository::list_file_locations(&repo, limit as usize, volume_id)?;
     Ok(records.into_iter().map(FileEntry::from).collect())
 }
 
@@ -240,11 +253,24 @@ pub fn list_files(
 #[tauri::command]
 #[specta::specta]
 pub fn list_volumes(state: tauri::State<'_, AppState>) -> Result<Vec<VolumeEntry>, String> {
-    let db_path = state.data_dir.join("perima.db");
-    let conn = open_and_migrate(&db_path).map_err(|e| e.to_string())?;
+    list_volumes_inner(&state.data_dir, state.device_id).map_err(|e| e.to_string())
+}
+
+/// Inner list-volumes logic extracted for testability without a live Tauri state.
+///
+/// WHY: mirrors `run_scan_inner` — allows integration tests to exercise the
+/// volumes list path without constructing `tauri::State`.
+///
+/// # Errors
+/// Returns [`perima_core::CoreError`] on database open or query failure.
+pub fn list_volumes_inner(
+    data_dir: &Path,
+    device_id: DeviceId,
+) -> Result<Vec<VolumeEntry>, perima_core::CoreError> {
+    let db_path = data_dir.join("perima.db");
+    let conn = open_and_migrate(&db_path)?;
     let repo = SqliteVolumeRepository::new(conn);
-    let records =
-        perima_core::VolumeRepository::list(&repo, state.device_id).map_err(|e| e.to_string())?;
+    let records = perima_core::VolumeRepository::list(&repo, device_id)?;
     Ok(records.into_iter().map(VolumeEntry::from).collect())
 }
 
