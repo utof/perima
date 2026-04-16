@@ -27,6 +27,10 @@ module_name_repetitions = "allow"
 missing_errors_doc = "warn"
 
 [workspace.dependencies]
+# WHY workspace-path dep for perima-media: release-plz + other crates
+# (perima CLI) need it reachable via `workspace = true` so bumps
+# propagate correctly via the workspace graph.
+perima-media = { path = "crates/media", version = "0.3.2" }
 anyhow       = "1"
 thiserror    = "2"
 serde        = { version = "1", features = ["derive"] }

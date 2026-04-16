@@ -8,9 +8,13 @@ mod signals;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use perima_db::{SqliteFileRepository, SqliteVolumeRepository, open_and_migrate};
+use perima_core::MetadataRepository;
+use perima_db::{
+    SqliteFileRepository, SqliteMetadataRepository, SqliteVolumeRepository, open_and_migrate,
+};
 use perima_fs::WalkdirScanner;
 use perima_hash::Blake3Service;
 
@@ -51,6 +55,10 @@ enum Command {
         /// Suppress per-file stdout lines.
         #[arg(long)]
         quiet: bool,
+
+        /// Skip the bounded post-walk drain of the metadata queue.
+        #[arg(long)]
+        no_wait_metadata: bool,
     },
 
     /// List indexed files.
@@ -66,6 +74,10 @@ enum Command {
         /// Output as JSON.
         #[arg(long)]
         json: bool,
+
+        /// Include media metadata columns.
+        #[arg(long)]
+        with_metadata: bool,
     },
 
     /// List known volumes and their mount paths on this machine.
@@ -75,6 +87,16 @@ enum Command {
     Watch {
         /// Directory to watch.
         root: PathBuf,
+    },
+
+    /// Re-extract and print media metadata for a specific file.
+    Metadata {
+        /// Path to the file whose metadata should be re-extracted.
+        path: PathBuf,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -117,25 +139,36 @@ async fn main() -> ExitCode {
             root,
             dry_run,
             quiet,
-        } => dispatch_scan(root, dry_run, quiet, &config, &cancel),
+            no_wait_metadata,
+        } => dispatch_scan(root, dry_run, quiet, no_wait_metadata, &config, &cancel).await,
 
         Command::Ls {
             volume,
             limit,
             json,
-        } => dispatch_ls(volume, limit, json, &config),
+            with_metadata,
+        } => dispatch_ls(volume, limit, json, with_metadata, &config),
 
         Command::Volumes => dispatch_volumes(&config),
 
         Command::Watch { root } => dispatch_watch(root, &config, &cancel).await,
+
+        Command::Metadata { path, json } => dispatch_metadata(path, json, &config).await,
     }
 }
 
 /// Run the `scan` subcommand.
-fn dispatch_scan(
+//
+// WHY `#[allow(clippy::future_not_send)]`: propagates from
+// `scan::run` (`on_persist` captures a non-Sync closure). This task
+// is awaited directly from `#[tokio::main]` — never sent between
+// threads — so the non-Send future is acceptable here.
+#[allow(clippy::future_not_send)]
+async fn dispatch_scan(
     root: PathBuf,
     dry_run: bool,
     quiet: bool,
+    no_wait_metadata: bool,
     config: &Config,
     cancel: &Cancellation,
 ) -> ExitCode {
@@ -143,6 +176,7 @@ fn dispatch_scan(
         root,
         dry_run,
         quiet,
+        no_wait_metadata,
     };
     let scanner = WalkdirScanner::new();
     let hasher = Blake3Service::new();
@@ -153,21 +187,20 @@ fn dispatch_scan(
         // monomorphisation. SqliteFileRepository / SqliteVolumeRepository are
         // the production impls; using them here is a zero-cost hint with no
         // allocation because the None branches never call them.
-        map_scan_result(cmd::scan::run::<
-            _,
-            _,
-            SqliteFileRepository,
-            SqliteVolumeRepository,
-        >(
-            &scanner,
-            &hasher,
-            None,
-            None,
-            None,
-            config.device_id,
-            cancel,
-            &args,
-        ))
+        map_scan_result(
+            cmd::scan::run::<_, _, SqliteFileRepository, SqliteVolumeRepository>(
+                &scanner,
+                &hasher,
+                None,
+                None,
+                None,
+                None,
+                config.device_id,
+                cancel,
+                &args,
+            )
+            .await,
+        )
     } else {
         let db_path = config.data_dir.join("perima.db");
         // WHY two separate open_and_migrate calls: SqliteFileRepository and
@@ -221,16 +254,35 @@ fn dispatch_scan(
             }
         };
 
-        map_scan_result(cmd::scan::run(
-            &scanner,
-            &hasher,
-            Some(&mut file_repo),
-            Some(&mut vol_repo),
-            Some(&on_persist),
-            device,
-            cancel,
-            &args,
-        ))
+        // WHY separate metadata connection: SqliteMetadataRepository
+        // owns a Mutex<Connection>. Under WAL mode another open is
+        // instant; sharing across repos would require Arc<Mutex<>>
+        // layering none of the existing constructors accept. The same
+        // rationale applies to file_repo/vol_repo above.
+        let metadata_conn = match open_and_migrate(&db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("perima: database (metadata repo): {e}");
+                return ExitCode::from(1);
+            }
+        };
+        let metadata_repo: Arc<dyn MetadataRepository> =
+            Arc::new(SqliteMetadataRepository::new(metadata_conn));
+
+        map_scan_result(
+            cmd::scan::run(
+                &scanner,
+                &hasher,
+                Some(&mut file_repo),
+                Some(&mut vol_repo),
+                Some(metadata_repo),
+                Some(&on_persist),
+                device,
+                cancel,
+                &args,
+            )
+            .await,
+        )
     }
 }
 
@@ -253,7 +305,13 @@ fn map_scan_result(
 }
 
 /// Run the `ls` subcommand.
-fn dispatch_ls(volume: Option<String>, limit: usize, json: bool, config: &Config) -> ExitCode {
+fn dispatch_ls(
+    volume: Option<String>,
+    limit: usize,
+    json: bool,
+    with_metadata: bool,
+    config: &Config,
+) -> ExitCode {
     let volume_id = volume
         .map(|v| {
             uuid::Uuid::parse_str(&v)
@@ -269,20 +327,29 @@ fn dispatch_ls(volume: Option<String>, limit: usize, json: bool, config: &Config
         }
     };
     let db_path = config.data_dir.join("perima.db");
-    let conn = match open_and_migrate(&db_path) {
+    let file_conn = match open_and_migrate(&db_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database: {e}");
             return ExitCode::from(1);
         }
     };
-    let repo = SqliteFileRepository::new(conn);
+    let meta_conn = match open_and_migrate(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("perima: database (metadata): {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let repo = SqliteFileRepository::new(file_conn);
+    let metadata_repo = SqliteMetadataRepository::new(meta_conn);
     let ls_args = cmd::ls::LsArgs {
         volume: volume_id,
         limit,
         json,
+        with_metadata,
     };
-    match cmd::ls::run(&repo, &ls_args) {
+    match cmd::ls::run(&repo, &metadata_repo, &ls_args) {
         Ok(()) => ExitCode::from(0),
         Err(e) => {
             eprintln!("perima: {e}");
@@ -294,6 +361,22 @@ fn dispatch_ls(volume: Option<String>, limit: usize, json: bool, config: &Config
 /// Run the `watch` subcommand.
 async fn dispatch_watch(root: PathBuf, config: &Config, cancel: &Cancellation) -> ExitCode {
     match cmd::watch::run(&config.data_dir, config.device_id, &root, cancel).await {
+        Ok(()) => ExitCode::from(0),
+        Err(perima_core::CoreError::InvalidPath(msg)) => {
+            eprintln!("perima: {msg}");
+            ExitCode::from(2)
+        }
+        Err(e) => {
+            eprintln!("perima: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Run the `metadata` subcommand.
+async fn dispatch_metadata(path: PathBuf, json: bool, config: &Config) -> ExitCode {
+    let args = cmd::metadata::MetadataArgs { path, json };
+    match cmd::metadata::run(&config.data_dir, config.device_id, &args).await {
         Ok(()) => ExitCode::from(0),
         Err(perima_core::CoreError::InvalidPath(msg)) => {
             eprintln!("perima: {msg}");

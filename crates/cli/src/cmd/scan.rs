@@ -2,14 +2,27 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use perima_core::{
     BlakeHash, CoreError, DeviceId, DiscoveredFile, FileRepository, HashService, HashedFile,
-    MediaPath, Scanner, UpsertOutcome, VolumeId, VolumeRepository,
+    MediaPath, MetadataExtractor, MetadataRepository, Scanner, UpsertOutcome, VolumeId,
+    VolumeRepository,
 };
+use perima_media::{CompositeExtractor, ImageExtractor, MetadataQueue, VideoExtractor};
 use rayon::prelude::*;
 
 use crate::signals::Cancellation;
+
+/// Maximum time `scan` waits for the metadata worker to drain after the
+/// walk loop completes.
+///
+/// WHY 30 s: long enough for the typical <10-file corpus the integration
+/// tests use to complete comfortably, short enough that Ctrl-C remains
+/// responsive (the drain also polls cancel). `--no-wait-metadata`
+/// bypasses this when the user wants fast scan exit.
+pub const METADATA_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Arguments for the scan command.
 #[derive(Debug, Clone)]
@@ -20,6 +33,14 @@ pub struct ScanArgs {
     pub dry_run: bool,
     /// Suppress per-file stdout lines; print summary only.
     pub quiet: bool,
+    /// Skip the bounded post-walk drain of the metadata queue.
+    ///
+    /// WHY opt-in: by default `scan` waits up to
+    /// [`METADATA_DRAIN_TIMEOUT`] for the in-flight metadata
+    /// extraction to persist. For very large scans where the user
+    /// would rather the CLI return immediately and let the queue die
+    /// with the process, `--no-wait-metadata` bypasses the drain.
+    pub no_wait_metadata: bool,
 }
 
 /// Scan statistics.
@@ -67,16 +88,40 @@ pub type OnPersistFn<'a> = Option<&'a dyn Fn(&MediaPath, VolumeId, DeviceId)>;
 /// When `dry_run` is true, pass `None` for all three optional arguments —
 /// no DB writes or volume detection occur.
 ///
+/// If `metadata_repo` is `Some`, successful upserts (`Inserted` or `Updated`)
+/// enqueue `(hash, absolute_path)` into a freshly spawned [`MetadataQueue`].
+/// At exit the queue is drained up to [`METADATA_DRAIN_TIMEOUT`] unless
+/// `args.no_wait_metadata` is set. Pass `None` (together with `None` for the
+/// other repos) in dry-run mode.
+///
 /// # Errors
 /// Returns `CoreError::InvalidPath` if `root` is not a directory;
 /// propagates `CoreError` from hashing, walking, and volume detection.
+//
+// WHY `#[allow(clippy::future_not_send)]`: `on_persist` is typed as
+// `&dyn Fn(..)` without `Sync`, so the returned future is not `Send`.
+// In practice `scan::run` is only ever awaited from the CLI's main
+// task — it is never moved across worker threads — so the Send bound
+// is an abstract concern, not a real one. Tightening `on_persist` to
+// `Sync` would break the existing callers that close over a
+// `SqliteFileRepository` (Mutex<Connection> is Sync, but the closure
+// itself captures an immutable borrow that doesn't add work).
+//
+// WHY `#[allow(clippy::cognitive_complexity)]`: the persist-loop body
+// grew a single additional branch for `enqueue` per the plan. Splitting
+// it into a helper would require threading half a dozen borrowed
+// locals through a signature — worse readability for a lint that
+// flags a one-extra-branch nested match.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
-pub fn run<S, H, FR, VR>(
+#[allow(clippy::future_not_send)]
+#[allow(clippy::cognitive_complexity)]
+pub async fn run<S, H, FR, VR>(
     scanner: &S,
     hasher: &H,
     mut file_repo: Option<&mut FR>,
     mut volume_repo: Option<&mut VR>,
+    metadata_repo: Option<Arc<dyn MetadataRepository>>,
     on_persist: OnPersistFn<'_>,
     device: DeviceId,
     cancel: &Cancellation,
@@ -98,6 +143,20 @@ where
     let canonical_root = canonicalize_for_walk(&args.root)?;
     let stdout = std::io::stdout();
     let mut stats = ScanStats::default();
+
+    // Spawn the metadata queue up front (non-dry-run only). WHY at the
+    // top: the worker should be alive before the first `upsert_file`
+    // so the very first enqueue never races the `tokio::spawn`.
+    //
+    // WHY `Option<MetadataQueue>`: dry-run passes `None` for
+    // `metadata_repo` and this stays `None` — no worker, no drain.
+    let mut queue: Option<MetadataQueue> = metadata_repo.as_ref().map(|repo| {
+        let extractor: Arc<dyn MetadataExtractor> = Arc::new(CompositeExtractor::new(vec![
+            Arc::new(ImageExtractor::new()) as Arc<dyn MetadataExtractor>,
+            Arc::new(VideoExtractor::new()) as Arc<dyn MetadataExtractor>,
+        ]));
+        MetadataQueue::spawn(extractor, Arc::clone(repo), device, cancel.token())
+    });
 
     // Resolve volume once before the scan loop (no-op in dry-run).
     // WHY: detect+find_or_create happen here, outside the per-file loop, so
@@ -183,6 +242,31 @@ where
                             if let Some(cb) = on_persist {
                                 cb(&d.relative_path, volume, device);
                             }
+                            // WHY enqueue only on Inserted|Updated (not
+                            // Unchanged): Unchanged means the scanner has
+                            // already persisted this hash with identical
+                            // metadata on a prior scan — re-extracting
+                            // would do identical work. If the user wants
+                            // a forced re-extract they can call
+                            // `perima metadata <path>`.
+                            if matches!(outcome, UpsertOutcome::Inserted | UpsertOutcome::Updated) {
+                                if let Some(q) = queue.as_ref() {
+                                    if let Err(e) =
+                                        q.enqueue(h, d.absolute_path.clone(), &cancel.token())
+                                    {
+                                        // WHY log + continue: the plan is
+                                        // explicit that a metadata-queue
+                                        // failure must not abort the scan.
+                                        // The user can always re-run or
+                                        // `perima metadata` for stragglers.
+                                        tracing::warn!(
+                                            error = %e,
+                                            path = %d.absolute_path.display(),
+                                            "metadata enqueue failed; continuing scan",
+                                        );
+                                    }
+                                }
+                            }
                             manifest_files.push(HashedFile {
                                 discovered: d,
                                 hash: h,
@@ -216,6 +300,43 @@ where
     // Write manifest after the persist loop (non-dry-run only).
     if let Some((vol_id, _, ref mount_point)) = volume_info {
         perima_db::manifest::write_manifest(mount_point, vol_id, &manifest_files)?;
+    }
+
+    // Bounded drain of the metadata queue.
+    //
+    // WHY drop-then-await: dropping the `MetadataQueue` closes the
+    // `Sender` half of the channel; the worker's `rx.recv()` returns
+    // `None` once the buffer is empty and the worker exits cleanly.
+    // Awaiting the `JoinHandle` with a timeout bounds the wait so a
+    // stuck extractor cannot hang the CLI.
+    //
+    // WHY `--no-wait-metadata` bypasses by dropping the queue without
+    // awaiting: users who scripted `perima scan` around v0.3's
+    // fire-and-forget exit semantics can opt out; stragglers fall off
+    // the tokio runtime when `main` returns.
+    if let Some(mut q) = queue.take() {
+        if args.no_wait_metadata {
+            drop(q);
+        } else {
+            let worker = q.take_worker();
+            drop(q);
+            if let Some(handle) = worker {
+                match tokio::time::timeout(METADATA_DRAIN_TIMEOUT, handle).await {
+                    Ok(Ok(())) => {
+                        tracing::debug!("metadata queue drained cleanly");
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "metadata worker join failed");
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "metadata queue did not drain within {METADATA_DRAIN_TIMEOUT:?}; \
+                             re-run `perima scan` or `perima metadata <path>` for stragglers",
+                        );
+                    }
+                }
+            }
+        }
     }
 
     let interrupted = cancel.cancelled();

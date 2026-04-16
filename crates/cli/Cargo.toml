@@ -7,10 +7,15 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-perima-core = { path = "../core" }
-perima-hash = { path = "../hash" }
-perima-fs   = { path = "../fs" }
-perima-db   = { path = "../db" }
+perima-core  = { path = "../core" }
+perima-hash  = { path = "../hash" }
+perima-fs    = { path = "../fs" }
+perima-db    = { path = "../db" }
+# WHY `workspace = true` (not path-local): release-plz reads the workspace
+# dep graph to decide which crates need version bumps. A `feat(media):`
+# commit must propagate to `perima` so the CLI rev matches the media rev
+# it links against.
+perima-media = { workspace = true }
 chrono.workspace    = true
 serde_json.workspace = true
 serde.workspace      = true
@@ -32,6 +37,10 @@ tempfile.workspace   = true
 insta.workspace      = true
 rusqlite.workspace   = true
 serde_json.workspace = true
+# WHY image + blake3 in dev-deps: `scan_with_metadata_test.rs`
+# synthesises PNG/JPEG fixtures at runtime (no binary blobs in git),
+# matching the pattern already used in `crates/media/tests`.
+image.workspace      = true
 
 [target.'cfg(unix)'.dev-dependencies]
 # WHY: nix provides POSIX signal utilities (kill/SIGTERM) without unsafe libc.

@@ -3,5 +3,22 @@ set -euo pipefail
 # Git hooks run in non-interactive shells that may not source ~/.bashrc,
 # so cargo-installed binaries may not be on PATH. Prepend the standard
 # location explicitly to make this hook portable across shells / git GUIs.
-export PATH="$HOME/.cargo/bin:$PATH"
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+
+# WHY: `just ci` links against a locally-built Tauri toolchain
+# (webkit2gtk, libsoup, etc.) that lives under /tmp/tauri-libs +
+# /tmp/tauri-pc on this developer VM. Without these env vars the
+# `perima-desktop` crate's `tauri-build` step fails to locate the
+# system libraries during `cargo clippy` / `cargo test`, and the
+# hook errors out before any of the user's actual changes are
+# exercised. Exporting them here mirrors the manual `export` block
+# every task plan specifies, so the hook succeeds in every shell.
+#
+# Harmless on machines that do not have these paths — cargo only
+# consults `RUSTFLAGS` / `LIBRARY_PATH` when it actually needs the
+# directories to exist.
+export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-/tmp/tauri-pc}"
+export LIBRARY_PATH="${LIBRARY_PATH:-/tmp/tauri-libs:/usr/lib/x86_64-linux-gnu}"
+export RUSTFLAGS="${RUSTFLAGS:--L/tmp/tauri-libs -L/usr/lib/x86_64-linux-gnu}"
+
 just ci
