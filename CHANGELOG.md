@@ -12,6 +12,50 @@ roadmap milestone triggers `1.0.0`.
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-04-16
+
+Single-blocker follow-up to the v0.4.2 hotfix. No new features; one
+correctness fix and one CHANGELOG link repair.
+
+### Fixed
+
+- **Tauri asset-protocol scope now matches the runtime data dir.**
+  v0.4.2 narrowed `assetProtocol.scope` to
+  `$APPDATA/perima/thumbnails/**` but the runtime still resolved
+  `data_dir` via `directories::ProjectDirs` which produces a
+  different subtree than Tauri's `$APPDATA` (`directories` uses
+  `~/.local/share/perima` on Linux; Tauri uses
+  `~/.local/share/dev.perima.desktop`, based on the bundle
+  identifier). Every `convertFileSrc(thumbnail_path)` returned 404 —
+  the grid view showed broken placeholder tiles for every image on
+  every platform. Fix: `perima_desktop::run` now resolves `data_dir`
+  via `app.path().app_data_dir()` inside `.setup()` (new
+  `Config::resolve_with_app_data_dir` entry point), with `data_dir`
+  set to `<app_data_dir>/perima` so the existing scope literal
+  matches. New regression test pins
+  `thumb_root.starts_with(app_data_dir)` AND
+  `thumb_root.ends_with("perima/thumbnails")`.
+- **CHANGELOG `[Unreleased]` compare link** was pointing at
+  `v0.4.1...HEAD` after the v0.4.2 release; corrected to
+  `v0.4.3...HEAD`.
+
+### Notes
+
+- Runtime verification of the scope fix is deferred to user testing —
+  no display available on the dev / CI machine. The regression test
+  pins the path invariant but cannot exercise `convertFileSrc` end-
+  to-end without a WebView.
+- Follow-up for v0.4.0 / v0.4.1 upgraders: the V004 backfill (v0.4.2)
+  flipped pre-existing `thumbnail_status = NULL` rows to `'pending'`,
+  but rescanning unchanged files returns `UpsertOutcome::Unchanged`
+  and therefore never re-enqueues them — those rows stay `pending`
+  forever. Tracked as
+  [utof/perima#19](https://github.com/utof/perima/issues/19);
+  mitigation (retry command OR enqueue-on-Unchanged-AND-pending) will
+  land in a later patch.
+
+[0.4.3]: https://github.com/utof/perima/releases/tag/v0.4.3
+
 ## [0.4.2] — 2026-04-16
 
 Phase 4 hotfix pass. Resolves the 1 CRIT + 4 HIGH findings surfaced by
@@ -282,7 +326,7 @@ tuning filed as follow-up (see Project section below).
   `cli`, `desktop`, `ci`, `deps`, `docs`, `release`) rather than development
   milestones.
 
-[Unreleased]: https://github.com/utof/perima/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/utof/perima/compare/v0.4.3...HEAD
 [0.4.0]: https://github.com/utof/perima/releases/tag/v0.4.0
 [0.3.2]: https://github.com/utof/perima/releases/tag/v0.3.2
 [0.3.1]: https://github.com/utof/perima/releases/tag/v0.3.1
