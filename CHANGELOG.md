@@ -12,6 +12,67 @@ roadmap milestone triggers `1.0.0`.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-04-16
+
+First MINOR release under release-plz infrastructure (utof/perima#10).
+**Note:** release-plz did not auto-open the release PR despite 5 feat
+commits on main. Falling back to manual tag for this release; config
+tuning filed as follow-up (see Project section below).
+
+### Added
+
+- **Media metadata extraction + background queue** (utof/perima phase 4).
+  - `perima-core`: `MediaMetadata` value type + `MetadataExtractor` trait
+    (MIME-dispatched, not first-non-empty) + `MetadataRepository` port
+    using `&self` with interior mutability.
+  - `perima-db`: V002 migration adds `file_metadata` table (content-
+    addressed by `blake3_hash` PK, matching `files`; CRDT-compliant;
+    partial index on `captured_at WHERE deleted_at IS NULL`).
+  - `perima-db::SqliteMetadataRepository`: `Mutex<Connection>` +
+    `BEGIN IMMEDIATE` upsert mirroring v0.3.1 hardened pattern;
+    `list_with_metadata` uses LEFT JOIN with `fm.updated_at` as the
+    NULL sentinel.
+  - **New crate `perima-media`**: `ImageExtractor` (image + kamadak-exif)
+    for JPEG/PNG/WebP/GIF; `VideoExtractor` (mp4parse) for MP4/MOV;
+    `CompositeExtractor` dispatches by MIME; `MetadataQueue` with
+    sync `enqueue` via `try_send` + 50ms poll loop watching
+    `CancellationToken`.
+  - CLI: `perima metadata <path>` subcommand extracts metadata for a
+    single file. `perima ls --with-metadata` adds captured_at +
+    dimensions + camera_model columns.
+  - Scan integration: enqueues freshly hashed files after
+    `Inserted`/`Updated`. Bounded 30s drain on scan exit; new
+    `--no-wait-metadata` flag bypasses drain.
+  - Desktop: new `list_files_with_metadata` Tauri command with
+    `FileWithMetadataPayload` (specta-typed). `AppState` now holds
+    `Arc<SqliteMetadataRepository>`. TS types + API wrapper added
+    (grid view lands in v0.4.1).
+
+- **Runtime-generated test fixtures** for `perima-media`: minimal
+  JPEG/MP4 assembled in-test via `image` + `mp4` + kamadak-exif's
+  experimental writer. No binary blobs committed to git.
+
+### Changed
+
+- CLI `scan::run` is now `async` and carries a `MetadataQueue`. Scan
+  waits up to 30s for the queue worker to drain after walking
+  completes, unless `--no-wait-metadata` is passed.
+- `scripts/pre-commit` now exports Tauri build env vars
+  (PKG_CONFIG_PATH, LIBRARY_PATH, RUSTFLAGS) so `just ci` succeeds on
+  this dev machine without shell-specific wrappers.
+
+### Project
+
+- release-plz wired (chore-only runs verified) but did not auto-open
+  PRs for this release — the per-crate release-aggregation config
+  needs more tuning (all feats landed in dep crates; only `perima`
+  was `release = true`; dep graph not followed). Filed as
+  follow-up: reconfigure release-plz to aggregate feat commits from
+  `perima-core`/`-db`/`-fs`/`-media` into `perima`'s release PR for
+  v0.4.1+.
+- First manually tagged release since release-plz was wired. Future
+  minor/patch releases will automate from this point.
+
 ## [0.3.2] — 2026-04-16
 
 ### Fixed
@@ -117,7 +178,8 @@ roadmap milestone triggers `1.0.0`.
   `cli`, `desktop`, `ci`, `deps`, `docs`, `release`) rather than development
   milestones.
 
-[Unreleased]: https://github.com/utof/perima/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/utof/perima/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/utof/perima/releases/tag/v0.4.0
 [0.3.2]: https://github.com/utof/perima/releases/tag/v0.3.2
 [0.3.1]: https://github.com/utof/perima/releases/tag/v0.3.1
 [0.3.0]: https://github.com/utof/perima/releases/tag/v0.3.0
