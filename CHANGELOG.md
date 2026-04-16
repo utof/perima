@@ -12,6 +12,30 @@ roadmap milestone triggers `1.0.0`.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-04-16
+
+First full-text search release. Enables `perima search <query>` backed by
+an `SQLite FTS5` index kept in sync via SQL triggers.
+
+### Added
+
+- **`SearchHit` type + `SearchRepository` trait** (`perima-core`): value
+  type carrying `blake3_hash`, `volume_id`, `relative_path`, and BM25
+  `rank`; port trait with `search(query, limit)` and `rebuild()`.
+- **V006 migration** (`perima-db`): `search_index` FTS5 virtual table
+  (contentless, `unicode61` tokenizer) + `search_rowid_map` side table
+  (rowid ↔ `blake3_hash` + `volume_id` + `relative_path`). Four AFTER
+  INSERT / AFTER UPDATE triggers on `file_metadata` and `file_tags` keep
+  the index current without a background job.
+- **`SqliteSearchRepository`** (`perima-db`): BM25-ranked `MATCH` query
+  via the FTS5 `rank` auxiliary; `rebuild()` does an atomic
+  `BEGIN IMMEDIATE` wipe-and-reindex from the live DB state.
+- **`perima search <query>`** (`perima-cli`): plain ranked-table output
+  (HASH | PATH | RANK) or `--json` (serde array). `--limit` caps results
+  (default 50). `--rebuild` refreshes the index and exits. Four
+  integration tests cover rebuild, name-token lookup, JSON shape, and
+  empty-result output.
+
 ## [0.5.1] — 2026-04-16
 
 Desktop tag UI layer on top of the v0.5.0 tag backend.
@@ -385,7 +409,8 @@ tuning filed as follow-up (see Project section below).
   `cli`, `desktop`, `ci`, `deps`, `docs`, `release`) rather than development
   milestones.
 
-[Unreleased]: https://github.com/utof/perima/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/utof/perima/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/utof/perima/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/utof/perima/releases/tag/v0.5.1
 [0.4.0]: https://github.com/utof/perima/releases/tag/v0.4.0
 [0.3.2]: https://github.com/utof/perima/releases/tag/v0.3.2
