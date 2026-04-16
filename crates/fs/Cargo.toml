@@ -13,6 +13,7 @@ walkdir.workspace    = true
 path-slash.workspace = true
 dunce.workspace      = true
 tracing.workspace    = true
+sysinfo.workspace    = true
 
 [dev-dependencies]
 tempfile.workspace = true

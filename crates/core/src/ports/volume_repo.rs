@@ -28,10 +28,10 @@ pub trait VolumeRepository: Send + Sync {
         mount: &Path,
     ) -> Result<(), CoreError>;
 
-    /// Enumerate all known volumes with their current mounts on this
-    /// machine.
+    /// Enumerate all known volumes with their current mounts for
+    /// the given `machine`.
     ///
     /// # Errors
     /// `CoreError::Internal` on adapter failure.
-    fn list(&self) -> Result<Vec<VolumeRecord>, CoreError>;
+    fn list(&self, machine: DeviceId) -> Result<Vec<VolumeRecord>, CoreError>;
 }
