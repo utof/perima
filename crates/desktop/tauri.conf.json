@@ -1,0 +1,23 @@
+{
+  "productName": "perima",
+  "identifier": "dev.perima.desktop",
+  "build": {
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../../apps/desktop/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "perima",
+        "width": 1024,
+        "height": 768
+      }
+    ],
+    "security": {
+      "capabilities": ["default"]
+    }
+  },
+  "plugins": {
+    "dialog": {}
+  }
+}

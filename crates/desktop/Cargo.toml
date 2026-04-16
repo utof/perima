@@ -1,0 +1,42 @@
+[package]
+name = "perima-desktop"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# WHY: staticlib + cdylib + rlib — Tauri's build system needs cdylib for the
+# native binary entrypoint; rlib allows `cargo test` integration tests to link
+# against the library; staticlib satisfies mobile/cross-compile scenarios.
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+name = "perima_desktop"
+
+[dependencies]
+perima-core = { path = "../core" }
+perima-db   = { path = "../db" }
+perima-fs   = { path = "../fs" }
+perima-hash = { path = "../hash" }
+tauri.workspace             = true
+tauri-specta.workspace      = true
+specta.workspace            = true
+specta-typescript.workspace = true
+tauri-plugin-dialog.workspace = true
+serde.workspace             = true
+serde_json.workspace        = true
+tracing.workspace           = true
+uuid.workspace              = true
+chrono.workspace            = true
+rayon.workspace             = true
+dunce.workspace             = true
+directories.workspace       = true
+
+[build-dependencies]
+tauri-build.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
