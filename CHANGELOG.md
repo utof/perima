@@ -12,6 +12,67 @@ roadmap milestone triggers `1.0.0`.
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-04-16
+
+Phase 4 hotfix pass. Resolves the 1 CRIT + 4 HIGH findings surfaced by
+the `codex:rescue` adversarial review of v0.4.1 (utof/perima#15). No
+new user-facing features; all changes are correctness / security
+fixes. Closes utof/perima#15.
+
+### Security
+
+- **Tauri asset-protocol scope narrowed** (CRIT #15). Dropped the
+  `**` wildcard fallback from `assetProtocol.scope`; the wildcard
+  effectively granted the WebView read access to any file on disk
+  via `convertFileSrc`. Scope is now explicitly
+  `$APPDATA/perima/thumbnails/**` + `$APPLOCALDATA/perima/thumbnails/**`
+  — OS-portable via Tauri's built-in path variables.
+
+### Fixed
+
+- **`upsert_metadata` no longer clobbers thumbnail columns** (HIGH #4).
+  Previously the INSERT + UPDATE statements bound `thumbnail_path` +
+  `thumbnail_status` from the `MediaMetadata` struct, which every
+  extractor supplies as `None`. A subsequent `Updated` upsert on an
+  already-thumbnailed row therefore cleared the state back to NULL.
+  The queue worker's `update_thumbnail` is now the sole writer;
+  INSERT seeds a literal `'pending'` default; UPDATE never touches
+  these columns. Regression test pins the invariant.
+- **Video files no longer routed through the image thumbnailer**
+  (HIGH #11b). Previously every `video/*` MIME got
+  `thumbnail_status='failed'` because `ThumbnailGenerator` decodes
+  via `image::ImageReader` and cannot handle MP4/MOV. Video paths
+  now short-circuit to `thumbnail_status='skipped'` (new stable
+  status distinct from `failed`); the UI placeholder renders the
+  unknown-status glyph. Video frame extraction via ffmpeg is
+  tracked as a future enhancement.
+- **Desktop scan command wires the metadata queue + thumbnailer**
+  (HIGH #11a). Previously the Tauri `scan` command only touched
+  `file_repo` + `volume_repo` — users scanning via the UI got
+  indexed files but no metadata and no thumbnails. Now mirrors the
+  CLI's scan wiring: `MetadataQueue` + `ThumbnailGenerator` rooted
+  at `data_dir` are spawned up front; each successful
+  `Inserted`/`Updated` upsert enqueues; bounded 30 s drain at exit.
+  New integration test pins the end-to-end (2 PNG files → 2
+  `file_metadata` rows → 2 WebP thumbnails on disk).
+- **V004 backfills NULL `thumbnail_status` to `'pending'`** (HIGH
+  #3). V003 added the column as nullable without a default, and no
+  writer produced `'pending'` — rows from v0.4.0 (pre-thumbnails)
+  and `--no-thumbnails` scans stuck at NULL forever, invisible to
+  `idx_file_metadata_thumbnail_pending`. V004 one-shot backfills
+  existing rows; `upsert_metadata`'s INSERT now seeds `'pending'`
+  as a literal default (UPDATE path still untouched per the task-2
+  decoupling).
+
+### Notes
+
+- Runtime verification of the Tauri scope change is deferred to user
+  testing — no display available in the dev / CI machine.
+- Migration V004 is additive and SQL-only. Existing v0.4.0 / v0.4.1
+  databases will apply it on first v0.4.2 launch.
+
+[0.4.2]: https://github.com/utof/perima/releases/tag/v0.4.2
+
 ## [0.4.1] — 2026-04-16
 
 ### Added

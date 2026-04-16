@@ -3127,7 +3127,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "perima"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3157,7 +3157,7 @@ dependencies = [
 
 [[package]]
 name = "perima-core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blake3",
  "proptest",
@@ -3169,7 +3169,7 @@ dependencies = [
 
 [[package]]
 name = "perima-db"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blake3",
  "chrono",
@@ -3184,7 +3184,7 @@ dependencies = [
 
 [[package]]
 name = "perima-desktop"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "chrono",
  "directories",
@@ -3213,7 +3213,7 @@ dependencies = [
 
 [[package]]
 name = "perima-fs"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "dunce",
  "file-id",
@@ -3233,7 +3233,7 @@ dependencies = [
 
 [[package]]
 name = "perima-hash"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blake3",
  "perima-core",
@@ -3245,7 +3245,7 @@ dependencies = [
 
 [[package]]
 name = "perima-media"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blake3",
  "image",
