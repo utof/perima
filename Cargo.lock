@@ -867,6 +867,8 @@ dependencies = [
  "perima-fs",
  "perima-hash",
  "rayon",
+ "serde",
+ "serde_json",
  "tempfile",
  "tracing",
  "tracing-subscriber",

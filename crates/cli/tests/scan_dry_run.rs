@@ -71,7 +71,7 @@ fn dry_run_prints_hashes_and_summary() {
 
     let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
     assert!(
-        stderr.contains("scanned 3 files (dry-run; DB not yet wired)"),
+        stderr.contains("scanned 3 files (dry-run; DB not wired)"),
         "stderr missing summary; got: {stderr}"
     );
 }
@@ -100,26 +100,4 @@ fn dry_run_is_deterministic_across_runs() {
     let a = run();
     let b = run();
     assert_eq!(a, b);
-}
-
-#[test]
-fn real_scan_refused_in_phase_1a() {
-    let td = tempfile::tempdir().expect("tempdir");
-    mk_fixture(td.path());
-    let tmp_env = tempfile::tempdir().expect("env dir");
-
-    let output = Command::new(bin())
-        .arg("scan")
-        .arg(td.path())
-        .env("PERIMA_CONFIG_DIR", tmp_env.path())
-        .env("PERIMA_DATA_DIR", tmp_env.path())
-        .output()
-        .expect("run perima");
-
-    assert_eq!(output.status.code(), Some(2), "expected exit 2");
-    let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
-    assert!(
-        stderr.contains("phase 1a ships only 'scan --dry-run'"),
-        "stderr missing guard message; got: {stderr}"
-    );
 }

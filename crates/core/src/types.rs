@@ -17,10 +17,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::CoreError;
 
-/// BLAKE3-256 content hash (32 bytes). Stored as lowercase hex at
-/// the persistence boundary.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+/// BLAKE3-256 content hash (32 bytes).
+///
+/// Stored as lowercase hex at the persistence boundary. Custom serde
+/// impl serializes as a 64-char hex string (not a raw byte array)
+/// so JSON consumers see `"a1b2c3..."` instead of `[161, 178, ...]`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct BlakeHash([u8; 32]);
+
+impl Serialize for BlakeHash {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_hex())
+    }
+}
+
+impl<'de> Deserialize<'de> for BlakeHash {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Self::parse_hex(&s).map_err(serde::de::Error::custom)
+    }
+}
 
 impl BlakeHash {
     /// Construct from raw bytes.
