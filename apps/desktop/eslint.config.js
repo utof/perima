@@ -32,6 +32,13 @@ export default [
         // WHY: TextEncoder is a WHATWG Encoding API global available in
         // Tauri's WebView; used by TagChip for procedural color hashing.
         TextEncoder: "readonly",
+        // WHY: DOM type globals needed by component code; TypeScript
+        // knows these from lib.dom.d.ts but ESLint's no-undef rule
+        // requires explicit declaration here.
+        HTMLDivElement: "readonly",
+        HTMLInputElement: "readonly",
+        Node: "readonly",
+        PointerEvent: "readonly",
       },
     },
     rules: {

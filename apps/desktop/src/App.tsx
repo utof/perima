@@ -4,10 +4,11 @@ import type { UnsubscribeFn } from "./api";
 import FileGrid from "./components/FileGrid";
 import FileTable from "./components/FileTable";
 import ScanButton from "./components/ScanButton";
+import SearchBar from "./components/SearchBar";
 import StatusBar from "./components/StatusBar";
 import TagSidebar from "./components/TagSidebar";
 import WatcherBanner from "./components/WatcherBanner";
-import type { FileWithTags, ScanResult, Tag } from "./types";
+import type { FileWithTags, ScanResult, SearchHit, Tag } from "./types";
 
 /**
  * Which rendering mode the main file list uses.
@@ -46,6 +47,9 @@ export default function App() {
   // used to and the grid gets its thumbnail fields "for free" — no need
   // to double-fetch on toggle.
   const [viewMode, setViewMode] = useState<ViewMode>("table");
+  // WHY null (not ""): null means "no active search hit"; the empty string
+  // is not a valid hash and would silently hide the whole list.
+  const [searchHash, setSearchHash] = useState<string | null>(null);
 
   useEffect(() => {
     // WHY: Populate the list on mount so existing indexed files are visible
@@ -162,18 +166,37 @@ export default function App() {
     }
   }
 
-  // Filter the visible file list by the selected tag (client-side).
-  // WHY single-select: Set<string> multi-select deferred until post-v1.
-  const visibleFiles =
-    selectedTagId === null
+  // Filter visible files by active search hit OR selected tag.
+  // WHY search takes precedence over tag filter: the user explicitly picked a
+  // result from the search dropdown, so we narrow to that single hash; the tag
+  // sidebar selection is a secondary axis that the search overrides.
+  const visibleFiles = searchHash !== null
+    ? files.filter((f) => f.hash === searchHash)
+    : selectedTagId === null
       ? files
       : files.filter((f) => f.tags.some((t) => t.id === selectedTagId));
+
+  function handleSearchResult(hit: SearchHit) {
+    setSearchHash(hit.blake3_hash);
+    setSelectedTagId(null);
+  }
 
   return (
     <div className="bg-gray-900 text-gray-100 min-h-screen flex flex-col">
       <header className="flex items-center justify-between px-6 py-4 bg-gray-800 border-b border-gray-700">
         <h1 className="text-xl font-bold tracking-wide">perima</h1>
         <div className="flex items-center gap-3">
+          <SearchBar onResultClick={handleSearchResult} />
+          {searchHash !== null && (
+            <button
+              type="button"
+              onClick={() => setSearchHash(null)}
+              className="text-xs text-blue-400 hover:text-blue-200"
+              aria-label="Clear search filter"
+            >
+              ✕ search
+            </button>
+          )}
           <ViewModeToggle mode={viewMode} onChange={setViewMode} />
           <ScanButton
             onScanComplete={handleScanComplete}
