@@ -1,70 +1,68 @@
 //! Ctrl-C / SIGTERM handling.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use perima_core::CoreError;
+use tokio_util::sync::CancellationToken;
 
-/// Cancellation guard. Drop it to uninstall the signal handler
-/// (so later tests or embedded usage can re-install).
+/// Cancellation guard backed by a `CancellationToken`.
 ///
-/// WHY guard semantics: `ctrlc::set_handler` is a process-global
-/// singleton; without this guard pattern a test suite would fail
-/// the second test that tried to install a handler.
+/// WHY `CancellationToken` instead of `AtomicBool`: phase 3a introduces
+/// async `perima watch`, which needs `cancel.token().cancelled().await`.
+/// `CancellationToken` is the idiomatic tokio-util primitive for this;
+/// it is cheaply cloneable and integrates with tokio's `select!` and
+/// `CancellationToken::cancelled_owned()` futures.
 pub struct Cancellation {
-    flag: Arc<AtomicBool>,
+    token: CancellationToken,
 }
 
 impl Cancellation {
     /// Has a cancellation signal been received?
     #[must_use]
     pub fn cancelled(&self) -> bool {
-        self.flag.load(Ordering::SeqCst)
+        self.token.is_cancelled()
     }
 
-    /// Share the cancellation flag with a worker closure (e.g.
-    /// rayon's `par_iter` map). WHY: we only expose the `Arc` for
-    /// this reason; callers that only need a bool should use
-    /// `cancelled()` instead.
+    /// Clone the underlying [`CancellationToken`] for use in a rayon closure
+    /// or an async task.
+    ///
+    /// WHY cloned not referenced: `CancellationToken` is an `Arc`-wrapped
+    /// inner handle, so `clone()` is O(1) and the clone shares state with the
+    /// original. Callers that only need a boolean should prefer `cancelled()`.
     #[must_use]
-    pub fn token(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.flag)
+    pub fn token(&self) -> CancellationToken {
+        self.token.clone()
     }
 }
 
-/// Install a process-global SIGINT/SIGTERM handler that flips the
-/// cancellation flag. The returned guard holds the flag; keep it
-/// alive for the duration you care about signals.
+/// Install a process-global SIGINT/SIGTERM handler that cancels the token.
+/// The returned guard holds the token; keep it alive for the duration you
+/// care about signals.
 ///
-/// WHY: on Ctrl-C we flip the flag rather than `std::process::exit`
-/// so the scan loop can finish printing already-hashed entries —
-/// stdout lines are per-file, and aborting mid-write would truncate.
+/// WHY: on Ctrl-C we cancel the token rather than `std::process::exit`
+/// so the scan loop can finish printing already-hashed entries — stdout
+/// lines are per-file, and aborting mid-write would truncate output.
 ///
 /// # Errors
-/// Returns `CoreError::Internal` if another handler is already
-/// registered (only one handler per process).
+/// Returns `CoreError::Internal` if another handler is already registered
+/// (only one `ctrlc` handler per process).
 pub fn install() -> Result<Cancellation, CoreError> {
-    let flag = Arc::new(AtomicBool::new(false));
-    let cloned = Arc::clone(&flag);
+    let token = CancellationToken::new();
+    let cloned = token.clone();
     ctrlc::set_handler(move || {
-        cloned.store(true, Ordering::SeqCst);
+        cloned.cancel();
     })
     .map_err(|e| CoreError::Internal(format!("ctrlc: {e}")))?;
-    Ok(Cancellation { flag })
+    Ok(Cancellation { token })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn cancellation_flag_starts_false() {
-        let flag = Arc::new(AtomicBool::new(false));
-        let c = Cancellation {
-            flag: Arc::clone(&flag),
-        };
-        assert!(!c.cancelled());
-        flag.store(true, Ordering::SeqCst);
-        assert!(c.cancelled());
+        let token = CancellationToken::new();
+        assert!(!token.is_cancelled());
+        token.cancel();
+        assert!(token.is_cancelled());
     }
 }

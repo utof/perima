@@ -2,7 +2,6 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 
 use perima_core::{
     BlakeHash, CoreError, DeviceId, DiscoveredFile, FileRepository, HashService, HashedFile,
@@ -137,11 +136,15 @@ where
     // Ctrl-C lands — without this, a large fixture would drain the
     // par_iter to completion even after the flag flips, defeating
     // the "Ctrl-C stops hashing" guarantee in the spec.
-    let cancel_flag = cancel.token();
+    //
+    // WHY clone: CancellationToken is Arc-backed; clone is O(1) and
+    // shares state with the original. The clone is moved into the
+    // rayon closure which requires 'static + Send.
+    let cancel_token = cancel.token();
     let results: Vec<Result<(DiscoveredFile, BlakeHash), CoreError>> = discovered
         .into_par_iter()
         .map(|d| {
-            if cancel_flag.load(Ordering::SeqCst) {
+            if cancel_token.is_cancelled() {
                 return Err(CoreError::Internal("cancelled".into()));
             }
             let h = hasher.full_hash(&d.absolute_path)?;

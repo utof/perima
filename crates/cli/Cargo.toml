@@ -24,6 +24,8 @@ ctrlc.workspace              = true
 rayon.workspace              = true
 uuid.workspace               = true
 dunce.workspace              = true
+tokio.workspace              = true
+tokio-util.workspace         = true
 
 [dev-dependencies]
 tempfile.workspace   = true

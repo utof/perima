@@ -8,15 +8,22 @@ repository.workspace = true
 
 [dependencies]
 perima-core = { path = "../core" }
-thiserror.workspace  = true
-walkdir.workspace    = true
-path-slash.workspace = true
-dunce.workspace      = true
-tracing.workspace    = true
-sysinfo.workspace    = true
+thiserror.workspace             = true
+walkdir.workspace               = true
+path-slash.workspace            = true
+dunce.workspace                 = true
+tracing.workspace               = true
+sysinfo.workspace               = true
+notify.workspace                = true
+notify-debouncer-full.workspace = true
+file-id.workspace               = true
+tokio.workspace                 = true
+tokio-util.workspace            = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio.workspace    = true
+uuid.workspace     = true
 
 [lints]
 workspace = true

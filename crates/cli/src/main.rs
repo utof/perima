@@ -72,7 +72,16 @@ enum Command {
     Volumes,
 }
 
-fn main() -> ExitCode {
+/// Entry point. Tokio runtime is required for the `watch` command (phase 3a)
+/// and for `CancellationToken::cancelled().await` in future sub-commands.
+/// All existing sync commands (`scan`, `ls`, `volumes`) run directly on the
+/// main task without blocking — they complete before yielding.
+///
+/// WHY `#[tokio::main]`: `CancellationToken::cancelled()` is an async future;
+/// we need a runtime even when the current command is sync. The cost is one
+/// thread-pool allocation that goes unused for sync commands — acceptable.
+#[tokio::main]
+async fn main() -> ExitCode {
     panic::install();
     let cli = Cli::parse();
 
