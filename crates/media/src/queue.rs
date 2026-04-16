@@ -192,11 +192,30 @@ fn process(
         return;
     }
 
-    // WHY only image/video: audio + other kinds have no visual
-    // preview; invoking `ThumbnailGenerator` on them would produce a
-    // decode error the worker would then log as `failed`. Gating on
-    // MIME prefix keeps the thumbnail_status accurate.
-    if !(mime.starts_with("image/") || mime.starts_with("video/")) {
+    // WHY only image/*: the `ThumbnailGenerator` decodes via
+    // `image::ImageReader` which cannot handle video containers
+    // (MP4/MOV). Routing video/* through it guaranteed every video
+    // ended up at `thumbnail_status = 'failed'` — misleading for users
+    // whose video tooling is simply out of scope for v0.4.x. Audio
+    // and other kinds have no visual preview and are also skipped.
+    //
+    // WHY mark videos as `"skipped"` (not leave NULL): the UI
+    // placeholder logic in `FileGrid` branches on status to pick a
+    // glyph. A stable `"skipped"` state that won't flap gives the
+    // frontend a signal distinct from "pending extraction". ffmpeg-
+    // backed video frame extraction is tracked as a future
+    // enhancement. See utof/perima#15 HIGH #11b.
+    if mime.starts_with("video/") {
+        if let Err(err) = repo.update_thumbnail(&work.hash, None, "skipped", device) {
+            tracing::warn!(
+                error = %err,
+                path = %work.absolute_path.display(),
+                "update_thumbnail(skipped) failed for video",
+            );
+        }
+        return;
+    }
+    if !mime.starts_with("image/") {
         return;
     }
 
@@ -395,6 +414,69 @@ mod tests {
             .await
             .expect("worker should exit within 1s of cancel")
             .expect("worker join");
+    }
+
+    /// Regression: video files must NOT be routed through the image
+    /// thumbnailer (which can't decode MP4/MOV). Instead the worker
+    /// writes `thumbnail_status = "skipped"` so the UI can render a
+    /// stable placeholder distinct from "pending extraction". See
+    /// `utof/perima#15` HIGH #11b.
+    #[tokio::test]
+    async fn worker_skips_thumbnail_for_video() {
+        let extractor: Arc<dyn MetadataExtractor> = Arc::new(EchoExtractor);
+        let repo = Arc::new(MockRepo::default());
+        let repo_dyn: Arc<dyn MetadataRepository> = repo.clone();
+        // Build a non-disabled thumbnailer pointed at a tempdir. If the
+        // gate regresses (video/* reaches `generate`), the image decoder
+        // would error and leave status = "failed" — assertion below
+        // catches that case too.
+        let td = tempfile::tempdir().expect("tempdir");
+        let thumbnailer = Arc::new(ThumbnailGenerator::new(td.path().to_path_buf()));
+        let cancel = CancellationToken::new();
+        let queue = MetadataQueue::spawn(
+            extractor,
+            repo_dyn,
+            thumbnailer,
+            DeviceId::new(),
+            cancel.clone(),
+        );
+
+        let hash = unique_hash(42);
+        queue
+            .enqueue(hash, PathBuf::from("/tmp/clip.mp4"), &cancel)
+            .expect("enqueue");
+        drop(queue);
+
+        // Allow worker to drain.
+        for _ in 0..40 {
+            let seen = {
+                let rows = repo.rows.lock().expect("mock mutex");
+                rows.get(&hash)
+                    .and_then(|r| r.thumbnail_status.clone())
+                    .is_some()
+            };
+            if seen {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let row = repo
+            .rows
+            .lock()
+            .expect("mock mutex")
+            .get(&hash)
+            .cloned()
+            .expect("row persisted");
+        assert_eq!(
+            row.thumbnail_status.as_deref(),
+            Some("skipped"),
+            "video/* must be marked 'skipped', not routed through image thumbnailer",
+        );
+        assert!(
+            row.thumbnail_path.is_none(),
+            "skipped videos must have thumbnail_path = None",
+        );
     }
 
     /// WHY `#[ignore]`: this test intentionally saturates the channel
