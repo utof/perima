@@ -11,7 +11,9 @@ import type {
   FileEntry,
   FileEvent,
   FileWithMetadata,
+  FileWithTags,
   ScanResult,
+  Tag,
   VolumeEntry,
 } from "./types";
 
@@ -123,4 +125,33 @@ export async function subscribeToFileEvents(
   return listen<FileEvent>("file-event", (tauriEvent) => {
     callback(tauriEvent.payload);
   });
+}
+
+/** List all active tags. */
+export function listTags(): ResultAsync<Tag[], string> {
+  return fromInvoke("list_tags", {});
+}
+
+/** Attach a tag to a file by content hash. Returns the tag. */
+export function attachTag(
+  hash: string,
+  tagName: string,
+): ResultAsync<Tag, string> {
+  return fromInvoke("attach_tag", { hash, tagName });
+}
+
+/** Remove a tag from a file. */
+export function detachTag(
+  hash: string,
+  tagId: string,
+): ResultAsync<void, string> {
+  return fromInvoke("detach_tag", { hash, tagId });
+}
+
+/** List files with metadata and tags. */
+export function listFilesWithTags(
+  limit: number,
+  volume?: string,
+): ResultAsync<FileWithTags[], string> {
+  return fromInvoke("list_files_with_tags", { limit, volume: volume ?? null });
 }

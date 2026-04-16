@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use perima_core::DeviceId;
-use perima_db::SqliteMetadataRepository;
+use perima_db::{SqliteMetadataRepository, SqliteTagRepository};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -34,25 +34,33 @@ pub struct AppState {
     /// See struct-level WHY for the rationale behind holding this
     /// directly (rather than re-opening a connection per command).
     pub metadata_repo: Arc<SqliteMetadataRepository>,
+    /// Shared tag repository handle.
+    ///
+    /// WHY `Arc<SqliteTagRepository>` (same pattern as `metadata_repo`):
+    /// `TagRepository` trait uses `&self` with interior `Mutex<Connection>`,
+    /// so a single handle can be shared across commands without per-call-open.
+    pub tag_repo: Arc<SqliteTagRepository>,
 }
 
 impl AppState {
-    /// Construct a new `AppState` from a resolved config + metadata repo.
+    /// Construct a new `AppState` from a resolved config, metadata repo, and
+    /// tag repo.
     ///
-    /// WHY a constructor (rather than public struct literal): the
-    /// `metadata_repo` field is the first non-Copy piece of state and
-    /// the call-site in `run()` benefits from a named constructor that
-    /// documents the Arc-sharing contract.
+    /// WHY a constructor (rather than public struct literal): keeps the
+    /// Arc-sharing contract for both repos explicit at the single
+    /// construction site in `run()`.
     #[must_use]
     pub const fn new(
         data_dir: PathBuf,
         device_id: DeviceId,
         metadata_repo: Arc<SqliteMetadataRepository>,
+        tag_repo: Arc<SqliteTagRepository>,
     ) -> Self {
         Self {
             data_dir,
             device_id,
             metadata_repo,
+            tag_repo,
         }
     }
 }

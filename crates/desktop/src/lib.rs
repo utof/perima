@@ -1,11 +1,12 @@
 //! Tauri desktop backend for perima.
 //!
 //! Exposes `scan`, `list_files`, `list_files_with_metadata`,
-//! `list_volumes`, `start_watch`, `stop_watch`, and `is_watching` as
-//! Tauri IPC commands.
+//! `list_volumes`, `start_watch`, `stop_watch`, `is_watching`,
+//! `list_tags`, `attach_tag`, `detach_tag`, and `list_files_with_tags`
+//! as Tauri IPC commands.
 //! `AppState` holds the resolved `Config` (data dir + device id) plus
-//! a shared `Arc<SqliteMetadataRepository>`, and is injected into every
-//! command via `tauri::State`.
+//! shared `Arc<SqliteMetadataRepository>` and `Arc<SqliteTagRepository>`
+//! handles, injected into every command via `tauri::State`.
 //! `WatcherState` holds the active [`perima_fs::DebouncedWatcher`] and its
 //! cancellation token.
 
@@ -17,7 +18,7 @@ pub mod state;
 
 use std::sync::Arc;
 
-use perima_db::{SqliteMetadataRepository, open_and_migrate};
+use perima_db::{SqliteMetadataRepository, SqliteTagRepository, open_and_migrate};
 use tauri::Manager;
 use tauri_specta::{Builder, collect_commands};
 
@@ -54,6 +55,10 @@ pub fn run() -> Result<(), RunError> {
         commands::start_watch,
         commands::stop_watch,
         commands::is_watching,
+        commands::list_tags,
+        commands::attach_tag,
+        commands::detach_tag,
+        commands::list_files_with_tags,
     ]);
 
     // Export TypeScript bindings in debug builds only.
@@ -92,13 +97,22 @@ pub fn run() -> Result<(), RunError> {
             // `Mutex<Connection>` and is deliberately shared — commands
             // clone the same `Arc` into the background `MetadataQueue`
             // worker during scans. Running `open_and_migrate` here
-            // guarantees V001..V004 migrations run before the first
+            // guarantees V001..V005 migrations run before the first
             // command fires; WAL mode makes later re-opens free.
             let db_path = cfg.data_dir.join("perima.db");
             let metadata_conn = open_and_migrate(&db_path)?;
             let metadata_repo = Arc::new(SqliteMetadataRepository::new(metadata_conn));
 
-            let app_state = state::AppState::new(cfg.data_dir, cfg.device_id, metadata_repo);
+            // WHY second open: `SqliteTagRepository` also holds a
+            // `Mutex<Connection>`. Under WAL mode the second open is
+            // instant (no migration work — V005 already ran above).
+            // Separating the two connections avoids cross-locking the
+            // metadata and tag Mutexes on every tag command.
+            let tag_conn = open_and_migrate(&db_path)?;
+            let tag_repo = Arc::new(SqliteTagRepository::new(tag_conn));
+
+            let app_state =
+                state::AppState::new(cfg.data_dir, cfg.device_id, metadata_repo, tag_repo);
             app.manage(app_state);
 
             Ok(())

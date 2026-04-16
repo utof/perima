@@ -7,7 +7,7 @@
 //! fast as v0.4.x lands thumbnails and derived attributes. Keeping them
 //! in their own module prevents `commands.rs` from sprawling.
 
-use perima_core::{FileLocationRecord, MediaMetadata};
+use perima_core::{FileLocationRecord, MediaMetadata, Tag};
 use serde::Serialize;
 
 /// Flattened `(FileLocationRecord, Option<MediaMetadata>)` pair for the
@@ -61,6 +61,42 @@ pub struct FileWithMetadataPayload {
     /// Thumbnail lifecycle: `"pending"`, `"ready"`, `"failed"`, or
     /// `None` if the metadata row predates v0.4.1.
     pub thumbnail_status: Option<String>,
+}
+
+/// Wire-type for a tag, safe to cross the IPC boundary.
+#[derive(Debug, Clone, Serialize, specta::Type)]
+pub struct TagPayload {
+    /// `UUIDv7` primary key.
+    pub id: String,
+    /// NFC-normalized lowercase name.
+    pub name: String,
+    /// ISO 8601 UTC timestamp of first sighting.
+    pub first_seen: String,
+}
+
+impl From<Tag> for TagPayload {
+    fn from(t: Tag) -> Self {
+        Self {
+            id: t.id.to_string(),
+            name: t.name,
+            first_seen: t.first_seen,
+        }
+    }
+}
+
+/// File-with-metadata plus its attached tags.
+///
+/// WHY compose (not extend `FileWithMetadataPayload`): keeps each
+/// payload focused. The `tags` field is a Vec, not a flat field set,
+/// so it doesn't fit the "one-column-per-SQL-field" flat pattern of
+/// the metadata payload.
+#[derive(Debug, Clone, Serialize, specta::Type)]
+pub struct FileWithTagsPayload {
+    /// All file + metadata fields (flat).
+    #[serde(flatten)]
+    pub file: FileWithMetadataPayload,
+    /// Tags attached to this content hash.
+    pub tags: Vec<TagPayload>,
 }
 
 impl From<(FileLocationRecord, Option<MediaMetadata>)> for FileWithMetadataPayload {

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use perima_core::{
     CoreError, DeviceId, EventBus, FileEvent, LocationStatus, MetadataExtractor,
-    MetadataRepository, VolumeId,
+    MetadataRepository, TagRepository, VolumeId,
 };
 use perima_db::{SqliteFileRepository, SqliteVolumeRepository, open_and_migrate};
 use perima_fs::{DebouncedWatcher, WalkdirScanner};
@@ -26,7 +26,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::events::TauriEventEmitter;
-use crate::payloads::FileWithMetadataPayload;
+use crate::payloads::{FileWithMetadataPayload, FileWithTagsPayload, TagPayload};
 use crate::state::{AppState, WatcherState};
 
 /// Maximum time `scan` waits for the metadata worker to drain after
@@ -656,6 +656,187 @@ pub async fn stop_watch(watcher_state: tauri::State<'_, WatcherState>) -> Result
 pub async fn is_watching(watcher_state: tauri::State<'_, WatcherState>) -> Result<bool, String> {
     let inner_guard = watcher_state.inner.lock().await;
     Ok(inner_guard.is_some())
+}
+
+// ---------------------------------------------------------------------------
+// Tag commands
+// ---------------------------------------------------------------------------
+
+/// List all active (non-deleted) tags, sorted by name.
+///
+/// # Errors
+/// Returns a `String` description of any [`perima_core::CoreError`].
+// WHY allow: Tauri requires `State<'_, T>` to be owned. See `scan` for rationale.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub fn list_tags(state: tauri::State<'_, AppState>) -> Result<Vec<TagPayload>, String> {
+    list_tags_inner(state.tag_repo.as_ref()).map_err(|e| e.to_string())
+}
+
+/// Inner list-tags logic extracted for testability without a live Tauri state.
+///
+/// WHY: mirrors `run_scan_inner` — allows integration tests to call without
+/// constructing `tauri::State`.
+///
+/// # Errors
+/// Returns [`perima_core::CoreError`] on any repository failure.
+pub fn list_tags_inner<T: TagRepository + ?Sized>(
+    tag_repo: &T,
+) -> Result<Vec<TagPayload>, perima_core::CoreError> {
+    let tags = tag_repo.list_tags()?;
+    Ok(tags.into_iter().map(TagPayload::from).collect())
+}
+
+/// Attach a tag to a file by content hash (upsert the tag first, then attach).
+///
+/// Returns the [`TagPayload`] so the frontend can immediately display it
+/// without a round-trip `list_tags` call.
+///
+/// # Errors
+/// Returns a `String` if the hash is malformed, the tag name is invalid, or
+/// the repository fails.
+// WHY allow: Tauri owns the `State`, `String` params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub fn attach_tag(
+    hash: String,
+    tag_name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<TagPayload, String> {
+    attach_tag_inner(state.tag_repo.as_ref(), &hash, &tag_name, state.device_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Inner attach-tag logic extracted for testability without a live Tauri state.
+///
+/// WHY: upsert-then-attach in a single helper keeps both operations testable
+/// as a unit without the Tauri dispatcher.
+///
+/// # Errors
+/// Returns [`perima_core::CoreError`] on hash parse failure, invalid tag name,
+/// or repository failure.
+pub fn attach_tag_inner<T: TagRepository + ?Sized>(
+    tag_repo: &T,
+    hash_hex: &str,
+    tag_name: &str,
+    device: DeviceId,
+) -> Result<TagPayload, perima_core::CoreError> {
+    let hash = perima_core::BlakeHash::parse_hex(hash_hex)
+        .map_err(|e| perima_core::CoreError::Internal(format!("bad hash: {e}")))?;
+    let tag = tag_repo.upsert_tag(tag_name, device)?;
+    tag_repo.attach(&hash, tag.id, device)?;
+    Ok(TagPayload::from(tag))
+}
+
+/// Remove a tag from a file by content hash + tag UUID.
+///
+/// # Errors
+/// Returns a `String` if either the hash or tag UUID is malformed, or if the
+/// repository fails.
+// WHY allow: Tauri owns the `State`, `String` params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub fn detach_tag(
+    hash: String,
+    tag_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    detach_tag_inner(state.tag_repo.as_ref(), &hash, &tag_id, state.device_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Inner detach-tag logic extracted for testability without a live Tauri state.
+///
+/// # Errors
+/// Returns [`perima_core::CoreError`] on hash/UUID parse failure or
+/// repository failure.
+pub fn detach_tag_inner<T: TagRepository + ?Sized>(
+    tag_repo: &T,
+    hash_hex: &str,
+    tag_id_str: &str,
+    device: DeviceId,
+) -> Result<(), perima_core::CoreError> {
+    let hash = perima_core::BlakeHash::parse_hex(hash_hex)
+        .map_err(|e| perima_core::CoreError::Internal(format!("bad hash: {e}")))?;
+    let tag_id = uuid::Uuid::parse_str(tag_id_str)
+        .map_err(|e| perima_core::CoreError::Internal(format!("bad tag UUID: {e}")))?;
+    tag_repo.detach(&hash, tag_id, device)?;
+    Ok(())
+}
+
+/// List files with their metadata and any attached tags.
+///
+/// Returns up to `limit` [`FileWithTagsPayload`] rows. Tags are fetched
+/// in a second query and merged in Rust.
+///
+/// # Errors
+/// Returns a `String` description of any [`perima_core::CoreError`] or
+/// UUID parse failure.
+// WHY allow: Tauri owns `State` + `Option<String>` params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn list_files_with_tags(
+    limit: u32,
+    volume: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<FileWithTagsPayload>, String> {
+    let volume_id = volume
+        .map(|v| {
+            uuid::Uuid::parse_str(&v)
+                .map(VolumeId)
+                .map_err(|e| format!("bad volume UUID: {e}"))
+        })
+        .transpose()?;
+    list_files_with_tags_inner(
+        state.metadata_repo.as_ref(),
+        state.tag_repo.as_ref(),
+        limit,
+        volume_id,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Inner list-files-with-tags: two queries + merge in Rust.
+///
+/// WHY two queries + merge (not a shared tx): the two-SELECT sequence
+/// has a benign WAL race — a `file_tags` insert between calls could
+/// produce tags for a hash not in the metadata set (harmless — we
+/// iterate the metadata list and look up by hash, so extra tags are
+/// ignored), and a metadata delete between calls leaves a stale tag
+/// entry in the map (also harmless for the same reason). Transient
+/// inconsistency is acceptable for UI list refresh.
+///
+/// # Errors
+/// Returns [`perima_core::CoreError`] on any repository failure.
+pub fn list_files_with_tags_inner<M, T>(
+    metadata_repo: &M,
+    tag_repo: &T,
+    limit: u32,
+    volume: Option<VolumeId>,
+) -> Result<Vec<FileWithTagsPayload>, perima_core::CoreError>
+where
+    M: MetadataRepository + ?Sized,
+    T: TagRepository + ?Sized,
+{
+    let rows = metadata_repo.list_with_metadata(limit as usize, volume)?;
+    let hashes: Vec<perima_core::BlakeHash> = rows.iter().map(|(loc, _)| loc.hash).collect();
+    let tag_map = tag_repo.tags_for_hashes(&hashes)?;
+    Ok(rows
+        .into_iter()
+        .map(|(loc, meta)| {
+            let hash = loc.hash;
+            let file = FileWithMetadataPayload::from((loc, meta));
+            let tags = tag_map
+                .get(&hash)
+                .map(|ts| ts.iter().cloned().map(TagPayload::from).collect())
+                .unwrap_or_default();
+            FileWithTagsPayload { file, tags }
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------

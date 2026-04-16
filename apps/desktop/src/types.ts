@@ -96,6 +96,22 @@ export interface VolumeEntry {
   last_seen: string;
 }
 
+/** A user-assignable tag on content. */
+export interface Tag {
+  /** UUIDv7 primary key. */
+  id: string;
+  /** NFC-normalized lowercase name. */
+  name: string;
+  /** ISO 8601 UTC timestamp of first sighting. */
+  first_seen: string;
+}
+
+/** File-with-metadata plus its attached tags. */
+export interface FileWithTags extends FileWithMetadata {
+  /** Tags attached to this content hash. */
+  tags: Tag[];
+}
+
 /**
  * Filesystem event emitted by the backend watcher.
  *

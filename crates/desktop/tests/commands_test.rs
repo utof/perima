@@ -10,9 +10,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use perima_core::{BlakeHash, DeviceId, MediaMetadata, MetadataRepository};
-use perima_db::{SqliteMetadataRepository, open_and_migrate};
+use perima_db::{SqliteMetadataRepository, SqliteTagRepository, open_and_migrate};
 use perima_desktop::commands::{
-    list_files_inner, list_files_with_metadata_inner, list_volumes_inner, run_scan_inner,
+    attach_tag_inner, detach_tag_inner, list_files_inner, list_files_with_metadata_inner,
+    list_files_with_tags_inner, list_tags_inner, list_volumes_inner, run_scan_inner,
     run_scan_inner_with_metadata,
 };
 use perima_desktop::config::resolve_with_app_data_dir;
@@ -257,6 +258,66 @@ async fn desktop_scan_populates_metadata_and_thumbnails() {
         thumb_root.display(),
         thumb_count,
     );
+}
+
+/// Exercises the four tag `_inner` helpers end-to-end:
+/// attach → list-with-tags → list-tags → detach → verify empty.
+#[tokio::test]
+async fn list_files_with_tags_returns_tagged_rows() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let data_dir = td.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("mkdir data");
+    let fixture_dir = td.path().join("fixture");
+    mk_fixture(&fixture_dir);
+
+    let device = DeviceId::new();
+    run_scan_inner(&fixture_dir, false, &data_dir, device)
+        .await
+        .expect("scan");
+
+    // Open a tag repo against the same DB.
+    let db_path = data_dir.join("perima.db");
+    let tag_conn = open_and_migrate(&db_path).expect("open tag conn");
+    let tag_repo = SqliteTagRepository::new(tag_conn);
+
+    // Get files list to find a hash.
+    let metadata_conn = open_and_migrate(&db_path).expect("open meta conn");
+    let metadata_repo = SqliteMetadataRepository::new(metadata_conn);
+    let files = list_files_with_metadata_inner(&metadata_repo, 100, None).expect("list");
+    assert!(!files.is_empty(), "scan must have produced ≥1 file");
+
+    let first_hash = files[0].hash.clone();
+
+    // Attach a tag via the inner helper.
+    let tag = attach_tag_inner(&tag_repo, &first_hash, "test-tag", device).expect("attach");
+    assert_eq!(tag.name, "test-tag");
+
+    // List files with tags — the tagged file must appear with 1 tag.
+    let tagged =
+        list_files_with_tags_inner(&metadata_repo, &tag_repo, 100, None).expect("list with tags");
+    assert!(!tagged.is_empty());
+    let tagged_file = tagged
+        .iter()
+        .find(|f| f.file.hash == first_hash)
+        .expect("find tagged file");
+    assert_eq!(tagged_file.tags.len(), 1, "must have exactly 1 tag");
+    assert_eq!(tagged_file.tags[0].name, "test-tag");
+
+    // List tags — must return exactly 1.
+    let tags = list_tags_inner(&tag_repo).expect("list tags");
+    assert_eq!(tags.len(), 1);
+
+    // Detach.
+    detach_tag_inner(&tag_repo, &first_hash, &tag.id, device).expect("detach");
+
+    // Verify empty after detach.
+    let tagged2 = list_files_with_tags_inner(&metadata_repo, &tag_repo, 100, None)
+        .expect("list after detach");
+    let tagged_file2 = tagged2
+        .iter()
+        .find(|f| f.file.hash == first_hash)
+        .expect("find file after detach");
+    assert!(tagged_file2.tags.is_empty(), "no tags after detach");
 }
 
 /// Regression for v0.4.3: thumbnail directory referenced by
