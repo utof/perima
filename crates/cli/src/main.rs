@@ -13,8 +13,8 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use perima_core::MetadataRepository;
 use perima_db::{
-    SqliteFileRepository, SqliteMetadataRepository, SqliteTagRepository, SqliteVolumeRepository,
-    open_and_migrate,
+    SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository,
+    SqliteVolumeRepository, open_and_migrate,
 };
 use perima_fs::WalkdirScanner;
 use perima_hash::Blake3Service;
@@ -92,6 +92,9 @@ enum Command {
 
     /// Tag management: add, remove, and list tags.
     Tag(cmd::tag::TagArgs),
+
+    /// Full-text search over indexed file metadata and tags.
+    Search(cmd::search::SearchArgs),
 
     /// List known volumes and their mount paths on this machine.
     Volumes,
@@ -176,6 +179,8 @@ async fn main() -> ExitCode {
         } => dispatch_ls(volume, limit, json, with_metadata, tag, &config),
 
         Command::Tag(args) => dispatch_tag(&args, &config),
+
+        Command::Search(args) => dispatch_search(&args, &config),
 
         Command::Volumes => dispatch_volumes(&config),
 
@@ -468,6 +473,26 @@ async fn dispatch_metadata(path: PathBuf, json: bool, config: &Config) -> ExitCo
             eprintln!("perima: {msg}");
             ExitCode::from(2)
         }
+        Err(e) => {
+            eprintln!("perima: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Run the `search` subcommand.
+fn dispatch_search(args: &cmd::search::SearchArgs, config: &Config) -> ExitCode {
+    let db_path = config.data_dir.join("perima.db");
+    let conn = match open_and_migrate(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("perima: database (search repo): {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let repo = SqliteSearchRepository::new(conn);
+    match cmd::search::run(&repo, args) {
+        Ok(()) => ExitCode::from(0),
         Err(e) => {
             eprintln!("perima: {e}");
             ExitCode::from(1)
