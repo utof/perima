@@ -12,6 +12,35 @@ roadmap milestone triggers `1.0.0`.
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-04-16
+
+### Fixed
+
+- **DB identity invariants** (utof/perima#7, #9).
+  - `record_mount` soft-deletes superseded rows for the same
+    `(volume_id, machine_id)` before inserting a new mount path;
+    stops stale mounts accumulating in
+    `VolumeRecord.mounts_on_this_machine`.
+  - `update_location_path` checks for an existing active row at the
+    destination before renaming. On collision the source row is
+    soft-deleted (destination wins, LWW).
+  - `upsert_location`, `find_or_create`, `update_location_path`, and
+    `record_mount` wrap their SELECT-then-INSERT/UPDATE sequences in
+    `BEGIN IMMEDIATE`; concurrent CLI + desktop writers can no
+    longer produce duplicate active rows.
+  - `conn.busy_timeout(5s)` at connection open so contending
+    `BEGIN IMMEDIATE` requests serialize instead of erroring.
+  - Non-UTF-8 mount paths now return `CoreError::InvalidPath`
+    instead of silent lossy conversion via `to_string_lossy`.
+
+### Added
+
+- Deterministic concurrent-race tests via `std::sync::Barrier`
+  covering `find_or_create` and `upsert_location` across two
+  independent SQLite connections.
+- Connection-level test for `busy_timeout` serialization using
+  channel-synchronized two-thread ordering.
+
 ## [0.3.0] — 2026-04-16
 
 ### Added
@@ -66,5 +95,6 @@ roadmap milestone triggers `1.0.0`.
   `cli`, `desktop`, `ci`, `deps`, `docs`, `release`) rather than development
   milestones.
 
-[Unreleased]: https://github.com/utof/perima/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/utof/perima/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/utof/perima/releases/tag/v0.3.1
 [0.3.0]: https://github.com/utof/perima/releases/tag/v0.3.0

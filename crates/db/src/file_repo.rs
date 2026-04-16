@@ -182,13 +182,19 @@ impl SqliteFileRepository {
     /// status to `active`.
     ///
     /// Used when the watcher detects a rename/move within the same volume.
-    /// Returns the number of rows updated (0 if no matching row exists,
-    /// 1 on success).
+    /// If an active row already exists at `new_path`, the source row is
+    /// soft-deleted and the destination row is left untouched — the
+    /// filesystem reports a file at `new_path`, the DB agrees, and the
+    /// source identity is retired (LWW semantics; formal CRDT resolution
+    /// lands in phase 8+).
+    ///
+    /// Returns the number of rows written (0 if no source row exists, or
+    /// 1 if either the source was updated OR soft-deleted on collision).
     ///
     /// # Errors
     /// `CoreError::Internal` on DB or mutex failure.
     // WHY allow(significant_drop_tightening): the Mutex guard `conn` must
-    // outlive the `execute` call that borrows through it.
+    // outlive the transaction that borrows through it.
     #[allow(clippy::significant_drop_tightening)]
     pub fn update_location_path(
         &self,
@@ -197,7 +203,7 @@ impl SqliteFileRepository {
         new_path: &MediaPath,
         device: DeviceId,
     ) -> Result<u64, CoreError> {
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
             .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
@@ -206,15 +212,51 @@ impl SqliteFileRepository {
         let new_str = new_path.as_str();
         let dev_str = device.0.to_string();
         let now = now_iso();
-        let n = conn
-            .execute(
+
+        // WHY BEGIN IMMEDIATE: the collision check + UPDATE/soft-delete
+        // sequence must serialize across connections. A concurrent upsert
+        // at `new_path` could otherwise slip between our SELECT and our
+        // UPDATE, violating the "exactly one active row per (vol, path)"
+        // invariant.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(Error::from)?;
+
+        // Check whether an active row already exists at `new_path`.
+        let collision: Option<String> = tx
+            .query_row(
+                "SELECT id FROM file_locations
+                 WHERE volume_id = ?1 AND relative_path = ?2 AND deleted_at IS NULL",
+                rusqlite::params![vol_str, new_str],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Error::from)?;
+
+        let n = if collision.is_some() {
+            // WHY: destination wins. Soft-delete the source row so the
+            // invariant "1 active row per (vol, path)" holds. CRDT-friendly:
+            // no hard delete, deleted_at/updated_at/device_id all stamped.
+            tx.execute(
+                "UPDATE file_locations
+                     SET deleted_at = ?1, updated_at = ?1, device_id = ?2
+                     WHERE volume_id = ?3 AND relative_path = ?4 AND deleted_at IS NULL",
+                rusqlite::params![now, dev_str, vol_str, old_str],
+            )
+            .map_err(Error::from)?
+        } else {
+            tx.execute(
                 "UPDATE file_locations
                  SET relative_path = ?1, status = 'active', updated_at = ?2, device_id = ?3
                  WHERE volume_id = ?4 AND relative_path = ?5 AND deleted_at IS NULL",
                 rusqlite::params![new_str, now, dev_str, vol_str, old_str],
             )
-            .map_err(Error::from)?;
-        // WHY: at most 1 active row per (volume, path) by app-level invariant.
+            .map_err(Error::from)?
+        };
+
+        tx.commit().map_err(Error::from)?;
+        // WHY: at most 1 active row per (volume, path) by app-level invariant,
+        // so `n` is always 0 or 1. Cast to u64 for the public contract.
         #[allow(clippy::cast_possible_truncation)]
         Ok(n as u64)
     }
@@ -285,7 +327,7 @@ impl FileRepository for SqliteFileRepository {
         path: &MediaPath,
         device: DeviceId,
     ) -> Result<UpsertOutcome, CoreError> {
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
             .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
@@ -295,11 +337,20 @@ impl FileRepository for SqliteFileRepository {
         let dev_str = device.0.to_string();
         let now = now_iso();
 
+        // WHY BEGIN IMMEDIATE: SQLite serializes statements but not
+        // read-modify-write sequences. Two concurrent scanners SELECTing
+        // "not found" would both INSERT and produce duplicate active rows
+        // for the same (volume, path). IMMEDIATE grabs the writer lock at
+        // BEGIN; the busy_timeout installed by `open_and_migrate` makes
+        // the second writer wait instead of erroring with SQLITE_BUSY.
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(Error::from)?;
+
         // WHY: app-level uniqueness on (volume_id, relative_path,
         // deleted_at IS NULL) replaces a UNIQUE constraint that
-        // CLAUDE.md forbids on mutable columns. The two-statement
-        // pattern is safe under `SQLite`'s single-writer model.
-        let existing: Option<(String, String, String)> = conn
+        // CLAUDE.md forbids on mutable columns. Safe under IMMEDIATE.
+        let existing: Option<(String, String, String)> = tx
             .query_row(
                 "SELECT id, blake3_hash, device_id FROM file_locations
                  WHERE volume_id = ?1 AND relative_path = ?2 AND deleted_at IS NULL",
@@ -312,7 +363,7 @@ impl FileRepository for SqliteFileRepository {
         let outcome = match existing {
             None => {
                 let id = perima_core::ids::new_id().to_string();
-                conn.execute(
+                tx.execute(
                     "INSERT INTO file_locations
                      (id, blake3_hash, volume_id, relative_path, status,
                       first_seen, updated_at, device_id)
@@ -328,7 +379,7 @@ impl FileRepository for SqliteFileRepository {
                 UpsertOutcome::Unchanged
             }
             Some((ref row_id, _, _)) => {
-                conn.execute(
+                tx.execute(
                     "UPDATE file_locations
                      SET blake3_hash = ?1, updated_at = ?2, device_id = ?3
                      WHERE id = ?4",
@@ -338,6 +389,7 @@ impl FileRepository for SqliteFileRepository {
                 UpsertOutcome::Updated
             }
         };
+        tx.commit().map_err(Error::from)?;
         drop(conn);
         Ok(outcome)
     }
@@ -711,6 +763,141 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].relative_path.as_str(), "new_name.jpg");
         assert_eq!(rows[0].status, LocationStatus::Active);
+    }
+
+    #[test]
+    fn update_location_path_collision_softdeletes_source() {
+        // WHY: if an active row already exists at `new_path`, renaming
+        // `old_path` → `new_path` cannot just UPDATE without introducing
+        // two active rows for the same (volume, path). The fix soft-deletes
+        // the source row; the destination wins (defensible LWW — the
+        // filesystem already has a file at new_path). Observable:
+        // list_file_locations shows exactly the destination row, with the
+        // destination's original hash untouched.
+        let (_td, mut repo) = test_db();
+        let dev = device();
+        let vol = VolumeId::new();
+
+        // Seed destination row with a distinct hash.
+        let f_dest = sample_hashed_file(b"destination_content", "dest.jpg");
+        repo.upsert_file(&f_dest, dev).expect("dest file");
+        repo.upsert_location(&f_dest.hash, vol, &f_dest.discovered.relative_path, dev)
+            .expect("dest location");
+
+        // Seed source row at a different path with its own hash.
+        let f_src = sample_hashed_file(b"source_content", "src.jpg");
+        repo.upsert_file(&f_src, dev).expect("src file");
+        repo.upsert_location(&f_src.hash, vol, &f_src.discovered.relative_path, dev)
+            .expect("src location");
+
+        // Attempt the colliding rename: src.jpg → dest.jpg.
+        let old_path = MediaPath::new("src.jpg");
+        let new_path = MediaPath::new("dest.jpg");
+        let touched = repo
+            .update_location_path(vol, &old_path, &new_path, dev)
+            .expect("rename with collision");
+        assert_eq!(
+            touched, 1,
+            "source row must be soft-deleted (counts as 1 update)"
+        );
+
+        // Only the destination survives as an active row, and it still
+        // points at its original hash (destination is authoritative).
+        let rows = repo.list_file_locations(10, Some(vol)).expect("list");
+        assert_eq!(rows.len(), 1, "exactly one active row after collision");
+        assert_eq!(rows[0].relative_path.as_str(), "dest.jpg");
+        assert_eq!(
+            rows[0].hash.to_hex(),
+            f_dest.hash.to_hex(),
+            "destination hash must be preserved",
+        );
+    }
+
+    #[test]
+    fn update_location_path_normal_case() {
+        // WHY: regression pin for the non-colliding rename path after the
+        // 1b edit. A plain rename (no active row at new_path) must update
+        // the row in place and keep exactly one active row with the new
+        // path and active status.
+        let (_td, mut repo) = test_db();
+        let dev = device();
+        let vol = VolumeId::new();
+        let f = sample_hashed_file(b"normal_rename", "a.jpg");
+        repo.upsert_file(&f, dev).expect("file");
+        repo.upsert_location(&f.hash, vol, &f.discovered.relative_path, dev)
+            .expect("location");
+
+        let old_path = MediaPath::new("a.jpg");
+        let new_path = MediaPath::new("b.jpg");
+        let touched = repo
+            .update_location_path(vol, &old_path, &new_path, dev)
+            .expect("rename");
+        assert_eq!(touched, 1);
+
+        let rows = repo.list_file_locations(10, Some(vol)).expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].relative_path.as_str(), "b.jpg");
+        assert_eq!(rows[0].status, LocationStatus::Active);
+    }
+
+    #[test]
+    fn upsert_location_concurrent_unique() {
+        // WHY: two concurrent repo handles upserting the same
+        // (hash, volume, path) tuple must produce exactly ONE active row.
+        // The `BEGIN IMMEDIATE` wrapper in upsert_location serializes the
+        // SELECT-then-INSERT pattern across connections; pre-fix both
+        // threads SELECT "not found" and both INSERT, producing two rows.
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let td = tempfile::tempdir().expect("tempdir");
+        let db_path = td.path().join("race.db");
+        // Run migrations once up front.
+        {
+            let _ = open_and_migrate(&db_path).expect("migrate");
+        }
+        let dev = device();
+        let vol = VolumeId::new();
+
+        // Seed the files row so both threads can link a location to it.
+        {
+            let conn = open_and_migrate(&db_path).expect("seed open");
+            let mut seed = SqliteFileRepository::new(conn);
+            let f = sample_hashed_file(b"shared", "race.jpg");
+            seed.upsert_file(&f, dev).expect("seed file");
+        }
+
+        let f = sample_hashed_file(b"shared", "race.jpg");
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let db_path = db_path.clone();
+            let barrier = Arc::clone(&barrier);
+            let hash = f.hash;
+            let path = f.discovered.relative_path.clone();
+            handles.push(thread::spawn(move || {
+                let conn = open_and_migrate(&db_path).expect("open");
+                let mut repo = SqliteFileRepository::new(conn);
+                barrier.wait();
+                repo.upsert_location(&hash, vol, &path, dev)
+                    .expect("upsert_location")
+            }));
+        }
+        for h in handles {
+            h.join().expect("thread");
+        }
+
+        // Cross-check: exactly one active row for (vol, race.jpg).
+        let conn = open_and_migrate(&db_path).expect("verify open");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_locations
+                 WHERE volume_id = ?1 AND relative_path = ?2 AND deleted_at IS NULL",
+                rusqlite::params![vol.0.to_string(), "race.jpg"],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(count, 1, "exactly one active file_locations row");
     }
 
     #[test]
