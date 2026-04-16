@@ -12,6 +12,27 @@ roadmap milestone triggers `1.0.0`.
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-04-16
+
+Desktop search UI layer on top of the v0.6.0 search backend.
+
+### Added
+
+- **`SearchHitPayload` + Tauri commands** (`perima-desktop`): `search(query,
+  limit)` returns ranked `Vec<SearchHitPayload>`; `search_rebuild()` wipes and
+  rebuilds the `FTS5` index. Third `WAL`-mode connection in `AppState` avoids
+  cross-locking the metadata and tag mutexes.
+- **`SearchHit` TS type** + `api.ts` wrappers (`search`, `searchRebuild`) —
+  `ResultAsync` pattern consistent with other API functions.
+- **`SearchBar` component** — debounced (300 ms) `FTS5` search input with a
+  dropdown results panel. Errors are non-fatal (show empty results). Outside
+  click closes the panel.
+- **`App.tsx` integration** — `SearchBar` in the header; clicking a hit
+  filters the file list to that content hash; a `✕ search` badge clears the
+  filter. Search takes precedence over the tag sidebar filter.
+- Six `SearchBar` unit tests covering debounce timing, empty results, error
+  path (non-fatal), hit click callback, and clear button.
+
 ## [0.6.0] — 2026-04-16
 
 First full-text search release. Enables `perima search <query>` backed by
@@ -409,7 +430,8 @@ tuning filed as follow-up (see Project section below).
   `cli`, `desktop`, `ci`, `deps`, `docs`, `release`) rather than development
   milestones.
 
-[Unreleased]: https://github.com/utof/perima/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/utof/perima/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/utof/perima/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/utof/perima/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/utof/perima/releases/tag/v0.5.1
 [0.4.0]: https://github.com/utof/perima/releases/tag/v0.4.0
