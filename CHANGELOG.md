@@ -12,6 +12,37 @@ roadmap milestone triggers `1.0.0`.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-04-16
+
+First user-facing organization primitive: **tag-based file labeling**.
+Backend-only release; desktop UI lands in v0.5.1.
+
+### Added
+
+- **Tag domain type + normalization** (`perima-core`).
+  `Tag { id, name, first_seen }` value type; `normalize()` applies
+  trim → NFC → lowercase with `MAX_TAG_LEN = 64` guard.
+  `CoreError::InvalidTag` variant for validation failures.
+  `TagRepository` trait with 8 methods (`upsert_tag`, `delete_tag`,
+  `attach`, `detach`, `list_tags`, `tags_for_hashes`,
+  `files_with_tag`, `count_files_for_tag`).
+- **V005 migration + `SqliteTagRepository`** (`perima-db`).
+  `tags` and `file_tags` tables (CRDT-compliant: soft deletes,
+  `updated_at` + `device_id` on every mutable row, no UNIQUE on
+  mutable columns, no FK cascades). Content-addressed via
+  `blake3_hash`. Composite `(blake3_hash, tag_id)` covering index +
+  reverse `tag_id` index. `tags_for_hashes` batches via
+  `params_from_iter`; short-circuits on empty slice.
+  14 new tests including Barrier-driven concurrent upsert.
+- **CLI tag subcommand** (`perima`).
+  `perima tag add <path> <tags...>` (1+ required),
+  `perima tag rm <path> <tag>`,
+  `perima tag ls [--json]` with per-tag file counts.
+  `perima ls --tag <name>` filters the file listing to tagged files.
+  3 new integration tests.
+
+[0.5.0]: https://github.com/utof/perima/releases/tag/v0.5.0
+
 ## [0.4.3] — 2026-04-16
 
 Single-blocker follow-up to the v0.4.2 hotfix. No new features; one
@@ -326,7 +357,7 @@ tuning filed as follow-up (see Project section below).
   `cli`, `desktop`, `ci`, `deps`, `docs`, `release`) rather than development
   milestones.
 
-[Unreleased]: https://github.com/utof/perima/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/utof/perima/compare/v0.5.0...HEAD
 [0.4.0]: https://github.com/utof/perima/releases/tag/v0.4.0
 [0.3.2]: https://github.com/utof/perima/releases/tag/v0.3.2
 [0.3.1]: https://github.com/utof/perima/releases/tag/v0.3.1
