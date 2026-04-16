@@ -13,6 +13,7 @@ import type {
   FileWithMetadata,
   FileWithTags,
   ScanResult,
+  SearchHit,
   Tag,
   VolumeEntry,
 } from "./types";
@@ -154,4 +155,22 @@ export function listFilesWithTags(
   volume?: string,
 ): ResultAsync<FileWithTags[], string> {
   return fromInvoke("list_files_with_tags", { limit, volume: volume ?? null });
+}
+
+/**
+ * Run a full-text search query against the FTS5 index.
+ *
+ * @param query - FTS5 MATCH expression (e.g. `"vacation"`, `"Canon*"`).
+ * @param limit - Maximum number of ranked results (default 50).
+ */
+export function search(
+  query: string,
+  limit = 50,
+): ResultAsync<SearchHit[], string> {
+  return fromInvoke("search", { query, limit });
+}
+
+/** Wipe and rebuild the FTS5 search index from the current DB state. */
+export function searchRebuild(): ResultAsync<void, string> {
+  return fromInvoke("search_rebuild", {});
 }

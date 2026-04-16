@@ -7,7 +7,7 @@
 //! fast as v0.4.x lands thumbnails and derived attributes. Keeping them
 //! in their own module prevents `commands.rs` from sprawling.
 
-use perima_core::{FileLocationRecord, MediaMetadata, Tag};
+use perima_core::{FileLocationRecord, MediaMetadata, SearchHit, Tag};
 use serde::Serialize;
 
 /// Flattened `(FileLocationRecord, Option<MediaMetadata>)` pair for the
@@ -155,6 +155,34 @@ impl From<(FileLocationRecord, Option<MediaMetadata>)> for FileWithMetadataPaylo
             mime_type,
             thumbnail_path,
             thumbnail_status,
+        }
+    }
+}
+
+/// Wire-type for a single `FTS5` search result.
+///
+/// Maps 1:1 from [`SearchHit`]; exists as a separate type so `specta`
+/// can generate TypeScript bindings without pulling the domain type into
+/// the desktop crate's public surface.
+#[derive(Debug, Clone, Serialize, specta::Type)]
+pub struct SearchHitPayload {
+    /// `BLAKE3` hex hash of the file content.
+    pub blake3_hash: String,
+    /// Volume UUID string.
+    pub volume_id: String,
+    /// Relative path within the volume (representative location).
+    pub relative_path: String,
+    /// `BM25` rank (lower = better, `SQLite` convention).
+    pub rank: f64,
+}
+
+impl From<SearchHit> for SearchHitPayload {
+    fn from(h: SearchHit) -> Self {
+        Self {
+            blake3_hash: h.blake3_hash,
+            volume_id: h.volume_id,
+            relative_path: h.relative_path,
+            rank: h.rank,
         }
     }
 }

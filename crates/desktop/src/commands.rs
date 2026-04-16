@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use perima_core::{
     CoreError, DeviceId, EventBus, FileEvent, LocationStatus, MetadataExtractor,
-    MetadataRepository, TagRepository, VolumeId,
+    MetadataRepository, SearchRepository, TagRepository, VolumeId,
 };
 use perima_db::{SqliteFileRepository, SqliteVolumeRepository, open_and_migrate};
 use perima_fs::{DebouncedWatcher, WalkdirScanner};
@@ -26,7 +26,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::events::TauriEventEmitter;
-use crate::payloads::{FileWithMetadataPayload, FileWithTagsPayload, TagPayload};
+use crate::payloads::{FileWithMetadataPayload, FileWithTagsPayload, SearchHitPayload, TagPayload};
 use crate::state::{AppState, WatcherState};
 
 /// Maximum time `scan` waits for the metadata worker to drain after
@@ -1080,4 +1080,45 @@ fn persist_file<R: perima_core::FileRepository + ?Sized>(
     };
     repo.upsert_file(&hf, device)?;
     repo.upsert_location(h, volume, &d.relative_path, device)
+}
+
+// ---------------------------------------------------------------------------
+// Full-text search commands
+// ---------------------------------------------------------------------------
+
+/// Run a `FTS5` full-text search and return ranked results.
+///
+/// # Errors
+/// Returns a string error on empty query or `SQLite`/`FTS5` errors.
+// WHY allow: Tauri owns `State` + primitive params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub fn search(
+    query: String,
+    limit: u32,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<SearchHitPayload>, String> {
+    search_inner(state.search_repo.as_ref(), &query, limit).map_err(|e| e.to_string())
+}
+
+fn search_inner(
+    repo: &dyn SearchRepository,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<SearchHitPayload>, CoreError> {
+    let hits = repo.search(query, limit)?;
+    Ok(hits.into_iter().map(SearchHitPayload::from).collect())
+}
+
+/// Wipe and rebuild the `FTS5` search index from the current DB state.
+///
+/// # Errors
+/// Returns a string error on `SQLite` errors.
+// WHY allow: Tauri owns `State`.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub fn search_rebuild(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.search_repo.rebuild().map_err(|e| e.to_string())
 }

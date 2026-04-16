@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use perima_core::DeviceId;
-use perima_db::{SqliteMetadataRepository, SqliteTagRepository};
+use perima_db::{SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -40,6 +40,12 @@ pub struct AppState {
     /// `TagRepository` trait uses `&self` with interior `Mutex<Connection>`,
     /// so a single handle can be shared across commands without per-call-open.
     pub tag_repo: Arc<SqliteTagRepository>,
+    /// Shared search repository handle.
+    ///
+    /// WHY `Arc<SqliteSearchRepository>`: `SearchRepository` uses `&self`
+    /// with interior `Mutex<Connection>`, enabling Arc-sharing across commands
+    /// without per-call connection opens.
+    pub search_repo: Arc<SqliteSearchRepository>,
 }
 
 impl AppState {
@@ -55,12 +61,14 @@ impl AppState {
         device_id: DeviceId,
         metadata_repo: Arc<SqliteMetadataRepository>,
         tag_repo: Arc<SqliteTagRepository>,
+        search_repo: Arc<SqliteSearchRepository>,
     ) -> Self {
         Self {
             data_dir,
             device_id,
             metadata_repo,
             tag_repo,
+            search_repo,
         }
     }
 }

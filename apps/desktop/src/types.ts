@@ -112,6 +112,18 @@ export interface FileWithTags extends FileWithMetadata {
   tags: Tag[];
 }
 
+/** A ranked result from the FTS5 full-text search index. */
+export interface SearchHit {
+  /** BLAKE3 hex hash of the file content. */
+  blake3_hash: string;
+  /** Volume UUID. */
+  volume_id: string;
+  /** Relative path within the volume. */
+  relative_path: string;
+  /** BM25 rank — lower (more negative) means better match. */
+  rank: number;
+}
+
 /**
  * Filesystem event emitted by the backend watcher.
  *

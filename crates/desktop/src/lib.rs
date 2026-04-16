@@ -2,8 +2,8 @@
 //!
 //! Exposes `scan`, `list_files`, `list_files_with_metadata`,
 //! `list_volumes`, `start_watch`, `stop_watch`, `is_watching`,
-//! `list_tags`, `attach_tag`, `detach_tag`, and `list_files_with_tags`
-//! as Tauri IPC commands.
+//! `list_tags`, `attach_tag`, `detach_tag`, `list_files_with_tags`,
+//! `search`, and `search_rebuild` as Tauri IPC commands.
 //! `AppState` holds the resolved `Config` (data dir + device id) plus
 //! shared `Arc<SqliteMetadataRepository>` and `Arc<SqliteTagRepository>`
 //! handles, injected into every command via `tauri::State`.
@@ -18,7 +18,9 @@ pub mod state;
 
 use std::sync::Arc;
 
-use perima_db::{SqliteMetadataRepository, SqliteTagRepository, open_and_migrate};
+use perima_db::{
+    SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository, open_and_migrate,
+};
 use tauri::Manager;
 use tauri_specta::{Builder, collect_commands};
 
@@ -59,6 +61,8 @@ pub fn run() -> Result<(), RunError> {
         commands::attach_tag,
         commands::detach_tag,
         commands::list_files_with_tags,
+        commands::search,
+        commands::search_rebuild,
     ]);
 
     // Export TypeScript bindings in debug builds only.
@@ -111,8 +115,19 @@ pub fn run() -> Result<(), RunError> {
             let tag_conn = open_and_migrate(&db_path)?;
             let tag_repo = Arc::new(SqliteTagRepository::new(tag_conn));
 
-            let app_state =
-                state::AppState::new(cfg.data_dir, cfg.device_id, metadata_repo, tag_repo);
+            // WHY third open: `SqliteSearchRepository` needs its own
+            // `Mutex<Connection>`. Under WAL mode concurrent readers are
+            // never blocked by writers, so the extra handle is free.
+            let search_conn = open_and_migrate(&db_path)?;
+            let search_repo = Arc::new(SqliteSearchRepository::new(search_conn));
+
+            let app_state = state::AppState::new(
+                cfg.data_dir,
+                cfg.device_id,
+                metadata_repo,
+                tag_repo,
+                search_repo,
+            );
             app.manage(app_state);
 
             Ok(())
