@@ -182,15 +182,22 @@ where
 {
     let tags = tag_repo.list_tags()?;
 
+    // WHY pre-compute counts: propagate DB errors via `?` instead of
+    // swallowing them with `unwrap_or(0)` — a mutex-poison or SQLite
+    // failure should surface, not produce silent zero-counts.
+    let counts: Vec<u64> = tags
+        .iter()
+        .map(|t| tag_repo.count_files_for_tag(t.id))
+        .collect::<Result<_, _>>()?;
+
     if json {
-        // Build a Vec of plain objects for JSON serialisation.
         // WHY manual construction instead of deriving Serialize on Tag:
         // Tag already derives Serialize but we want a flat `{name, count, id}`
         // shape rather than Tag's `{id, name, first_seen}` shape.
         let rows: Vec<serde_json::Value> = tags
             .iter()
-            .map(|t| {
-                let count = tag_repo.count_files_for_tag(t.id).unwrap_or(0);
+            .zip(&counts)
+            .map(|(t, &count)| {
                 serde_json::json!({
                     "name":  t.name,
                     "count": count,
@@ -208,8 +215,7 @@ where
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
         writeln!(handle, "{:<32} {:>6}  ID", "NAME", "COUNT").map_err(CoreError::Io)?;
-        for t in &tags {
-            let count = tag_repo.count_files_for_tag(t.id).unwrap_or(0);
+        for (t, &count) in tags.iter().zip(&counts) {
             writeln!(handle, "{:<32} {:>6}  {}", t.name, count, t.id).map_err(CoreError::Io)?;
         }
     }
