@@ -13,8 +13,12 @@ describe("App file-event debounce", () => {
   });
 
   test("5 rapid file-events within 300ms trigger at most 1 list_files call", async () => {
-    // Initial mount: list_files resolves to empty array.
-    (invoke as Mock).mockResolvedValue([]);
+    // Initial mount: both list_files_with_tags and list_tags resolve to [].
+    (invoke as Mock).mockImplementation(async (cmd: string) => {
+      if (cmd === "list_tags") return [];
+      if (cmd === "list_files_with_tags") return [];
+      return [];
+    });
 
     // Capture the handler passed to listen so we can drive it.
     let capturedHandler: ((ev: { payload: unknown }) => void) | null = null;
@@ -23,8 +27,9 @@ describe("App file-event debounce", () => {
       return () => {};
     });
 
-    // WHY act() around mount: mount effects schedule async list_files and
-    // the subscribeToFileEvents promise, both of which land state updates.
+    // WHY act() around mount: mount effects schedule async list_files_with_tags
+    // and list_tags and the subscribeToFileEvents promise, all of which land
+    // state updates.
     await act(async () => {
       render(<App />);
       await vi.runAllTicks?.();
@@ -33,10 +38,14 @@ describe("App file-event debounce", () => {
       await Promise.resolve();
     });
 
-    // Ignore the initial list_files call from mount — only count events
-    // fired after we start dispatching file-events.
+    // Ignore the initial list_files_with_tags call from mount — only count
+    // events fired after we start dispatching file-events.
     (invoke as Mock).mockClear();
-    (invoke as Mock).mockResolvedValue([]);
+    (invoke as Mock).mockImplementation(async (cmd: string) => {
+      if (cmd === "list_tags") return [];
+      if (cmd === "list_files_with_tags") return [];
+      return [];
+    });
 
     if (!capturedHandler) {
       throw new Error("listen handler was never captured");
@@ -58,14 +67,15 @@ describe("App file-event debounce", () => {
       }
     });
 
-    // Before advancing time, no list_files call should have gone out yet.
+    // Before advancing time, no list_files_with_tags call should have gone
+    // out yet.
     const preCalls = (invoke as Mock).mock.calls.filter(
-      ([cmd]) => cmd === "list_files_with_metadata",
+      ([cmd]) => cmd === "list_files_with_tags",
     );
     expect(preCalls).toHaveLength(0);
 
     // Advance past the 300ms debounce window. act() flushes the setState
-    // that follows the list_files promise resolving.
+    // that follows the list_files_with_tags promise resolving.
     await act(async () => {
       vi.advanceTimersByTime(300);
       // Flush microtasks chained off the setTimeout callback.
@@ -74,14 +84,18 @@ describe("App file-event debounce", () => {
     });
 
     const postCalls = (invoke as Mock).mock.calls.filter(
-      ([cmd]) => cmd === "list_files_with_metadata",
+      ([cmd]) => cmd === "list_files_with_tags",
     );
     // Exactly one refresh for 5 rapid events — the whole point of debounce.
     expect(postCalls).toHaveLength(1);
   });
 
   test("surfaces watcher banner when subscribeToFileEvents fails", async () => {
-    (invoke as Mock).mockResolvedValue([]);
+    (invoke as Mock).mockImplementation(async (cmd: string) => {
+      if (cmd === "list_tags") return [];
+      if (cmd === "list_files_with_tags") return [];
+      return [];
+    });
     (listen as Mock).mockRejectedValue(new Error("channel closed"));
 
     render(<App />);

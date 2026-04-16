@@ -5,8 +5,9 @@ import FileGrid from "./components/FileGrid";
 import FileTable from "./components/FileTable";
 import ScanButton from "./components/ScanButton";
 import StatusBar from "./components/StatusBar";
+import TagSidebar from "./components/TagSidebar";
 import WatcherBanner from "./components/WatcherBanner";
-import type { FileWithMetadata, ScanResult } from "./types";
+import type { FileWithTags, ScanResult, Tag } from "./types";
 
 /**
  * Which rendering mode the main file list uses.
@@ -26,7 +27,9 @@ type ViewMode = "table" | "grid";
  * consumers grows beyond 2–3 components.
  */
 export default function App() {
-  const [files, setFiles] = useState<FileWithMetadata[]>([]);
+  const [files, setFiles] = useState<FileWithTags[]>([]);
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -35,7 +38,7 @@ export default function App() {
   // just not live-updating). Surface them via a dismissible banner rather
   // than the scan `error` state so they don't mask the StatusBar output.
   const [watcherError, setWatcherError] = useState<string | null>(null);
-  // WHY single fetch for both views: `listFilesWithMetadata` returns a
+  // WHY single fetch for both views: `listFilesWithTags` returns a
   // strict superset of `listFiles`, so the table reads the same rows it
   // used to and the grid gets its thumbnail fields "for free" — no need
   // to double-fetch on toggle.
@@ -44,7 +47,7 @@ export default function App() {
   useEffect(() => {
     // WHY: Populate the list on mount so existing indexed files are visible
     // immediately without requiring the user to trigger a scan.
-    api.listFilesWithMetadata(100).match(
+    api.listFilesWithTags(100).match(
       (result) => {
         setFiles(result);
         setLoading(false);
@@ -52,6 +55,12 @@ export default function App() {
       (err) => {
         setError(err);
         setLoading(false);
+      },
+    );
+    api.listTags().match(
+      (result) => setTags(result),
+      () => {
+        // WHY: tag fetch failure is non-fatal; the file list still renders.
       },
     );
   }, []);
@@ -71,7 +80,7 @@ export default function App() {
       .subscribeToFileEvents(() => {
         if (timer) clearTimeout(timer);
         timer = setTimeout(() => {
-          api.listFilesWithMetadata(100).match(
+          api.listFilesWithTags(100).match(
             (refreshed) => {
               if (active) setFiles(refreshed);
             },
@@ -111,10 +120,16 @@ export default function App() {
   function handleScanComplete(result: ScanResult, path: string) {
     setScanResult(result);
     setScanning(false);
-    // Refresh file list after a successful scan.
-    api.listFilesWithMetadata(100).match(
+    // Refresh file list and tags after a successful scan.
+    api.listFilesWithTags(100).match(
       (refreshed) => setFiles(refreshed),
       (err) => setError(err),
+    );
+    api.listTags().match(
+      (refreshed) => setTags(refreshed),
+      () => {
+        // WHY: tag fetch failure is non-fatal after scan.
+      },
     );
     // WHY: Auto-start the watcher on the folder we just scanned so live
     // updates flow without an extra user gesture. Non-blocking: failures
@@ -125,6 +140,21 @@ export default function App() {
       (err) => setWatcherError(`Failed to start watcher: ${err}`),
     );
   }
+
+  // Compute per-tag file counts from the full unfiltered list.
+  const counts: Record<string, number> = {};
+  for (const f of files) {
+    for (const t of f.tags) {
+      counts[t.id] = (counts[t.id] ?? 0) + 1;
+    }
+  }
+
+  // Filter the visible file list by the selected tag (client-side).
+  // WHY single-select: Set<string> multi-select deferred until post-v1.
+  const visibleFiles =
+    selectedTagId === null
+      ? files
+      : files.filter((f) => f.tags.some((t) => t.id === selectedTagId));
 
   return (
     <div className="bg-gray-900 text-gray-100 min-h-screen flex flex-col">
@@ -145,13 +175,23 @@ export default function App() {
         onDismiss={() => setWatcherError(null)}
       />
 
-      <main className="flex-1 overflow-auto p-4">
-        {viewMode === "table" ? (
-          <FileTable files={files} loading={loading} />
-        ) : (
-          <FileGrid files={files} loading={loading} />
+      <div className="flex-1 flex overflow-hidden">
+        {tags.length > 0 && (
+          <TagSidebar
+            tags={tags}
+            counts={counts}
+            selectedTagId={selectedTagId}
+            onSelect={setSelectedTagId}
+          />
         )}
-      </main>
+        <main className="flex-1 overflow-auto p-4">
+          {viewMode === "table" ? (
+            <FileTable files={visibleFiles} loading={loading} />
+          ) : (
+            <FileGrid files={visibleFiles} loading={loading} />
+          )}
+        </main>
+      </div>
 
       <footer>
         <StatusBar scanResult={scanResult} error={error} />

@@ -1,10 +1,11 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import type { FileWithMetadata } from "../types";
+import type { FileWithTags } from "../types";
+import TagChip from "./TagChip";
 
 /** Props for {@link FileGrid}. */
 interface FileGridProps {
   /** Rows to render as grid tiles. */
-  files: FileWithMetadata[];
+  files: FileWithTags[];
   /** When true, show a loading indicator instead of tiles. */
   loading?: boolean;
 }
@@ -49,7 +50,7 @@ export default function FileGrid({ files, loading = false }: FileGridProps) {
 }
 
 /** Single grid tile rendering either a thumbnail or a placeholder. */
-function FileGridTile({ file }: { file: FileWithMetadata }) {
+function FileGridTile({ file }: { file: FileWithTags }) {
   const ready =
     file.thumbnail_status === "ready" && file.thumbnail_path !== null;
   const filename = file.relative_path.split("/").pop() ?? file.relative_path;
@@ -75,6 +76,18 @@ function FileGridTile({ file }: { file: FileWithMetadata }) {
       <div className="p-1 text-xs truncate text-gray-200" title={filename}>
         {filename}
       </div>
+      {file.tags.length > 0 && (
+        <div className="px-1 pb-1 flex flex-wrap gap-0.5">
+          {file.tags.slice(0, 3).map((t) => (
+            <TagChip key={t.id} tag={t} />
+          ))}
+          {file.tags.length > 3 && (
+            <span className="text-xs text-gray-400 ml-1">
+              +{file.tags.length - 3}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

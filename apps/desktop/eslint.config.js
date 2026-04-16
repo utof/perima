@@ -29,6 +29,9 @@ export default [
         // the 300ms file-event debounce in App.tsx.
         setTimeout: "readonly",
         clearTimeout: "readonly",
+        // WHY: TextEncoder is a WHATWG Encoding API global available in
+        // Tauri's WebView; used by TagChip for procedural color hashing.
+        TextEncoder: "readonly",
       },
     },
     rules: {

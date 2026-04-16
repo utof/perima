@@ -1,14 +1,14 @@
 import { render, screen } from "@testing-library/react";
 import { describe, it, expect } from "vitest";
 import FileGrid from "../components/FileGrid";
-import type { FileWithMetadata } from "../types";
+import type { FileWithTags } from "../types";
 
 /**
- * Build a {@link FileWithMetadata} with every non-relevant field zeroed
+ * Build a {@link FileWithTags} with every non-relevant field zeroed
  * out. Only the caller-supplied overrides (hash + thumbnail state) matter
  * for these assertions.
  */
-function makeFile(overrides: Partial<FileWithMetadata>): FileWithMetadata {
+function makeFile(overrides: Partial<FileWithTags>): FileWithTags {
   return {
     hash: "0".repeat(64),
     size: 1024,
@@ -27,13 +27,14 @@ function makeFile(overrides: Partial<FileWithMetadata>): FileWithMetadata {
     mime_type: null,
     thumbnail_path: null,
     thumbnail_status: null,
+    tags: [],
     ...overrides,
   };
 }
 
 describe("FileGrid", () => {
   it("renders an <img> for ready tiles and placeholders for others", () => {
-    const files: FileWithMetadata[] = [
+    const files: FileWithTags[] = [
       makeFile({
         hash: "a".repeat(64),
         relative_path: "photos/ready.jpg",
