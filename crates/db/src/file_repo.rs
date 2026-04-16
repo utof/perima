@@ -122,6 +122,104 @@ impl SqliteFileRepository {
     }
 }
 
+/// Convert a `LocationStatus` to its DB string representation.
+///
+/// WHY: status values are stored as lowercase strings so they are human-readable
+/// in `SQLite` tooling and stable across future Rust refactors (an enum discriminant
+/// index would shift if variants were reordered). This is the single source of
+/// truth for the mapping; the deserializer in `list_file_locations` mirrors it.
+const fn status_to_str(status: LocationStatus) -> &'static str {
+    match status {
+        LocationStatus::Active => "active",
+        LocationStatus::Missing => "missing",
+        LocationStatus::Moved => "moved",
+        LocationStatus::Stale => "stale",
+    }
+}
+
+impl SqliteFileRepository {
+    /// Update the status of a non-deleted file location identified by
+    /// `(volume, path)`.
+    ///
+    /// Returns the number of rows updated (0 if no matching row exists,
+    /// 1 on success).
+    ///
+    /// # Errors
+    /// `CoreError::Internal` on DB or mutex failure.
+    // WHY allow(significant_drop_tightening): the Mutex guard `conn` must
+    // outlive the `execute` call that borrows through it.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn update_location_status(
+        &self,
+        volume: VolumeId,
+        path: &MediaPath,
+        status: LocationStatus,
+        device: DeviceId,
+    ) -> Result<u64, CoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
+        let vol_str = volume.0.to_string();
+        let path_str = path.as_str();
+        let status_str = status_to_str(status);
+        let dev_str = device.0.to_string();
+        let now = now_iso();
+        let n = conn
+            .execute(
+                "UPDATE file_locations
+                 SET status = ?1, updated_at = ?2, device_id = ?3
+                 WHERE volume_id = ?4 AND relative_path = ?5 AND deleted_at IS NULL",
+                rusqlite::params![status_str, now, dev_str, vol_str, path_str],
+            )
+            .map_err(Error::from)?;
+        // WHY: at most 1 active row per (volume, path) by app-level invariant.
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(n as u64)
+    }
+
+    /// Update the relative path of a non-deleted file location and reset its
+    /// status to `active`.
+    ///
+    /// Used when the watcher detects a rename/move within the same volume.
+    /// Returns the number of rows updated (0 if no matching row exists,
+    /// 1 on success).
+    ///
+    /// # Errors
+    /// `CoreError::Internal` on DB or mutex failure.
+    // WHY allow(significant_drop_tightening): the Mutex guard `conn` must
+    // outlive the `execute` call that borrows through it.
+    #[allow(clippy::significant_drop_tightening)]
+    pub fn update_location_path(
+        &self,
+        volume: VolumeId,
+        old_path: &MediaPath,
+        new_path: &MediaPath,
+        device: DeviceId,
+    ) -> Result<u64, CoreError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
+        let vol_str = volume.0.to_string();
+        let old_str = old_path.as_str();
+        let new_str = new_path.as_str();
+        let dev_str = device.0.to_string();
+        let now = now_iso();
+        let n = conn
+            .execute(
+                "UPDATE file_locations
+                 SET relative_path = ?1, status = 'active', updated_at = ?2, device_id = ?3
+                 WHERE volume_id = ?4 AND relative_path = ?5 AND deleted_at IS NULL",
+                rusqlite::params![new_str, now, dev_str, vol_str, old_str],
+            )
+            .map_err(Error::from)?;
+        // WHY: at most 1 active row per (volume, path) by app-level invariant.
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(n as u64)
+    }
+}
+
 impl FileRepository for SqliteFileRepository {
     fn upsert_file(
         &mut self,
@@ -297,6 +395,7 @@ impl FileRepository for SqliteFileRepository {
                 "active" => LocationStatus::Active,
                 "missing" => LocationStatus::Missing,
                 "moved" => LocationStatus::Moved,
+                "stale" => LocationStatus::Stale,
                 other => {
                     return Err(CoreError::Internal(format!(
                         "unknown location status: {other}"
@@ -533,5 +632,102 @@ mod tests {
             .migrate_sentinel_row(&f.discovered.relative_path, other_vol, dev)
             .expect("migrate");
         assert_eq!(updated, 0, "non-sentinel row must not be touched");
+    }
+
+    // --- update_location_status tests ---
+
+    #[test]
+    fn update_status_to_missing() {
+        let (_td, mut repo) = test_db();
+        let dev = device();
+        let vol = VolumeId::new();
+        let f = sample_hashed_file(b"missing_test", "img.jpg");
+        repo.upsert_file(&f, dev).expect("file");
+        repo.upsert_location(&f.hash, vol, &f.discovered.relative_path, dev)
+            .expect("location");
+
+        let updated = repo
+            .update_location_status(
+                vol,
+                &f.discovered.relative_path,
+                LocationStatus::Missing,
+                dev,
+            )
+            .expect("update status");
+        assert_eq!(updated, 1, "exactly 1 row must be updated");
+
+        // Confirm the status is now Missing.
+        let rows = repo.list_file_locations(10, Some(vol)).expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, LocationStatus::Missing);
+    }
+
+    #[test]
+    fn update_status_to_stale() {
+        let (_td, mut repo) = test_db();
+        let dev = device();
+        let vol = VolumeId::new();
+        let f = sample_hashed_file(b"stale_test", "doc.txt");
+        repo.upsert_file(&f, dev).expect("file");
+        repo.upsert_location(&f.hash, vol, &f.discovered.relative_path, dev)
+            .expect("location");
+
+        let updated = repo
+            .update_location_status(vol, &f.discovered.relative_path, LocationStatus::Stale, dev)
+            .expect("update status");
+        assert_eq!(updated, 1, "exactly 1 row must be updated");
+
+        // Confirm the status is now Stale.
+        let rows = repo.list_file_locations(10, Some(vol)).expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, LocationStatus::Stale);
+    }
+
+    // --- update_location_path tests ---
+
+    #[test]
+    fn update_location_path_renames() {
+        let (_td, mut repo) = test_db();
+        let dev = device();
+        let vol = VolumeId::new();
+        let f = sample_hashed_file(b"rename_test", "old_name.jpg");
+        repo.upsert_file(&f, dev).expect("file");
+        repo.upsert_location(&f.hash, vol, &f.discovered.relative_path, dev)
+            .expect("location");
+
+        // First set status to Stale to verify rename resets it to Active.
+        repo.update_location_status(vol, &f.discovered.relative_path, LocationStatus::Stale, dev)
+            .expect("set stale");
+
+        let old_path = MediaPath::new("old_name.jpg");
+        let new_path = MediaPath::new("new_name.jpg");
+        let updated = repo
+            .update_location_path(vol, &old_path, &new_path, dev)
+            .expect("rename");
+        assert_eq!(updated, 1, "exactly 1 row must be renamed");
+
+        // Confirm new path exists with Active status; old path is gone.
+        let rows = repo.list_file_locations(10, Some(vol)).expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].relative_path.as_str(), "new_name.jpg");
+        assert_eq!(rows[0].status, LocationStatus::Active);
+    }
+
+    #[test]
+    fn update_location_path_nonexistent() {
+        let (_td, repo) = test_db();
+        let dev = device();
+        let vol = VolumeId::new();
+
+        // No rows in DB — update must return 0 rows affected.
+        let old_path = MediaPath::new("ghost.jpg");
+        let new_path = MediaPath::new("phantom.jpg");
+        let updated = repo
+            .update_location_path(vol, &old_path, &new_path, dev)
+            .expect("rename on empty DB");
+        assert_eq!(
+            updated, 0,
+            "no rows must be affected for a nonexistent path"
+        );
     }
 }

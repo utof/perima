@@ -211,6 +211,9 @@ pub enum LocationStatus {
     Missing,
     /// The file has moved elsewhere on the same volume.
     Moved,
+    /// Hash is outdated — file was modified in place. Next scan
+    /// will re-hash and restore to Active.
+    Stale,
 }
 
 /// Outcome of a repository upsert.

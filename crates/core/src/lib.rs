@@ -3,10 +3,12 @@
 //! Zero framework dependencies.
 
 pub mod errors;
+pub mod events;
 pub mod ids;
 pub mod types;
 
 pub use errors::CoreError;
+pub use events::{EventBus, FileEvent};
 pub use types::{
     BlakeHash, DeviceId, DiscoveredFile, FileLocationRecord, FileSize, HashedFile, LocationStatus,
     MediaPath, UpsertOutcome, VolumeId, VolumeIdentifiers, VolumeRecord,
