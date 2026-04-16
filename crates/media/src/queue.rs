@@ -219,6 +219,8 @@ mod tests {
                 codec: None,
                 bitrate_bps: None,
                 mime_type: Some(mime.to_owned()),
+                thumbnail_path: None,
+                thumbnail_status: None,
             })
         }
     }

@@ -46,6 +46,25 @@ pub struct MediaMetadata {
     pub bitrate_bps: Option<u32>,
     /// MIME type as detected at extraction time.
     pub mime_type: Option<String>,
+    /// Absolute path to the generated WebP thumbnail on disk, or `None`
+    /// if thumbnail generation has not been attempted yet.
+    ///
+    /// WHY persisted, not derived: the path layout (`<data_dir>/
+    /// thumbnails/<aa>/<hash>.webp`) is a backend implementation detail;
+    /// storing the resolved path here lets the desktop layer feed it
+    /// straight into Tauri's `convertFileSrc` without recomputing the
+    /// prefix scheme.
+    pub thumbnail_path: Option<String>,
+    /// Lifecycle state of the thumbnail. Conventional values:
+    /// `Some("ready")`, `Some("pending")`, `Some("failed")`, or `None`
+    /// for rows whose thumbnail has not yet been attempted.
+    ///
+    /// WHY `Option<String>` (not an enum): v0.4.1 keeps the state
+    /// machine open-ended so Task 2's queue worker and a future retry
+    /// command can introduce additional states (`"skipped"`,
+    /// `"unsupported"`) without a schema migration. Promotion to a
+    /// typed enum lands when the states stabilise.
+    pub thumbnail_status: Option<String>,
 }
 
 /// MIME-dispatched extractor.

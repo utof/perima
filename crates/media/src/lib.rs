@@ -11,9 +11,11 @@
 
 pub mod extractor;
 pub mod queue;
+pub mod thumbnail;
 
 pub use extractor::{CompositeExtractor, ImageExtractor, VideoExtractor};
 pub use queue::{MetadataQueue, Work};
+pub use thumbnail::{DEFAULT_MAX_SIZE, ThumbnailGenerator};
 
 /// Marker placeholder retained for phase-0 compatibility.
 pub const CRATE_NAME: &str = "perima-media";

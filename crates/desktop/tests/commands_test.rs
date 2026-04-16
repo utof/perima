@@ -112,6 +112,8 @@ fn list_files_with_metadata_returns_rows() {
         codec: None,
         bitrate_bps: None,
         mime_type: Some("image/jpeg".into()),
+        thumbnail_path: None,
+        thumbnail_status: None,
     };
     repo.upsert_metadata(&meta, device_id)
         .expect("upsert_metadata");

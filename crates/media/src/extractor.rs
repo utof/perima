@@ -67,6 +67,8 @@ impl MetadataExtractor for ImageExtractor {
             codec: None,
             bitrate_bps: None,
             mime_type: Some(mime.to_owned()),
+            thumbnail_path: None,
+            thumbnail_status: None,
         })
     }
 }
@@ -205,6 +207,8 @@ impl MetadataExtractor for VideoExtractor {
                     codec: None,
                     bitrate_bps: None,
                     mime_type: Some(mime.to_owned()),
+                    thumbnail_path: None,
+                    thumbnail_status: None,
                 });
             }
         };
@@ -222,6 +226,8 @@ impl MetadataExtractor for VideoExtractor {
             codec,
             bitrate_bps: None,
             mime_type: Some(mime.to_owned()),
+            thumbnail_path: None,
+            thumbnail_status: None,
         })
     }
 }
@@ -368,6 +374,8 @@ impl MetadataExtractor for CompositeExtractor {
             codec: None,
             bitrate_bps: None,
             mime_type: Some(mime.to_owned()),
+            thumbnail_path: None,
+            thumbnail_status: None,
         })
     }
 }

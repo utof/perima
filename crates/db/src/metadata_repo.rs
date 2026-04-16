@@ -109,11 +109,11 @@ fn u64_opt_to_i64(v: Option<u64>) -> Result<Option<i64>, CoreError> {
 
 /// Raw tuple mirroring the optional columns of a `file_metadata` row.
 ///
-/// WHY type alias: the 9-tuple is repeated in `find_by_hash` and keeps
+/// WHY type alias: the 11-tuple is repeated in `find_by_hash` and keeps
 /// clippy's `type_complexity` wall satisfied without suppression.
 /// Field order matches the SELECT clause: `width, height, duration_ms,
 /// captured_at, camera_make, camera_model, codec, bitrate_bps,
-/// mime_type`.
+/// mime_type, thumbnail_path, thumbnail_status`.
 type MetadataRowCols = (
     Option<i64>,
     Option<i64>,
@@ -123,6 +123,8 @@ type MetadataRowCols = (
     Option<String>,
     Option<String>,
     Option<i64>,
+    Option<String>,
+    Option<String>,
     Option<String>,
 );
 
@@ -196,8 +198,11 @@ impl MetadataRepository for SqliteMetadataRepository {
                     "INSERT INTO file_metadata
                      (blake3_hash, width, height, duration_ms, captured_at,
                       camera_make, camera_model, codec, bitrate_bps, mime_type,
+                      thumbnail_path, thumbnail_status,
                       extracted_at, updated_at, device_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11, ?12)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                             ?11, ?12,
+                             ?13, ?13, ?14)",
                     rusqlite::params![
                         hash_hex,
                         meta.width,
@@ -209,6 +214,8 @@ impl MetadataRepository for SqliteMetadataRepository {
                         meta.codec,
                         meta.bitrate_bps,
                         meta.mime_type,
+                        meta.thumbnail_path,
+                        meta.thumbnail_status,
                         now,
                         dev_str,
                     ],
@@ -234,7 +241,8 @@ impl MetadataRepository for SqliteMetadataRepository {
                      SET width = ?2, height = ?3, duration_ms = ?4,
                          captured_at = ?5, camera_make = ?6, camera_model = ?7,
                          codec = ?8, bitrate_bps = ?9, mime_type = ?10,
-                         updated_at = ?11, device_id = ?12
+                         thumbnail_path = ?11, thumbnail_status = ?12,
+                         updated_at = ?13, device_id = ?14
                      WHERE blake3_hash = ?1",
                     rusqlite::params![
                         hash_hex,
@@ -247,6 +255,8 @@ impl MetadataRepository for SqliteMetadataRepository {
                         meta.codec,
                         meta.bitrate_bps,
                         meta.mime_type,
+                        meta.thumbnail_path,
+                        meta.thumbnail_status,
                         now,
                         dev_str,
                     ],
@@ -273,7 +283,8 @@ impl MetadataRepository for SqliteMetadataRepository {
         let row: Option<MetadataRowCols> = conn
             .query_row(
                 "SELECT width, height, duration_ms, captured_at,
-                        camera_make, camera_model, codec, bitrate_bps, mime_type
+                        camera_make, camera_model, codec, bitrate_bps, mime_type,
+                        thumbnail_path, thumbnail_status
                  FROM file_metadata
                  WHERE blake3_hash = ?1 AND deleted_at IS NULL",
                 [&hash_hex],
@@ -288,6 +299,8 @@ impl MetadataRepository for SqliteMetadataRepository {
                         r.get(6)?,
                         r.get(7)?,
                         r.get(8)?,
+                        r.get(9)?,
+                        r.get(10)?,
                     ))
                 },
             )
@@ -306,6 +319,8 @@ impl MetadataRepository for SqliteMetadataRepository {
                 codec,
                 bitrate_bps,
                 mime_type,
+                thumbnail_path,
+                thumbnail_status,
             )) => Ok(Some(MediaMetadata {
                 hash: *hash,
                 width: i64_to_u32_opt(width)?,
@@ -317,6 +332,8 @@ impl MetadataRepository for SqliteMetadataRepository {
                 codec,
                 bitrate_bps: i64_to_u32_opt(bitrate_bps)?,
                 mime_type,
+                thumbnail_path,
+                thumbnail_status,
             })),
         }
     }
@@ -351,7 +368,7 @@ impl MetadataRepository for SqliteMetadataRepository {
                         fm.updated_at,
                         fm.width, fm.height, fm.duration_ms, fm.captured_at,
                         fm.camera_make, fm.camera_model, fm.codec, fm.bitrate_bps,
-                        fm.mime_type
+                        fm.mime_type, fm.thumbnail_path, fm.thumbnail_status
                  FROM file_locations fl
                  JOIN files f ON f.blake3_hash = fl.blake3_hash
                  LEFT JOIN file_metadata fm
@@ -382,6 +399,8 @@ impl MetadataRepository for SqliteMetadataRepository {
                 let codec: Option<String> = row.get(13)?;
                 let bitrate_bps: Option<i64> = row.get(14)?;
                 let mime_type: Option<String> = row.get(15)?;
+                let thumbnail_path: Option<String> = row.get(16)?;
+                let thumbnail_status: Option<String> = row.get(17)?;
                 Ok((
                     hash_hex,
                     size,
@@ -399,6 +418,8 @@ impl MetadataRepository for SqliteMetadataRepository {
                     codec,
                     bitrate_bps,
                     mime_type,
+                    thumbnail_path,
+                    thumbnail_status,
                 ))
             })
             .map_err(Error::from)?;
@@ -422,6 +443,8 @@ impl MetadataRepository for SqliteMetadataRepository {
                 codec,
                 bitrate_bps,
                 mime_type,
+                thumbnail_path,
+                thumbnail_status,
             ) = row.map_err(Error::from)?;
             let hash = BlakeHash::parse_hex(&hash_hex)?;
             let volume_id = VolumeId(
@@ -457,6 +480,8 @@ impl MetadataRepository for SqliteMetadataRepository {
                     codec,
                     bitrate_bps: i64_to_u32_opt(bitrate_bps)?,
                     mime_type,
+                    thumbnail_path,
+                    thumbnail_status,
                 })
             };
 
@@ -515,6 +540,8 @@ mod tests {
             codec: None,
             bitrate_bps: None,
             mime_type: Some("image/jpeg".into()),
+            thumbnail_path: None,
+            thumbnail_status: None,
         }
     }
 
