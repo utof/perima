@@ -52,6 +52,19 @@ impl DebouncedWatcher {
         cancel: CancellationToken,
         debounce: Duration,
     ) -> Result<Self, CoreError> {
+        // WHY canonicalize: on macOS, tempdir() (and other paths) may return
+        // /var/folders/... which is a symlink to /private/var/folders/....
+        // FSEvents reports the canonical /private/var/... form, so
+        // strip_prefix in relativize() fails for every event and nothing
+        // reaches the bus.  Canonicalizing both the registered paths and
+        // volume_root ensures they match whatever the OS reports in events.
+        // dunce::canonicalize avoids UNC prefixes on Windows.
+        let canonical_root = dunce::canonicalize(volume_root).map_err(CoreError::Io)?;
+        let canonical_paths: Vec<PathBuf> = paths
+            .iter()
+            .map(|p| dunce::canonicalize(p).map_err(CoreError::Io))
+            .collect::<Result<_, _>>()?;
+
         // WHY std mpsc: notify-debouncer-full uses std::sync::mpsc for its
         // callback channel. We bridge to async by spawning a
         // tokio::task::spawn_blocking receiver loop.
@@ -60,14 +73,14 @@ impl DebouncedWatcher {
         let mut debouncer = new_debouncer(debounce, None, tx)
             .map_err(|e| CoreError::Internal(format!("debouncer init: {e}")))?;
 
-        for path in paths {
+        for path in &canonical_paths {
             debouncer
                 .watch(path, RecursiveMode::Recursive)
                 .map_err(|e| CoreError::Internal(format!("watch {}: {e}", path.display())))?;
         }
 
-        // Clone what we need to move into the blocking task.
-        let volume_root = volume_root.to_path_buf();
+        // Use the canonicalized root in the event loop.
+        let volume_root = canonical_root;
 
         // WHY spawn_blocking: `rx.recv()` is a blocking call; running it on the
         // async executor would stall the runtime thread. `spawn_blocking` offloads
