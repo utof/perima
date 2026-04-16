@@ -1,0 +1,30 @@
+[package]
+name = "perima-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+perima-core = { path = "../core" }
+image.workspace        = true
+kamadak-exif.workspace = true
+mp4parse.workspace     = true
+mime_guess.workspace   = true
+tokio.workspace        = true
+tokio-util.workspace   = true
+thiserror.workspace    = true
+tracing.workspace      = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# WHY: the `mp4` crate (writer, separate from mp4parse reader) lets us
+# synthesize a minimal-valid MP4 container at test runtime without
+# committing a binary fixture to git. Kept dev-only because the main
+# code path only parses MP4s, never emits them.
+mp4 = "0.14"
+blake3.workspace = true
+
+[lints]
+workspace = true
