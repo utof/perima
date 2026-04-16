@@ -15,6 +15,7 @@ use perima_desktop::commands::{
     list_files_inner, list_files_with_metadata_inner, list_volumes_inner, run_scan_inner,
     run_scan_inner_with_metadata,
 };
+use perima_desktop::config::resolve_with_app_data_dir;
 
 /// Create three fixture files that mimic the canonical CLI test fixtures.
 fn mk_fixture(dir: &Path) {
@@ -255,5 +256,50 @@ async fn desktop_scan_populates_metadata_and_thumbnails() {
         "expected 2 .webp thumbnails under {}, found {}",
         thumb_root.display(),
         thumb_count,
+    );
+}
+
+/// Regression for v0.4.3: thumbnail directory referenced by
+/// `AppState.data_dir` must fall under the same subtree the
+/// `tauri.conf.json` `assetProtocol.scope` allows. If this diverges,
+/// `convertFileSrc` returns 404 silently and every grid tile becomes
+/// a broken image.
+///
+/// WHY no real Tauri runtime: we cannot exercise `convertFileSrc`
+/// without a display, but we CAN pin that the `data_dir`-derived
+/// thumbnail root starts with the simulated `app_data_dir` (matching
+/// what Tauri's `$APPDATA` variable would expand to at runtime) AND
+/// contains the `/perima/thumbnails/` segment the scope literal
+/// declares. A future change that flips config to point elsewhere
+/// trips this test.
+#[test]
+fn thumbnail_root_matches_asset_protocol_scope() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // Simulate `app.path().app_data_dir()` on Linux:
+    // `~/.local/share/dev.perima.desktop`.
+    let app_data_dir = tmp.path().join("dev.perima.desktop");
+
+    let cfg = resolve_with_app_data_dir(&app_data_dir).expect("resolve_with_app_data_dir");
+
+    // Production thumbnail root is `<data_dir>/thumbnails/` — see
+    // `ThumbnailGenerator::new(data_dir)` construction in
+    // `crates/desktop/src/commands.rs::run_scan_inner_with_metadata`.
+    let thumb_root = cfg.data_dir.join("thumbnails");
+
+    assert!(
+        thumb_root.starts_with(&app_data_dir),
+        "thumbnail root {} must live under app_data_dir {} (Tauri's $APPDATA)",
+        thumb_root.display(),
+        app_data_dir.display(),
+    );
+
+    // The scope literal is `$APPDATA/perima/thumbnails/**`. With
+    // `data_dir = <app_data_dir>/perima`, `<data_dir>/thumbnails` is
+    // exactly the scope-root directory. `.ends_with` here is a
+    // logical suffix match on path components, not a substring match.
+    assert!(
+        thumb_root.ends_with("perima/thumbnails"),
+        "thumbnail root {} must end in perima/thumbnails (matches $APPDATA/perima/thumbnails/** scope literal)",
+        thumb_root.display(),
     );
 }

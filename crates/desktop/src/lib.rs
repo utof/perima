@@ -18,6 +18,7 @@ pub mod state;
 use std::sync::Arc;
 
 use perima_db::{SqliteMetadataRepository, open_and_migrate};
+use tauri::Manager;
 use tauri_specta::{Builder, collect_commands};
 
 /// Boxed error type used by [`run`].
@@ -41,20 +42,6 @@ pub type RunError = Box<dyn std::error::Error + Send + Sync>;
 /// error. No panic paths remain; all previously `.expect()`-ed sites now
 /// propagate via `?`.
 pub fn run() -> Result<(), RunError> {
-    let cfg = config::resolve_config()?;
-
-    // WHY eager open + Arc-wrap: `SqliteMetadataRepository` holds a
-    // `Mutex<Connection>` and is deliberately shared — Task 5 wires it
-    // into `AppState`, and a future v0.4.1 background `MetadataQueue`
-    // worker will clone the same `Arc`. A fresh `open_and_migrate`
-    // here also guarantees V001 + V002 migrations run before the first
-    // command fires. Under WAL mode the extra open is free.
-    let db_path = cfg.data_dir.join("perima.db");
-    let metadata_conn = open_and_migrate(&db_path)?;
-    let metadata_repo = Arc::new(SqliteMetadataRepository::new(metadata_conn));
-
-    let app_state = state::AppState::new(cfg.data_dir, cfg.device_id, metadata_repo);
-
     // WHY: tauri-specta Builder collects #[specta::specta]-annotated commands
     // and generates TypeScript bindings at build time (debug only). The invoke
     // handler is then wired into tauri::Builder so the frontend can call typed
@@ -78,11 +65,42 @@ pub fn run() -> Result<(), RunError> {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(app_state)
         .manage(state::WatcherState::new())
         .invoke_handler(specta_builder.invoke_handler())
         .setup(move |app| {
             specta_builder.mount_events(app);
+
+            // WHY resolve config INSIDE .setup() (v0.4.3): the Tauri
+            // `assetProtocol.scope` literal in `tauri.conf.json` is
+            // `$APPDATA/perima/thumbnails/**`, where `$APPDATA`
+            // resolves via the Tauri bundle identifier
+            // (`dev.perima.desktop`). Prior versions resolved config
+            // via the `directories` crate instead, producing a
+            // different subtree — the scope never matched runtime
+            // thumbnail paths and `convertFileSrc` silently 404ed
+            // every thumbnail in the grid. `app.path().app_data_dir()`
+            // is the single source of truth: every downstream path
+            // (DB location, thumbnail root, device-id sidecar) is
+            // derived from it so the scope literal matches end-to-end.
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| format!("resolve app_data_dir: {e}"))?;
+            let cfg = config::resolve_with_app_data_dir(&app_data_dir)?;
+
+            // WHY eager open + Arc-wrap: `SqliteMetadataRepository` holds a
+            // `Mutex<Connection>` and is deliberately shared — commands
+            // clone the same `Arc` into the background `MetadataQueue`
+            // worker during scans. Running `open_and_migrate` here
+            // guarantees V001..V004 migrations run before the first
+            // command fires; WAL mode makes later re-opens free.
+            let db_path = cfg.data_dir.join("perima.db");
+            let metadata_conn = open_and_migrate(&db_path)?;
+            let metadata_repo = Arc::new(SqliteMetadataRepository::new(metadata_conn));
+
+            let app_state = state::AppState::new(cfg.data_dir, cfg.device_id, metadata_repo);
+            app.manage(app_state);
+
             Ok(())
         })
         .run(tauri::generate_context!())?;

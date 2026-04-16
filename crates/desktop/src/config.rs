@@ -54,6 +54,51 @@ pub fn resolve_config() -> Result<Config, CoreError> {
     })
 }
 
+/// Resolve config using the Tauri-provided `app_data_dir`.
+///
+/// WHY a second entry point (not just an override on [`resolve_config`]):
+/// `tauri.conf.json`'s `assetProtocol.scope` literal is
+/// `$APPDATA/perima/thumbnails/**`, where `$APPDATA` resolves via the
+/// Tauri bundle identifier (`dev.perima.desktop`) to e.g.
+/// `~/.local/share/dev.perima.desktop` on Linux. The `directories`
+/// crate, in contrast, resolves `ProjectDirs::from("dev","perima","perima")`
+/// to `~/.local/share/perima` — a different subtree. Before this fix,
+/// the runtime wrote thumbnails under the `directories`-derived path
+/// while the scope allowlisted the Tauri-derived path; every
+/// `convertFileSrc(thumbnail_path)` therefore returned 404.
+///
+/// The Tauri-resolved `app_data_dir` is the single source of truth the
+/// desktop backend now threads through. `data_dir` is
+/// `<app_data_dir>/perima` so the existing scope literal
+/// (`$APPDATA/perima/thumbnails/**`) matches the runtime's thumbnail
+/// root (`<app_data_dir>/perima/thumbnails/...`). The `perima`
+/// subdirectory also keeps the CLI's `~/.local/share/perima` layout
+/// conceptually aligned: the directory basename stays `perima`, only
+/// the parent tree changes to the Tauri bundle-id subtree.
+///
+/// `config_dir` reuses `app_data_dir` (no separate XDG config subtree)
+/// because the Tauri bundle-id tree is already a single dedicated
+/// directory per app; splitting config vs data there buys nothing.
+/// `device_id.txt` lives at `<app_data_dir>/device_id.txt`.
+///
+/// # Errors
+/// Returns `CoreError::Io` on filesystem failures creating the directories
+/// or reading / writing the device-id sidecar.
+pub fn resolve_with_app_data_dir(app_data_dir: &Path) -> Result<Config, CoreError> {
+    let config_dir = app_data_dir.to_path_buf();
+    let data_dir = app_data_dir.join("perima");
+
+    std::fs::create_dir_all(&config_dir)?;
+    std::fs::create_dir_all(&data_dir)?;
+
+    let device_id = load_or_create_device_id(&config_dir)?;
+    Ok(Config {
+        data_dir,
+        config_dir,
+        device_id,
+    })
+}
+
 fn load_or_create_device_id(config_dir: &Path) -> Result<DeviceId, CoreError> {
     let path = config_dir.join("device_id.txt");
     if path.exists() {
@@ -99,5 +144,32 @@ mod tests {
         let b = resolve_with_dirs(tmp.path().to_path_buf(), tmp.path().to_path_buf())
             .expect("resolve 2");
         assert_eq!(a.device_id.0, b.device_id.0);
+    }
+
+    /// `data_dir` ends in a `perima` segment so the runtime thumbnail
+    /// root `<data_dir>/thumbnails/...` falls inside the asset-protocol
+    /// scope literal `$APPDATA/perima/thumbnails/**` declared in
+    /// `tauri.conf.json`. If this assertion breaks, `convertFileSrc`
+    /// silently 404s in the `WebView`.
+    #[test]
+    fn app_data_dir_derives_perima_subtree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Simulate Tauri's `app.path().app_data_dir()` returning
+        // `<tmp>/dev.perima.desktop`.
+        let app_data_dir = tmp.path().join("dev.perima.desktop");
+        let cfg = resolve_with_app_data_dir(&app_data_dir).expect("resolve");
+
+        assert_eq!(
+            cfg.data_dir,
+            app_data_dir.join("perima"),
+            "data_dir must be <app_data_dir>/perima so $APPDATA/perima/thumbnails/** matches",
+        );
+        let thumb_root = cfg.data_dir.join("thumbnails");
+        assert!(
+            thumb_root.starts_with(&app_data_dir),
+            "thumbnail root {} must fall under app_data_dir {}",
+            thumb_root.display(),
+            app_data_dir.display(),
+        );
     }
 }
