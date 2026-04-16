@@ -70,6 +70,12 @@ enum Command {
 
     /// List known volumes and their mount paths on this machine.
     Volumes,
+
+    /// Watch a directory for filesystem changes and update the database.
+    Watch {
+        /// Directory to watch.
+        root: PathBuf,
+    },
 }
 
 /// Entry point. Tokio runtime is required for the `watch` command (phase 3a)
@@ -120,6 +126,8 @@ async fn main() -> ExitCode {
         } => dispatch_ls(volume, limit, json, &config),
 
         Command::Volumes => dispatch_volumes(&config),
+
+        Command::Watch { root } => dispatch_watch(root, &config, &cancel).await,
     }
 }
 
@@ -276,6 +284,21 @@ fn dispatch_ls(volume: Option<String>, limit: usize, json: bool, config: &Config
     };
     match cmd::ls::run(&repo, &ls_args) {
         Ok(()) => ExitCode::from(0),
+        Err(e) => {
+            eprintln!("perima: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Run the `watch` subcommand.
+async fn dispatch_watch(root: PathBuf, config: &Config, cancel: &Cancellation) -> ExitCode {
+    match cmd::watch::run(&config.data_dir, config.device_id, &root, cancel).await {
+        Ok(()) => ExitCode::from(0),
+        Err(perima_core::CoreError::InvalidPath(msg)) => {
+            eprintln!("perima: {msg}");
+            ExitCode::from(2)
+        }
         Err(e) => {
             eprintln!("perima: {e}");
             ExitCode::from(1)

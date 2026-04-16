@@ -2647,6 +2647,7 @@ dependencies = [
  "directories",
  "dunce",
  "insta",
+ "nix",
  "perima-core",
  "perima-db",
  "perima-fs",

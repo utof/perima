@@ -33,5 +33,10 @@ insta.workspace      = true
 rusqlite.workspace   = true
 serde_json.workspace = true
 
+[target.'cfg(unix)'.dev-dependencies]
+# WHY: nix provides POSIX signal utilities (kill/SIGTERM) without unsafe libc.
+# Used in watch integration tests to send SIGTERM to the spawned child.
+nix = { version = "0.31", features = ["signal"] }
+
 [lints]
 workspace = true
