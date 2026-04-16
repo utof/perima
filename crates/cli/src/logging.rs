@@ -25,9 +25,7 @@ pub fn init(verbosity_bump: u8) -> Result<(), CoreError> {
     let filter = EnvFilter::try_new(&filter_str)
         .map_err(|e| CoreError::Internal(format!("env filter: {e}")))?;
 
-    let json = std::env::var("PERIMA_LOG_JSON")
-        .map(|v| v == "1")
-        .unwrap_or(false);
+    let json = std::env::var("PERIMA_LOG_JSON").is_ok_and(|v| v == "1");
 
     let registry = tracing_subscriber::registry().with(filter);
     if json {
