@@ -3189,6 +3189,7 @@ dependencies = [
  "chrono",
  "directories",
  "dunce",
+ "image",
  "perima-core",
  "perima-db",
  "perima-fs",

@@ -12,11 +12,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use perima_core::{
-    CoreError, DeviceId, EventBus, FileEvent, LocationStatus, MetadataRepository, VolumeId,
+    CoreError, DeviceId, EventBus, FileEvent, LocationStatus, MetadataExtractor,
+    MetadataRepository, VolumeId,
 };
 use perima_db::{SqliteFileRepository, SqliteVolumeRepository, open_and_migrate};
 use perima_fs::{DebouncedWatcher, WalkdirScanner};
 use perima_hash::Blake3Service;
+use perima_media::{
+    CompositeExtractor, ImageExtractor, MetadataQueue, ThumbnailGenerator, VideoExtractor,
+};
 use rayon::prelude::*;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -24,6 +28,14 @@ use tokio_util::sync::CancellationToken;
 use crate::events::TauriEventEmitter;
 use crate::payloads::FileWithMetadataPayload;
 use crate::state::{AppState, WatcherState};
+
+/// Maximum time `scan` waits for the metadata worker to drain after
+/// the walk loop completes.
+///
+/// WHY 30 s: mirrors the CLI's `METADATA_DRAIN_TIMEOUT`. Long enough
+/// for a typical small-tree scan to complete comfortably, short enough
+/// that a stuck extractor cannot hang the Tauri command indefinitely.
+const METADATA_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // Event handlers (duplicated from crates/cli/src/cmd/watch.rs)
@@ -224,7 +236,15 @@ impl From<perima_core::VolumeRecord> for VolumeEntry {
 ///
 /// WHY type alias: the full `Option<&dyn Fn(...)>` signature trips
 /// `clippy::type_complexity`. This alias keeps call sites readable.
-pub type OnPersistFn<'a> = Option<&'a dyn Fn(&perima_core::MediaPath, VolumeId, DeviceId)>;
+///
+/// WHY `Send + Sync` bounds: the async `scan` command's future must be
+/// `Send` (Tauri's command dispatcher requires it). Holding a plain
+/// `&dyn Fn(...)` across the queue-drain `.await` pins the future to a
+/// non-Send type. The sentinel closure wraps a `SqliteFileRepository`
+/// whose `Mutex<Connection>` is already `Send + Sync`, so adding the
+/// bound here is a documentation change, not a behavioural one.
+pub type OnPersistFn<'a> =
+    Option<&'a (dyn Fn(&perima_core::MediaPath, VolumeId, DeviceId) + Send + Sync)>;
 
 // ---------------------------------------------------------------------------
 // Commands
@@ -244,29 +264,66 @@ pub type OnPersistFn<'a> = Option<&'a dyn Fn(&perima_core::MediaPath, VolumeId, 
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 #[specta::specta]
-pub fn scan(
+pub async fn scan(
     path: String,
     dry_run: bool,
     state: tauri::State<'_, AppState>,
 ) -> Result<ScanResult, String> {
     let root = PathBuf::from(&path);
-    run_scan_inner(&root, dry_run, &state.data_dir, state.device_id).map_err(|e| e.to_string())
+    // WHY pass metadata_repo through: phase 4's metadata queue +
+    // thumbnail pipeline was wired into the CLI scan but the desktop
+    // scan shipped without it — the desktop app would index files but
+    // never run extractors or generate thumbnails. See
+    // utof/perima#15 HIGH #11a.
+    let metadata_repo: Arc<dyn MetadataRepository> =
+        Arc::clone(&state.metadata_repo) as Arc<dyn MetadataRepository>;
+    let data_dir = state.data_dir.clone();
+    let device_id = state.device_id;
+    run_scan_inner_with_metadata(&root, dry_run, &data_dir, device_id, Some(metadata_repo))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Inner scan logic extracted for testability without a live Tauri state.
 ///
 /// WHY: `tauri::State` cannot be constructed outside a running Tauri app, so
 /// integration tests call this function directly with plain `Path`/`DeviceId`
-/// arguments.
+/// arguments. This overload skips the metadata queue; use
+/// [`run_scan_inner_with_metadata`] to exercise the full extract + thumbnail
+/// pipeline.
 ///
 /// # Errors
 /// Returns [`perima_core::CoreError`] on filesystem, volume detection, hash,
 /// or database failures.
-pub fn run_scan_inner(
+pub async fn run_scan_inner(
     root: &Path,
     dry_run: bool,
     data_dir: &Path,
     device_id: DeviceId,
+) -> Result<ScanResult, perima_core::CoreError> {
+    run_scan_inner_with_metadata(root, dry_run, data_dir, device_id, None).await
+}
+
+/// Inner scan logic with optional metadata-queue wiring.
+///
+/// When `metadata_repo` is `Some`, a [`MetadataQueue`] is spawned
+/// before the walk; every successful `Inserted`/`Updated` upsert
+/// enqueues `(hash, absolute_path)`. The queue is drained with a
+/// bounded 30 s timeout at exit.
+///
+/// The thumbnailer is rooted at `data_dir` (mirrors the CLI pattern)
+/// so generated WebP files live under `<data_dir>/thumbnails/...` —
+/// the same directory the Tauri asset protocol scope exposes.
+///
+/// # Errors
+/// Returns [`perima_core::CoreError`] on filesystem, volume detection, hash,
+/// or database failures.
+pub async fn run_scan_inner_with_metadata(
+    root: &Path,
+    dry_run: bool,
+    data_dir: &Path,
+    device_id: DeviceId,
+    metadata_repo: Option<Arc<dyn MetadataRepository>>,
 ) -> Result<ScanResult, perima_core::CoreError> {
     validate_root(root)?;
     let canonical_root = dunce::canonicalize(root).map_err(perima_core::CoreError::Io)?;
@@ -301,6 +358,14 @@ pub fn run_scan_inner(
         }
     };
 
+    // WHY thumbnailer rooted at `data_dir`: the Tauri asset-protocol
+    // scope (`tauri.conf.json`) exposes
+    // `$APPDATA/perima/thumbnails/**`; resolving the generator to the
+    // same directory tree keeps `convertFileSrc` calls from the
+    // frontend working end-to-end.
+    let thumbnailer: Arc<ThumbnailGenerator> =
+        Arc::new(ThumbnailGenerator::new(data_dir.to_path_buf()));
+
     run_scan_live(
         &scanner,
         &hasher,
@@ -310,7 +375,10 @@ pub fn run_scan_inner(
         device_id,
         &canonical_root,
         &never_cancel,
+        metadata_repo,
+        thumbnailer,
     )
+    .await
 }
 
 /// List indexed file locations, optionally filtered by volume.
@@ -653,8 +721,15 @@ where
     })
 }
 
+// WHY allow(clippy::cognitive_complexity): the loop body grew a single
+// additional branch for metadata enqueue per task 4 of the v0.4.2
+// hotfix plan. Splitting it would require threading half a dozen
+// borrowed locals through a helper signature — same trade-off the CLI
+// scan made for the same reason.
 #[allow(clippy::too_many_arguments)]
-fn run_scan_live<S, H, FR, VR>(
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::cognitive_complexity)]
+async fn run_scan_live<S, H, FR, VR>(
     scanner: &S,
     hasher: &H,
     file_repo: &mut FR,
@@ -663,6 +738,8 @@ fn run_scan_live<S, H, FR, VR>(
     device_id: DeviceId,
     canonical_root: &Path,
     never_cancel: &Arc<AtomicBool>,
+    metadata_repo: Option<Arc<dyn MetadataRepository>>,
+    thumbnailer: Arc<ThumbnailGenerator>,
 ) -> Result<ScanResult, perima_core::CoreError>
 where
     S: perima_core::Scanner + ?Sized,
@@ -681,6 +758,27 @@ where
     let mount_point = detected.mount_point.clone();
 
     tracing::debug!(volume_label = %label, "volume resolved");
+
+    // WHY cancel + queue spawned BEFORE the walk: the queue worker
+    // needs to be alive before the first enqueue, and `queue` must
+    // outlive the persist loop so all enqueues have somewhere to land.
+    // `CancellationToken` is cheap to clone and never actually tripped
+    // by this command (desktop has no Ctrl-C handler); its presence
+    // keeps the MetadataQueue API uniform across callers.
+    let queue_cancel = CancellationToken::new();
+    let mut queue: Option<MetadataQueue> = metadata_repo.as_ref().map(|repo| {
+        let extractor: Arc<dyn MetadataExtractor> = Arc::new(CompositeExtractor::new(vec![
+            Arc::new(ImageExtractor::new()) as Arc<dyn MetadataExtractor>,
+            Arc::new(VideoExtractor::new()) as Arc<dyn MetadataExtractor>,
+        ]));
+        MetadataQueue::spawn(
+            extractor,
+            Arc::clone(repo),
+            Arc::clone(&thumbnailer),
+            device_id,
+            queue_cancel.clone(),
+        )
+    });
 
     let discovered: Vec<perima_core::DiscoveredFile> = scanner
         .walk(canonical_root, canonical_root)?
@@ -711,6 +809,24 @@ where
                     if let Some(cb) = on_persist {
                         cb(&d.relative_path, vol_id, device_id);
                     }
+                    // WHY enqueue only on Inserted|Updated (matches the
+                    // CLI scan). `Unchanged` means the hash already has
+                    // a metadata row from a prior run — re-extracting
+                    // would do identical work.
+                    if matches!(
+                        outcome,
+                        perima_core::UpsertOutcome::Inserted | perima_core::UpsertOutcome::Updated
+                    ) {
+                        if let Some(q) = queue.as_ref() {
+                            if let Err(e) = q.enqueue(h, d.absolute_path.clone(), &queue_cancel) {
+                                tracing::warn!(
+                                    error = %e,
+                                    path = %d.absolute_path.display(),
+                                    "metadata enqueue failed; continuing scan",
+                                );
+                            }
+                        }
+                    }
                     manifest_files.push(perima_core::HashedFile {
                         discovered: d,
                         hash: h,
@@ -734,6 +850,26 @@ where
     }
 
     perima_db::manifest::write_manifest(&mount_point, vol_id, &manifest_files)?;
+
+    // Bounded drain of the metadata queue (mirrors CLI scan). Drop the
+    // queue handle to close the channel; the worker sees `recv() ==
+    // None` and exits once it has drained the buffer. Await its
+    // `JoinHandle` with a timeout so a stuck extractor cannot hang the
+    // Tauri command.
+    if let Some(mut q) = queue.take() {
+        let worker = q.take_worker();
+        drop(q);
+        if let Some(handle) = worker {
+            match tokio::time::timeout(METADATA_DRAIN_TIMEOUT, handle).await {
+                Ok(Ok(())) => tracing::debug!("desktop scan: metadata queue drained cleanly"),
+                Ok(Err(e)) => tracing::warn!(error = %e, "metadata worker join failed"),
+                Err(_) => tracing::warn!(
+                    "metadata queue did not drain within {METADATA_DRAIN_TIMEOUT:?}; \
+                     stragglers will be reprocessed on next scan",
+                ),
+            }
+        }
+    }
 
     Ok(ScanResult {
         total: new_count + existing + errors,

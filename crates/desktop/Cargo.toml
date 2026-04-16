@@ -40,6 +40,14 @@ tauri-build.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio.workspace    = true
+# WHY image: the end-to-end scan regression test
+# (`desktop_scan_populates_metadata_and_thumbnails`) writes a tiny
+# procedural PNG at runtime so the metadata extractor + thumbnailer
+# have a real image to decode. Committing a binary fixture would do
+# the same job but drifts out of sync with the image crate's decoder;
+# regenerating at test time keeps the fixture in lockstep.
+image.workspace    = true
 
 [lints]
 workspace = true

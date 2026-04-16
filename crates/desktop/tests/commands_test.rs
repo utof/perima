@@ -7,11 +7,13 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 
 use perima_core::{BlakeHash, DeviceId, MediaMetadata, MetadataRepository};
 use perima_db::{SqliteMetadataRepository, open_and_migrate};
 use perima_desktop::commands::{
     list_files_inner, list_files_with_metadata_inner, list_volumes_inner, run_scan_inner,
+    run_scan_inner_with_metadata,
 };
 
 /// Create three fixture files that mimic the canonical CLI test fixtures.
@@ -32,9 +34,33 @@ fn mk_fixture(dir: &Path) {
     }
 }
 
+/// Write a tiny valid PNG (8x6 RGB) at `path` so the image extractor
+/// can decode + thumbnail it. Kept inline to avoid a binary fixture.
+///
+/// `fill` controls the fill colour — each test caller passes a
+/// distinct value so the two PNGs hash to different `blake3` digests
+/// (otherwise content-addressed storage collapses them to one row +
+/// one thumbnail, breaking the "2 thumbnails generated" assertion).
+fn write_tiny_png(path: &Path, fill: [u8; 3]) {
+    use std::io::Write as _;
+    // 8x6 RGB PNG, fully procedural so no binary fixture is needed.
+    let img = image::RgbImage::from_pixel(8, 6, image::Rgb(fill));
+    let mut buf: Vec<u8> = Vec::new();
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .expect("encode png");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("mkdir");
+    }
+    std::fs::File::create(path)
+        .expect("create png")
+        .write_all(&buf)
+        .expect("write png");
+}
+
 /// Scan three fixture files and assert `total=3, new=3, errors=0`.
-#[test]
-fn scan_indexes_files() {
+#[tokio::test]
+async fn scan_indexes_files() {
     let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
     let data_dir = tempfile::tempdir().expect("tempdir for data");
     mk_fixture(fixture_dir.path());
@@ -46,6 +72,7 @@ fn scan_indexes_files() {
         data_dir.path(),
         device_id,
     )
+    .await
     .expect("scan_inner should succeed");
 
     assert_eq!(
@@ -58,14 +85,15 @@ fn scan_indexes_files() {
 }
 
 /// After a successful scan, `list_files_inner` must return all 3 records.
-#[test]
-fn list_files_after_scan() {
+#[tokio::test]
+async fn list_files_after_scan() {
     let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
     let data_dir = tempfile::tempdir().expect("tempdir for data");
     mk_fixture(fixture_dir.path());
 
     let device_id = DeviceId::new();
     run_scan_inner(fixture_dir.path(), false, data_dir.path(), device_id)
+        .await
         .expect("scan_inner should succeed");
 
     let entries =
@@ -82,14 +110,15 @@ fn list_files_after_scan() {
 /// After inserting metadata for a scanned file, the
 /// `list_files_with_metadata_inner` helper must return at least one row
 /// with metadata fields populated from the stored record.
-#[test]
-fn list_files_with_metadata_returns_rows() {
+#[tokio::test]
+async fn list_files_with_metadata_returns_rows() {
     let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
     let data_dir = tempfile::tempdir().expect("tempdir for data");
     mk_fixture(fixture_dir.path());
 
     let device_id = DeviceId::new();
     run_scan_inner(fixture_dir.path(), false, data_dir.path(), device_id)
+        .await
         .expect("scan_inner should succeed");
 
     // Attach a metadata row to one of the scanned files. We pull its
@@ -136,18 +165,95 @@ fn list_files_with_metadata_returns_rows() {
 }
 
 /// After a successful scan, `list_volumes_inner` must return at least one volume.
-#[test]
-fn list_volumes_after_scan() {
+#[tokio::test]
+async fn list_volumes_after_scan() {
     let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
     let data_dir = tempfile::tempdir().expect("tempdir for data");
     mk_fixture(fixture_dir.path());
 
     let device_id = DeviceId::new();
     run_scan_inner(fixture_dir.path(), false, data_dir.path(), device_id)
+        .await
         .expect("scan_inner should succeed");
 
     let volumes =
         list_volumes_inner(data_dir.path(), device_id).expect("list_volumes_inner should succeed");
 
     assert!(!volumes.is_empty(), "expected ≥1 volume after scan, got 0");
+}
+
+/// Regression for utof/perima#15 HIGH #11a: the desktop scan must wire
+/// the metadata queue + thumbnailer end-to-end. Scanning a tempdir of
+/// PNG files must produce `file_metadata` rows AND WebP thumbnails on
+/// disk under `<data_dir>/thumbnails/` — the same subtree the Tauri
+/// asset-protocol scope exposes.
+#[tokio::test]
+async fn desktop_scan_populates_metadata_and_thumbnails() {
+    let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
+    let data_dir = tempfile::tempdir().expect("tempdir for data");
+
+    write_tiny_png(&fixture_dir.path().join("a.png"), [200, 150, 100]);
+    write_tiny_png(&fixture_dir.path().join("sub/b.png"), [10, 20, 200]);
+
+    let device_id = DeviceId::new();
+    let db_path = data_dir.path().join("perima.db");
+
+    // Share the repo handle with the worker (matches production wiring
+    // in `crates/desktop/src/lib.rs::run`): a single
+    // `SqliteMetadataRepository` Arc cloned into the queue worker and
+    // inspected directly after the scan drain completes.
+    let metadata_conn = open_and_migrate(&db_path).expect("open metadata");
+    let metadata_repo = Arc::new(SqliteMetadataRepository::new(metadata_conn));
+
+    let result = run_scan_inner_with_metadata(
+        fixture_dir.path(),
+        false,
+        data_dir.path(),
+        device_id,
+        Some(Arc::clone(&metadata_repo) as Arc<dyn MetadataRepository>),
+    )
+    .await
+    .expect("scan with metadata should succeed");
+
+    assert_eq!(result.total, 2, "expected 2 files, got {}", result.total);
+    assert_eq!(result.new, 2, "expected 2 new, got {}", result.new);
+
+    // Assert 2 metadata rows exist via the shared handle. The drain
+    // path above guarantees the worker has persisted by the time we
+    // reach this assertion.
+    let rows = list_files_with_metadata_inner(metadata_repo.as_ref(), 100, None)
+        .expect("list_files_with_metadata_inner");
+    assert_eq!(
+        rows.iter().filter(|r| r.mime_type.is_some()).count(),
+        2,
+        "expected 2 rows with mime_type populated (extractor ran), got {} (rows: {:?})",
+        rows.iter().filter(|r| r.mime_type.is_some()).count(),
+        rows.iter()
+            .map(|r| (&r.relative_path, &r.mime_type, &r.thumbnail_status))
+            .collect::<Vec<_>>(),
+    );
+
+    // Assert 2 thumbnails exist on disk under <data_dir>/thumbnails.
+    let thumb_root = data_dir.path().join("thumbnails");
+    let mut thumb_count = 0usize;
+    if thumb_root.exists() {
+        for bucket in std::fs::read_dir(&thumb_root).expect("read thumbnails root") {
+            let bucket = bucket.expect("bucket entry");
+            if bucket.file_type().expect("file_type").is_dir() {
+                for entry in std::fs::read_dir(bucket.path()).expect("read bucket") {
+                    let entry = entry.expect("thumb entry");
+                    if entry.path().extension().and_then(|e| e.to_str()) == Some("webp") {
+                        thumb_count += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        thumb_count,
+        2,
+        "expected 2 .webp thumbnails under {}, found {}",
+        thumb_root.display(),
+        thumb_count,
+    );
 }
