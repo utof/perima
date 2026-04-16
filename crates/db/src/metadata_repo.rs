@@ -194,15 +194,22 @@ impl MetadataRepository for SqliteMetadataRepository {
 
         let outcome = match existing {
             None => {
+                // WHY thumbnail_path / thumbnail_status NOT bound from
+                // `meta`: extractors always produce `None` for these
+                // fields. The queue worker writes them via the dedicated
+                // `update_thumbnail` method after thumbnail generation
+                // completes. A subsequent Updated upsert (triggered by
+                // a mime_type flip on the same hash) would otherwise
+                // clobber the worker's state back to NULL, silently
+                // losing the thumbnail association. See utof/perima#15
+                // HIGH #4 for the regression this prevents.
                 tx.execute(
                     "INSERT INTO file_metadata
                      (blake3_hash, width, height, duration_ms, captured_at,
                       camera_make, camera_model, codec, bitrate_bps, mime_type,
-                      thumbnail_path, thumbnail_status,
                       extracted_at, updated_at, device_id)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                             ?11, ?12,
-                             ?13, ?13, ?14)",
+                             ?11, ?11, ?12)",
                     rusqlite::params![
                         hash_hex,
                         meta.width,
@@ -214,8 +221,6 @@ impl MetadataRepository for SqliteMetadataRepository {
                         meta.codec,
                         meta.bitrate_bps,
                         meta.mime_type,
-                        meta.thumbnail_path,
-                        meta.thumbnail_status,
                         now,
                         dev_str,
                     ],
@@ -236,13 +241,19 @@ impl MetadataRepository for SqliteMetadataRepository {
                 UpsertOutcome::Unchanged
             }
             Some(_) => {
+                // WHY UPDATE omits thumbnail_path / thumbnail_status:
+                // same rationale as the INSERT branch above. The
+                // worker's `update_thumbnail` is the sole writer of
+                // those columns. Preserving whatever state the worker
+                // has already written across an Updated upsert is the
+                // invariant pinned by
+                // `upsert_metadata_preserves_thumbnail_state`.
                 tx.execute(
                     "UPDATE file_metadata
                      SET width = ?2, height = ?3, duration_ms = ?4,
                          captured_at = ?5, camera_make = ?6, camera_model = ?7,
                          codec = ?8, bitrate_bps = ?9, mime_type = ?10,
-                         thumbnail_path = ?11, thumbnail_status = ?12,
-                         updated_at = ?13, device_id = ?14
+                         updated_at = ?11, device_id = ?12
                      WHERE blake3_hash = ?1",
                     rusqlite::params![
                         hash_hex,
@@ -255,8 +266,6 @@ impl MetadataRepository for SqliteMetadataRepository {
                         meta.codec,
                         meta.bitrate_bps,
                         meta.mime_type,
-                        meta.thumbnail_path,
-                        meta.thumbnail_status,
                         now,
                         dev_str,
                     ],
@@ -724,6 +733,41 @@ mod tests {
         let got = repo.find_by_hash(&hash).expect("find").expect("present");
         assert_eq!(got.thumbnail_path.as_deref(), Some("/data/t/ab/cd.webp"));
         assert_eq!(got.thumbnail_status.as_deref(), Some("ready"));
+    }
+
+    /// Regression: an `Updated` upsert (triggered by a `mime_type` flip
+    /// on the same hash) must NOT clobber the thumbnail state that
+    /// `update_thumbnail` already wrote. The queue worker is the sole
+    /// writer of thumbnail columns; extractor-sourced upserts must
+    /// leave them untouched. See `utof/perima#15` HIGH #4.
+    #[test]
+    fn upsert_metadata_preserves_thumbnail_state() {
+        let (_td, repo) = metadata_repo();
+        let dev = device();
+        let hash = BlakeHash::from_bytes(*blake3::hash(b"preserve").as_bytes());
+        let mut meta = sample_metadata(hash);
+        repo.upsert_metadata(&meta, dev).expect("initial upsert");
+
+        // Simulate thumbnail completion from the worker.
+        repo.update_thumbnail(&hash, Some("/tmp/t.webp"), "ready", dev)
+            .expect("update_thumbnail");
+
+        // A later metadata upsert with a new mime (forces Updated path)
+        // must NOT clear the thumbnail_path / status.
+        meta.mime_type = Some("image/jpeg2000".into());
+        repo.upsert_metadata(&meta, dev).expect("second upsert");
+
+        let got = repo.find_by_hash(&hash).expect("find").expect("present");
+        assert_eq!(
+            got.thumbnail_path.as_deref(),
+            Some("/tmp/t.webp"),
+            "upsert_metadata must not clear thumbnail_path"
+        );
+        assert_eq!(
+            got.thumbnail_status.as_deref(),
+            Some("ready"),
+            "upsert_metadata must not clear thumbnail_status"
+        );
     }
 
     #[test]
