@@ -14,7 +14,11 @@
       }
     ],
     "security": {
-      "capabilities": ["default"]
+      "capabilities": ["default"],
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/perima/thumbnails/**", "**"]
+      }
     }
   },
   "plugins": {

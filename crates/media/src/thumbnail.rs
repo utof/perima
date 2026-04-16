@@ -36,6 +36,14 @@ pub struct ThumbnailGenerator {
     /// Aspect ratio is preserved; the longer side is clamped to this
     /// value.
     max_size: u32,
+    /// Whether [`Self::generate`] should actually produce a thumbnail.
+    ///
+    /// WHY a plain bool rather than a `NoopThumbnailer` trait: the
+    /// queue worker takes an `Arc<ThumbnailGenerator>` directly. A
+    /// trait-based polymorphism story lands in v0.5 once we have a
+    /// retry command and more nuanced policies; for v0.4.1 a single
+    /// flag is the cheapest correct answer.
+    enabled: bool,
 }
 
 // WHY no runtime quality parameter: the pure-Rust `image` crate
@@ -60,6 +68,7 @@ impl ThumbnailGenerator {
         Self {
             data_dir,
             max_size: DEFAULT_MAX_SIZE,
+            enabled: true,
         }
     }
 
@@ -70,7 +79,32 @@ impl ThumbnailGenerator {
     /// [`new`](Self::new).
     #[must_use]
     pub const fn with_max_size(data_dir: PathBuf, max_size: u32) -> Self {
-        Self { data_dir, max_size }
+        Self {
+            data_dir,
+            max_size,
+            enabled: true,
+        }
+    }
+
+    /// Construct a no-op generator: [`Self::generate`] always returns
+    /// `Ok(None)` without touching the filesystem.
+    ///
+    /// WHY separate from `new`: the queue worker receives a generator
+    /// unconditionally (via `Arc<ThumbnailGenerator>`); wiring a
+    /// `--no-thumbnails` flag via this constructor avoids threading an
+    /// `Option<Arc<_>>` through `MetadataQueue::spawn` and the worker's
+    /// `process` function.
+    ///
+    // WHY not `const fn`: `PathBuf::new()` only became `const` in Rust
+    // 1.91; our MSRV is 1.85. Dropping `const` keeps the constructor
+    // MSRV-clean and costs nothing (callers allocate an `Arc` anyway).
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            data_dir: PathBuf::new(),
+            max_size: 0,
+            enabled: false,
+        }
     }
 
     /// Compute the target path for a given hash.
@@ -98,8 +132,9 @@ impl ThumbnailGenerator {
     /// aspect, encode as WebP, and atomically write to the target
     /// computed by [`path_for`](Self::path_for).
     ///
-    /// Returns the target path on success. Idempotent — if the target
-    /// already exists, no work is done.
+    /// Returns `Ok(Some(target))` on success, `Ok(None)` when this
+    /// generator is [`disabled`](Self::disabled). Idempotent — if the
+    /// target already exists, no work is done.
     ///
     /// # Errors
     ///
@@ -112,10 +147,13 @@ impl ThumbnailGenerator {
     ///
     /// Quality target: q=85 per spec (documentary today — see the
     /// module-level note on the `image` v0.25 WebP encoder).
-    pub fn generate(&self, hash: &BlakeHash, source: &Path) -> Result<PathBuf, CoreError> {
+    pub fn generate(&self, hash: &BlakeHash, source: &Path) -> Result<Option<PathBuf>, CoreError> {
+        if !self.enabled {
+            return Ok(None);
+        }
         let target = self.path_for(hash);
         if target.exists() {
-            return Ok(target);
+            return Ok(Some(target));
         }
 
         // `path_for` always yields a path with at least two ancestors
@@ -161,7 +199,7 @@ impl ThumbnailGenerator {
                 target.display()
             ))
         })?;
-        Ok(target)
+        Ok(Some(target))
     }
 }
 
@@ -236,7 +274,10 @@ mod tests {
         let tg = generator(&data_dir, 256);
         let hash = hash_of(b"wide");
 
-        let out = tg.generate(&hash, &src).expect("generate");
+        let out = tg
+            .generate(&hash, &src)
+            .expect("generate")
+            .expect("enabled generator returns Some");
         assert!(out.exists(), "thumbnail must be created at {out:?}");
 
         let decoded = image::open(&out).expect("reopen thumbnail");
@@ -255,14 +296,20 @@ mod tests {
         let tg = generator(&data_dir, 256);
         let hash = hash_of(b"idem");
 
-        let out1 = tg.generate(&hash, &src).expect("first");
+        let out1 = tg
+            .generate(&hash, &src)
+            .expect("first")
+            .expect("enabled generator returns Some");
         let meta1 = std::fs::metadata(&out1).expect("meta1");
         let mtime1 = meta1.modified().expect("mtime1");
 
         // Wait a tick so any re-write would be observable via mtime.
         std::thread::sleep(std::time::Duration::from_millis(20));
 
-        let out2 = tg.generate(&hash, &src).expect("second");
+        let out2 = tg
+            .generate(&hash, &src)
+            .expect("second")
+            .expect("enabled generator returns Some");
         assert_eq!(out1, out2, "path must be deterministic");
         let mtime2 = std::fs::metadata(&out2)
             .expect("meta2")
@@ -284,7 +331,10 @@ mod tests {
         let tg = generator(&data_dir, 256);
         let hash = hash_of(b"tmpcheck");
 
-        let out = tg.generate(&hash, &src).expect("generate");
+        let out = tg
+            .generate(&hash, &src)
+            .expect("generate")
+            .expect("enabled generator returns Some");
         let dir = out.parent().expect("thumbnail path must have a parent dir");
 
         let tmp_entries: Vec<_> = std::fs::read_dir(dir)
@@ -297,5 +347,21 @@ mod tests {
             tmp_entries.is_empty(),
             "no .tmp file must remain after successful generate; found {leftover:?}"
         );
+    }
+
+    #[test]
+    fn disabled_generator_returns_none_and_writes_nothing() {
+        let td = TempDir::new().expect("tempdir");
+        let src = write_png(td.path(), "off.png", 32, 32);
+        let tg = ThumbnailGenerator::disabled();
+        let hash = hash_of(b"off");
+
+        let out = tg.generate(&hash, &src).expect("generate");
+        assert!(
+            out.is_none(),
+            "disabled generator must return Ok(None); got {out:?}"
+        );
+        // No directories created under an ephemeral `PathBuf::new()`
+        // root (the disabled generator never touches the filesystem).
     }
 }

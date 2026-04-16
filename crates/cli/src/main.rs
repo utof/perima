@@ -17,6 +17,7 @@ use perima_db::{
 };
 use perima_fs::WalkdirScanner;
 use perima_hash::Blake3Service;
+use perima_media::ThumbnailGenerator;
 
 use crate::config::Config;
 use crate::signals::Cancellation;
@@ -59,6 +60,10 @@ enum Command {
         /// Skip the bounded post-walk drain of the metadata queue.
         #[arg(long)]
         no_wait_metadata: bool,
+
+        /// Disable WebP thumbnail generation for image / video files.
+        #[arg(long)]
+        no_thumbnails: bool,
     },
 
     /// List indexed files.
@@ -140,7 +145,19 @@ async fn main() -> ExitCode {
             dry_run,
             quiet,
             no_wait_metadata,
-        } => dispatch_scan(root, dry_run, quiet, no_wait_metadata, &config, &cancel).await,
+            no_thumbnails,
+        } => {
+            dispatch_scan(
+                root,
+                dry_run,
+                quiet,
+                no_wait_metadata,
+                no_thumbnails,
+                &config,
+                &cancel,
+            )
+            .await
+        }
 
         Command::Ls {
             volume,
@@ -163,12 +180,18 @@ async fn main() -> ExitCode {
 // `scan::run` (`on_persist` captures a non-Sync closure). This task
 // is awaited directly from `#[tokio::main]` — never sent between
 // threads — so the non-Send future is acceptable here.
+// WHY allow(fn_params_excessive_bools): each bool corresponds to a
+// distinct `--flag` on `perima scan`. Collapsing them into an enum
+// would either merge orthogonal axes or lose the 1:1 CLI mapping.
 #[allow(clippy::future_not_send)]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::fn_params_excessive_bools)]
 async fn dispatch_scan(
     root: PathBuf,
     dry_run: bool,
     quiet: bool,
     no_wait_metadata: bool,
+    no_thumbnails: bool,
     config: &Config,
     cancel: &Cancellation,
 ) -> ExitCode {
@@ -177,6 +200,7 @@ async fn dispatch_scan(
         dry_run,
         quiet,
         no_wait_metadata,
+        no_thumbnails,
     };
     let scanner = WalkdirScanner::new();
     let hasher = Blake3Service::new();
@@ -191,6 +215,7 @@ async fn dispatch_scan(
             cmd::scan::run::<_, _, SqliteFileRepository, SqliteVolumeRepository>(
                 &scanner,
                 &hasher,
+                None,
                 None,
                 None,
                 None,
@@ -269,6 +294,17 @@ async fn dispatch_scan(
         let metadata_repo: Arc<dyn MetadataRepository> =
             Arc::new(SqliteMetadataRepository::new(metadata_conn));
 
+        // WHY build the thumbnailer here: `config.data_dir` is the
+        // root the rest of `scan::run` uses to resolve `perima.db`, so
+        // thumbnails co-locating under `<data_dir>/thumbnails/...` is
+        // the simplest layout. `--no-thumbnails` short-circuits to a
+        // no-op generator that returns `Ok(None)` from `generate`.
+        let thumbnailer: Arc<ThumbnailGenerator> = Arc::new(if no_thumbnails {
+            ThumbnailGenerator::disabled()
+        } else {
+            ThumbnailGenerator::new(config.data_dir.clone())
+        });
+
         map_scan_result(
             cmd::scan::run(
                 &scanner,
@@ -276,6 +312,7 @@ async fn dispatch_scan(
                 Some(&mut file_repo),
                 Some(&mut vol_repo),
                 Some(metadata_repo),
+                Some(thumbnailer),
                 Some(&on_persist),
                 device,
                 cancel,

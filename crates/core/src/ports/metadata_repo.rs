@@ -45,4 +45,26 @@ pub trait MetadataRepository: Send + Sync {
         limit: usize,
         volume: Option<VolumeId>,
     ) -> Result<Vec<(FileLocationRecord, Option<MediaMetadata>)>, CoreError>;
+
+    /// Update the thumbnail columns on the `file_metadata` row for
+    /// `hash`. Returns the number of rows updated (0 if no metadata row
+    /// exists yet, 1 otherwise).
+    ///
+    /// WHY decoupled from `upsert_metadata`: the queue worker writes
+    /// metadata first, then attempts thumbnail generation; the two
+    /// writes occur at different times and should not share transaction
+    /// semantics. `upsert_metadata`'s Unchanged/Updated equivalence
+    /// proxy compares `device_id` + `mime_type` only — a thumbnail
+    /// status flip (pending → ready) would otherwise be classified
+    /// Unchanged and lost.
+    ///
+    /// # Errors
+    /// Adapter-level failures surface as `CoreError::Internal`.
+    fn update_thumbnail(
+        &self,
+        hash: &BlakeHash,
+        path: Option<&str>,
+        status: &str,
+        device: DeviceId,
+    ) -> Result<u64, CoreError>;
 }

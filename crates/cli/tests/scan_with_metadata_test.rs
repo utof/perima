@@ -112,6 +112,39 @@ fn scan_persists_metadata_rows_for_images() {
         (Some(8), Some(6)),
         "PNG extractor should have captured the 8x6 dimensions",
     );
+
+    // Verify thumbnail was generated + status flipped to 'ready'.
+    //
+    // WHY on-disk check: the worker calls `update_thumbnail(...,
+    // "ready", ...)` only after `ThumbnailGenerator::generate` returns
+    // `Ok(Some(path))`, which itself only returns Some after the
+    // atomic rename completes. Seeing the file on disk + status =
+    // 'ready' proves the full round-trip.
+    let (thumb_path_opt, thumb_status): (Option<String>, String) = conn
+        .query_row(
+            "SELECT thumbnail_path, thumbnail_status FROM file_metadata
+             WHERE blake3_hash = ?1",
+            [&png_hash],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("find png thumbnail columns");
+    assert_eq!(
+        thumb_status, "ready",
+        "PNG thumbnail status must flip to 'ready' after scan drain",
+    );
+    let thumb_path = thumb_path_opt.expect("thumbnail_path must be Some when status = 'ready'");
+    assert!(
+        std::path::Path::new(&thumb_path).exists(),
+        "thumbnail file must exist on disk at {thumb_path}",
+    );
+
+    // Sanity: thumbnail lives under <data_dir>/thumbnails/<aa>/.
+    let expected_dir_prefix = env_dir.path().join("thumbnails").join(&png_hash[..2]);
+    assert!(
+        thumb_path.starts_with(expected_dir_prefix.to_str().expect("data_dir utf-8")),
+        "thumbnail_path {thumb_path} must live under {}",
+        expected_dir_prefix.display(),
+    );
 }
 
 #[test]

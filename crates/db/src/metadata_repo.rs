@@ -40,59 +40,6 @@ impl SqliteMetadataRepository {
             conn: Mutex::new(conn),
         }
     }
-
-    /// Update the thumbnail columns on an existing `file_metadata` row.
-    ///
-    /// Separate from `upsert_metadata` so the queue worker can write
-    /// the thumbnail result without triggering the upsert's
-    /// Unchanged/Updated equivalence proxy (which compares `device_id`
-    /// and `mime_type` only). A thumbnail status flip pending → ready
-    /// must always persist.
-    ///
-    /// Wraps the UPDATE in `BEGIN IMMEDIATE` matching the v0.3.1
-    /// hardening pattern; concurrent CLI + desktop writers serialize
-    /// via the writer lock instead of producing torn writes.
-    ///
-    /// Returns the number of rows updated (0 if no metadata row
-    /// exists for `hash`; 1 otherwise).
-    ///
-    /// # Errors
-    /// `CoreError::Internal` on mutex / DB failure.
-    // WHY allow(significant_drop_tightening): `conn` guard must outlive
-    // the transaction; the suggested tightening would split the borrow
-    // graph across a drop boundary mid-tx.
-    #[allow(clippy::significant_drop_tightening)]
-    pub fn update_thumbnail(
-        &self,
-        hash: &perima_core::BlakeHash,
-        path: Option<&str>,
-        status: &str,
-        device: DeviceId,
-    ) -> Result<u64, CoreError> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|e| CoreError::Internal(format!("begin immediate: {e}")))?;
-        let hash_hex = hash.to_hex();
-        let now = now_iso();
-        let dev_str = device.0.to_string();
-        let n = tx
-            .execute(
-                "UPDATE file_metadata
-                 SET thumbnail_path = ?1, thumbnail_status = ?2,
-                     updated_at = ?3, device_id = ?4
-                 WHERE blake3_hash = ?5 AND deleted_at IS NULL",
-                rusqlite::params![path, status, now, dev_str, hash_hex],
-            )
-            .map_err(crate::errors::Error::from)?;
-        tx.commit()
-            .map_err(|e| CoreError::Internal(format!("commit: {e}")))?;
-        #[allow(clippy::cast_possible_truncation)]
-        Ok(n as u64)
-    }
 }
 
 fn now_iso() -> String {
@@ -541,6 +488,56 @@ impl MetadataRepository for SqliteMetadataRepository {
             out.push((location, metadata));
         }
         Ok(out)
+    }
+
+    /// Update the thumbnail columns on an existing `file_metadata` row.
+    ///
+    /// Separate from `upsert_metadata` so the queue worker can write
+    /// the thumbnail result without triggering the upsert's
+    /// Unchanged/Updated equivalence proxy (which compares `device_id`
+    /// and `mime_type` only). A thumbnail status flip pending → ready
+    /// must always persist.
+    ///
+    /// Wraps the UPDATE in `BEGIN IMMEDIATE` matching the v0.3.1
+    /// hardening pattern; concurrent CLI + desktop writers serialize
+    /// via the writer lock instead of producing torn writes.
+    ///
+    /// Returns the number of rows updated (0 if no metadata row
+    /// exists for `hash`; 1 otherwise).
+    // WHY allow(significant_drop_tightening): `conn` guard must outlive
+    // the transaction; the suggested tightening would split the borrow
+    // graph across a drop boundary mid-tx.
+    #[allow(clippy::significant_drop_tightening)]
+    fn update_thumbnail(
+        &self,
+        hash: &BlakeHash,
+        path: Option<&str>,
+        status: &str,
+        device: DeviceId,
+    ) -> Result<u64, CoreError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| CoreError::Internal(format!("begin immediate: {e}")))?;
+        let hash_hex = hash.to_hex();
+        let now = now_iso();
+        let dev_str = device.0.to_string();
+        let n = tx
+            .execute(
+                "UPDATE file_metadata
+                 SET thumbnail_path = ?1, thumbnail_status = ?2,
+                     updated_at = ?3, device_id = ?4
+                 WHERE blake3_hash = ?5 AND deleted_at IS NULL",
+                rusqlite::params![path, status, now, dev_str, hash_hex],
+            )
+            .map_err(crate::errors::Error::from)?;
+        tx.commit()
+            .map_err(|e| CoreError::Internal(format!("commit: {e}")))?;
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(n as u64)
     }
 }
 

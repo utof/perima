@@ -18,7 +18,9 @@ use perima_core::{
 use perima_db::{
     SqliteFileRepository, SqliteMetadataRepository, SqliteVolumeRepository, open_and_migrate,
 };
-use perima_media::{CompositeExtractor, ImageExtractor, MetadataQueue, VideoExtractor};
+use perima_media::{
+    CompositeExtractor, ImageExtractor, MetadataQueue, ThumbnailGenerator, VideoExtractor,
+};
 use tokio_util::sync::CancellationToken;
 
 /// Maximum wait after enqueue for the worker to persist a row.
@@ -100,7 +102,12 @@ pub async fn run(data_dir: &Path, device: DeviceId, args: &MetadataArgs) -> Resu
         Arc::new(VideoExtractor::new()) as Arc<dyn MetadataExtractor>,
     ]));
     let repo_dyn: Arc<dyn MetadataRepository> = Arc::clone(&metadata_repo) as _;
-    let mut queue = MetadataQueue::spawn(extractor, repo_dyn, device, cancel.clone());
+    // WHY re-extract with thumbnails on: `perima metadata <path>` is
+    // an interactive re-run; users invoking it usually want the
+    // thumbnail refreshed too. A future `--no-thumbnails` on this
+    // subcommand can switch to `disabled()`.
+    let thumbnailer = Arc::new(ThumbnailGenerator::new(data_dir.to_path_buf()));
+    let mut queue = MetadataQueue::spawn(extractor, repo_dyn, thumbnailer, device, cancel.clone());
     queue.enqueue(hash, absolute_path.clone(), &cancel)?;
 
     // Record the current metadata's `updated_at` (if any) so we know

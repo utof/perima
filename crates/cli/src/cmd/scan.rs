@@ -10,7 +10,9 @@ use perima_core::{
     MediaPath, MetadataExtractor, MetadataRepository, Scanner, UpsertOutcome, VolumeId,
     VolumeRepository,
 };
-use perima_media::{CompositeExtractor, ImageExtractor, MetadataQueue, VideoExtractor};
+use perima_media::{
+    CompositeExtractor, ImageExtractor, MetadataQueue, ThumbnailGenerator, VideoExtractor,
+};
 use rayon::prelude::*;
 
 use crate::signals::Cancellation;
@@ -25,6 +27,12 @@ use crate::signals::Cancellation;
 pub const METADATA_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Arguments for the scan command.
+// WHY allow(struct_excessive_bools): each flag corresponds to a
+// distinct user-facing `--flag` on `perima scan`; converting them into
+// a typed enum would either collapse independent axes (dry-run vs
+// quiet vs no-wait-metadata are orthogonal) or bloat the CLI surface.
+// Per plan the flags stay individually named.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct ScanArgs {
     /// Root directory to walk.
@@ -41,6 +49,14 @@ pub struct ScanArgs {
     /// would rather the CLI return immediately and let the queue die
     /// with the process, `--no-wait-metadata` bypasses the drain.
     pub no_wait_metadata: bool,
+    /// Disable WebP thumbnail generation for image/video files.
+    ///
+    /// WHY opt-in: thumbnails double the per-file work (decode + encode
+    /// vs. header-only read). Users who want metadata-only indexing or
+    /// faster scans can pass `--no-thumbnails`; rows stay at
+    /// `thumbnail_status = 'pending'` so a future retry command can
+    /// generate them later.
+    pub no_thumbnails: bool,
 }
 
 /// Scan statistics.
@@ -122,6 +138,7 @@ pub async fn run<S, H, FR, VR>(
     mut file_repo: Option<&mut FR>,
     mut volume_repo: Option<&mut VR>,
     metadata_repo: Option<Arc<dyn MetadataRepository>>,
+    thumbnailer: Option<Arc<ThumbnailGenerator>>,
     on_persist: OnPersistFn<'_>,
     device: DeviceId,
     cancel: &Cancellation,
@@ -150,12 +167,30 @@ where
     //
     // WHY `Option<MetadataQueue>`: dry-run passes `None` for
     // `metadata_repo` and this stays `None` — no worker, no drain.
+    //
+    // WHY fall back to `ThumbnailGenerator::disabled()`: the queue
+    // worker holds the generator unconditionally. `args.no_thumbnails`
+    // forces `disabled()` regardless of what the caller supplied; a
+    // `None` caller also collapses to `disabled()`.
+    let effective_thumbnailer: Arc<ThumbnailGenerator> = if args.no_thumbnails {
+        Arc::new(ThumbnailGenerator::disabled())
+    } else {
+        thumbnailer
+            .clone()
+            .unwrap_or_else(|| Arc::new(ThumbnailGenerator::disabled()))
+    };
     let mut queue: Option<MetadataQueue> = metadata_repo.as_ref().map(|repo| {
         let extractor: Arc<dyn MetadataExtractor> = Arc::new(CompositeExtractor::new(vec![
             Arc::new(ImageExtractor::new()) as Arc<dyn MetadataExtractor>,
             Arc::new(VideoExtractor::new()) as Arc<dyn MetadataExtractor>,
         ]));
-        MetadataQueue::spawn(extractor, Arc::clone(repo), device, cancel.token())
+        MetadataQueue::spawn(
+            extractor,
+            Arc::clone(repo),
+            Arc::clone(&effective_thumbnailer),
+            device,
+            cancel.token(),
+        )
     });
 
     // Resolve volume once before the scan loop (no-op in dry-run).

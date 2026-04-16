@@ -17,6 +17,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::thumbnail::ThumbnailGenerator;
+
 /// Bounded channel capacity.
 ///
 /// WHY 16384: enough to absorb a 100k-file scan's initial burst without
@@ -61,6 +63,7 @@ impl MetadataQueue {
     pub fn spawn(
         extractor: Arc<dyn MetadataExtractor>,
         repo: Arc<dyn MetadataRepository>,
+        thumbnailer: Arc<ThumbnailGenerator>,
         device: DeviceId,
         cancel: CancellationToken,
     ) -> Self {
@@ -81,7 +84,13 @@ impl MetadataQueue {
                         if cancel.is_cancelled() {
                             break;
                         }
-                        process(extractor.as_ref(), repo.as_ref(), device, &work);
+                        process(
+                            extractor.as_ref(),
+                            repo.as_ref(),
+                            thumbnailer.as_ref(),
+                            device,
+                            &work,
+                        );
                     }
                 }
             }
@@ -143,11 +152,13 @@ impl MetadataQueue {
 }
 
 /// Execute one unit of work: MIME-guess from path, delegate to the
-/// extractor, persist through the repository. Errors are traced but not
-/// propagated — scanner-side is fire-and-forget.
+/// extractor, persist through the repository, then (for image / video
+/// kinds) generate a thumbnail and persist its status. Errors are
+/// traced but not propagated — scanner-side is fire-and-forget.
 fn process(
     extractor: &dyn MetadataExtractor,
     repo: &dyn MetadataRepository,
+    thumbnailer: &ThumbnailGenerator,
     device: DeviceId,
     work: &Work,
 ) {
@@ -178,6 +189,51 @@ fn process(
             path = %work.absolute_path.display(),
             "metadata persist failed; will retry on next scan",
         );
+        return;
+    }
+
+    // WHY only image/video: audio + other kinds have no visual
+    // preview; invoking `ThumbnailGenerator` on them would produce a
+    // decode error the worker would then log as `failed`. Gating on
+    // MIME prefix keeps the thumbnail_status accurate.
+    if !(mime.starts_with("image/") || mime.starts_with("video/")) {
+        return;
+    }
+
+    match thumbnailer.generate(&work.hash, &work.absolute_path) {
+        Ok(None) => {
+            // Disabled generator (`--no-thumbnails`): leave the row's
+            // thumbnail_status at its migration default ("pending").
+        }
+        Ok(Some(path)) => {
+            // WHY absolute path: Tauri's `convertFileSrc` requires an
+            // absolute path on disk; storing a relative path would
+            // force every frontend read to re-resolve against
+            // `data_dir`. `ThumbnailGenerator` always returns
+            // absolute paths (it joins onto its owned `data_dir`).
+            let path_str = path.to_string_lossy().into_owned();
+            if let Err(err) = repo.update_thumbnail(&work.hash, Some(&path_str), "ready", device) {
+                tracing::warn!(
+                    error = %err,
+                    path = %work.absolute_path.display(),
+                    "update_thumbnail(ready) failed",
+                );
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %work.absolute_path.display(),
+                "thumbnail generation failed; marking status = failed",
+            );
+            if let Err(err2) = repo.update_thumbnail(&work.hash, None, "failed", device) {
+                tracing::warn!(
+                    error = %err2,
+                    path = %work.absolute_path.display(),
+                    "update_thumbnail(failed) failed",
+                );
+            }
+        }
     }
 }
 
@@ -255,6 +311,22 @@ mod tests {
         ) -> Result<Vec<(FileLocationRecord, Option<MediaMetadata>)>, CoreError> {
             Ok(vec![])
         }
+        fn update_thumbnail(
+            &self,
+            hash: &BlakeHash,
+            path: Option<&str>,
+            status: &str,
+            _device: DeviceId,
+        ) -> Result<u64, CoreError> {
+            let mut rows = self.rows.lock().expect("mock mutex");
+            if let Some(row) = rows.get_mut(hash) {
+                row.thumbnail_path = path.map(str::to_owned);
+                row.thumbnail_status = Some(status.to_owned());
+                Ok(1)
+            } else {
+                Ok(0)
+            }
+        }
     }
 
     fn unique_hash(i: u8) -> BlakeHash {
@@ -268,8 +340,15 @@ mod tests {
         let extractor: Arc<dyn MetadataExtractor> = Arc::new(EchoExtractor);
         let repo = Arc::new(MockRepo::default());
         let repo_dyn: Arc<dyn MetadataRepository> = repo.clone();
+        let thumbnailer = Arc::new(ThumbnailGenerator::disabled());
         let cancel = CancellationToken::new();
-        let queue = MetadataQueue::spawn(extractor, repo_dyn, DeviceId::new(), cancel.clone());
+        let queue = MetadataQueue::spawn(
+            extractor,
+            repo_dyn,
+            thumbnailer,
+            DeviceId::new(),
+            cancel.clone(),
+        );
 
         for i in 0..5u8 {
             queue
@@ -296,8 +375,15 @@ mod tests {
         let extractor: Arc<dyn MetadataExtractor> = Arc::new(EchoExtractor);
         let repo = Arc::new(MockRepo::default());
         let repo_dyn: Arc<dyn MetadataRepository> = repo.clone();
+        let thumbnailer = Arc::new(ThumbnailGenerator::disabled());
         let cancel = CancellationToken::new();
-        let mut queue = MetadataQueue::spawn(extractor, repo_dyn, DeviceId::new(), cancel.clone());
+        let mut queue = MetadataQueue::spawn(
+            extractor,
+            repo_dyn,
+            thumbnailer,
+            DeviceId::new(),
+            cancel.clone(),
+        );
 
         // Enqueue one item, then cancel before the worker runs again.
         queue
@@ -328,8 +414,14 @@ mod tests {
         let cancel = CancellationToken::new();
         // Cancel *before* spawning so the worker exits immediately.
         cancel.cancel();
-        let queue =
-            MetadataQueue::spawn(extractor, repo_dyn, DeviceId::new(), cancel.child_token());
+        let thumbnailer = Arc::new(ThumbnailGenerator::disabled());
+        let queue = MetadataQueue::spawn(
+            extractor,
+            repo_dyn,
+            thumbnailer,
+            DeviceId::new(),
+            cancel.child_token(),
+        );
 
         // Give the worker a moment to observe cancellation and exit.
         tokio::time::sleep(Duration::from_millis(100)).await;
