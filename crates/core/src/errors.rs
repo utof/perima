@@ -26,6 +26,10 @@ pub enum CoreError {
     #[error("invalid hash hex: {0}")]
     InvalidHash(String),
 
+    /// Tag name failed normalization (empty, whitespace-only, or too long).
+    #[error("invalid tag: {0}")]
+    InvalidTag(String),
+
     /// Underlying I/O failure.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
