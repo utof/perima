@@ -723,8 +723,11 @@ pub fn attach_tag_inner<T: TagRepository + ?Sized>(
     tag_name: &str,
     device: DeviceId,
 ) -> Result<TagPayload, perima_core::CoreError> {
-    let hash = perima_core::BlakeHash::parse_hex(hash_hex)
-        .map_err(|e| perima_core::CoreError::Internal(format!("bad hash: {e}")))?;
+    // WHY direct `?` propagation: `parse_hex` already returns the typed
+    // `CoreError::InvalidHash` variant. Wrapping it in `Internal` would
+    // discard that signal for future HTTP/FFI adapters that match on
+    // variants.
+    let hash = perima_core::BlakeHash::parse_hex(hash_hex)?;
     let tag = tag_repo.upsert_tag(tag_name, device)?;
     tag_repo.attach(&hash, tag.id, device)?;
     Ok(TagPayload::from(tag))
@@ -759,8 +762,12 @@ pub fn detach_tag_inner<T: TagRepository + ?Sized>(
     tag_id_str: &str,
     device: DeviceId,
 ) -> Result<(), perima_core::CoreError> {
-    let hash = perima_core::BlakeHash::parse_hex(hash_hex)
-        .map_err(|e| perima_core::CoreError::Internal(format!("bad hash: {e}")))?;
+    // WHY direct `?` on `parse_hex`: preserves the typed
+    // `CoreError::InvalidHash` variant for downstream consumers.
+    let hash = perima_core::BlakeHash::parse_hex(hash_hex)?;
+    // WHY `Internal` wrap on `Uuid::parse_str`: `CoreError` has no
+    // dedicated UUID variant; `Internal` is the pragmatic fallback
+    // until a validation-error variant is introduced.
     let tag_id = uuid::Uuid::parse_str(tag_id_str)
         .map_err(|e| perima_core::CoreError::Internal(format!("bad tag UUID: {e}")))?;
     tag_repo.detach(&hash, tag_id, device)?;
@@ -779,7 +786,7 @@ pub fn detach_tag_inner<T: TagRepository + ?Sized>(
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 #[specta::specta]
-pub async fn list_files_with_tags(
+pub fn list_files_with_tags(
     limit: u32,
     volume: Option<String>,
     state: tauri::State<'_, AppState>,
