@@ -6,6 +6,8 @@ interface TagSidebarProps {
   tags: Tag[];
   /** Map from tag id to attachment count (for display only). */
   counts: Record<string, number>;
+  /** Total unfiltered file count, shown next to "All". */
+  totalCount: number;
   /** Selected tag id, or null for "All". */
   selectedTagId: string | null;
   /** Called when the user selects a tag or "All". */
@@ -19,6 +21,7 @@ interface TagSidebarProps {
 export default function TagSidebar({
   tags,
   counts,
+  totalCount,
   selectedTagId,
   onSelect,
 }: TagSidebarProps) {
@@ -29,6 +32,7 @@ export default function TagSidebar({
     >
       <SidebarRow
         label="All"
+        count={totalCount}
         active={selectedTagId === null}
         onClick={() => onSelect(null)}
       />
@@ -60,6 +64,7 @@ function SidebarRow({
     "flex items-center justify-between px-2 py-1.5 text-sm rounded cursor-pointer transition-colors";
   const activeCls = "bg-blue-600 text-white";
   const inactiveCls = "text-gray-300 hover:bg-gray-700";
+  const countCls = active ? "text-xs text-blue-200 ml-2" : "text-xs text-gray-400 ml-2";
   return (
     <button
       type="button"
@@ -69,7 +74,7 @@ function SidebarRow({
     >
       <span className="truncate">{label}</span>
       {count !== undefined && (
-        <span className="text-xs text-gray-400 ml-2">{count}</span>
+        <span className={countCls}>{count}</span>
       )}
     </button>
   );

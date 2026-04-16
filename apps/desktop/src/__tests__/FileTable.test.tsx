@@ -47,4 +47,28 @@ describe("FileTable", () => {
     render(<FileTable files={[]} loading={true} />);
     expect(screen.getByText("Loading...")).toBeInTheDocument();
   });
+
+  it("renders tag chips for files with tags", () => {
+    const file = makeEntry(1);
+    file.tags = [
+      { id: "t1", name: "vacation", first_seen: "2026-01-01T00:00:00Z" },
+      { id: "t2", name: "sunset", first_seen: "2026-01-01T00:00:00Z" },
+    ];
+    render(<FileTable files={[file]} loading={false} />);
+    expect(screen.getByText("vacation")).toBeInTheDocument();
+    expect(screen.getByText("sunset")).toBeInTheDocument();
+  });
+
+  it("shows +N overflow badge when more than 3 tags", () => {
+    const file = makeEntry(1);
+    file.tags = [
+      { id: "t1", name: "a", first_seen: "2026-01-01T00:00:00Z" },
+      { id: "t2", name: "b", first_seen: "2026-01-01T00:00:00Z" },
+      { id: "t3", name: "c", first_seen: "2026-01-01T00:00:00Z" },
+      { id: "t4", name: "d", first_seen: "2026-01-01T00:00:00Z" },
+    ];
+    render(<FileTable files={[file]} loading={false} />);
+    expect(screen.getByText("+1")).toBeInTheDocument();
+    expect(screen.queryByText("d")).not.toBeInTheDocument();
+  });
 });

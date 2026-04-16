@@ -90,4 +90,30 @@ describe("FileGrid", () => {
     render(<FileGrid files={[]} loading={true} />);
     expect(screen.getByRole("status")).toHaveTextContent("Loading...");
   });
+
+  it("renders tag chips under a tile", () => {
+    const file = makeFile({
+      tags: [
+        { id: "t1", name: "vacation", first_seen: "2026-01-01T00:00:00Z" },
+        { id: "t2", name: "sunset", first_seen: "2026-01-01T00:00:00Z" },
+      ],
+    });
+    render(<FileGrid files={[file]} />);
+    expect(screen.getByText("vacation")).toBeInTheDocument();
+    expect(screen.getByText("sunset")).toBeInTheDocument();
+  });
+
+  it("shows +N overflow badge when more than 3 tags on a tile", () => {
+    const file = makeFile({
+      tags: [
+        { id: "t1", name: "a", first_seen: "2026-01-01T00:00:00Z" },
+        { id: "t2", name: "b", first_seen: "2026-01-01T00:00:00Z" },
+        { id: "t3", name: "c", first_seen: "2026-01-01T00:00:00Z" },
+        { id: "t4", name: "d", first_seen: "2026-01-01T00:00:00Z" },
+      ],
+    });
+    render(<FileGrid files={[file]} />);
+    expect(screen.getByText("+1")).toBeInTheDocument();
+    expect(screen.queryByText("d")).not.toBeInTheDocument();
+  });
 });

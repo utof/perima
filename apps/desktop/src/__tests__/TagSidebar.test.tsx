@@ -14,6 +14,7 @@ describe("TagSidebar", () => {
       <TagSidebar
         tags={tags}
         counts={counts}
+        totalCount={7}
         selectedTagId={null}
         onSelect={() => {}}
       />,
@@ -31,6 +32,7 @@ describe("TagSidebar", () => {
       <TagSidebar
         tags={tags}
         counts={counts}
+        totalCount={7}
         selectedTagId={null}
         onSelect={onSelect}
       />,
@@ -45,6 +47,7 @@ describe("TagSidebar", () => {
       <TagSidebar
         tags={tags}
         counts={counts}
+        totalCount={7}
         selectedTagId={"id-1"}
         onSelect={onSelect}
       />,
@@ -58,11 +61,25 @@ describe("TagSidebar", () => {
       <TagSidebar
         tags={tags}
         counts={counts}
+        totalCount={7}
         selectedTagId={"id-1"}
         onSelect={() => {}}
       />,
     );
     const vacationBtn = screen.getByRole("button", { name: /vacation/i });
     expect(vacationBtn).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test("All row shows total file count", () => {
+    render(
+      <TagSidebar
+        tags={tags}
+        counts={counts}
+        totalCount={7}
+        selectedTagId={null}
+        onSelect={() => {}}
+      />,
+    );
+    expect(screen.getByText("7")).toBeInTheDocument();
   });
 });

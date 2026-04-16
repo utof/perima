@@ -29,6 +29,9 @@ type ViewMode = "table" | "grid";
 export default function App() {
   const [files, setFiles] = useState<FileWithTags[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
+  // WHY string | null (not Set<string>): spec models multi-select as Set<string>
+  // but v0.5.1 ships single-select only. Using null for "All" is simpler and
+  // avoids converting Set → serializable state. Upgrade to Set when multi-select lands.
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [scanning, setScanning] = useState(false);
@@ -80,6 +83,13 @@ export default function App() {
       .subscribeToFileEvents(() => {
         if (timer) clearTimeout(timer);
         timer = setTimeout(() => {
+          // WHY no listTags() here: the file watcher fires on filesystem
+          // events (file created/deleted/modified). Tags are only mutated
+          // via explicit Tauri commands from within this app — no external
+          // process can change file_tags without going through Tauri. A
+          // tag re-fetch on every file event would be wasteful and
+          // incorrect; tags refresh after scan (handleScanComplete) where
+          // new tags may actually have been created.
           api.listFilesWithTags(100).match(
             (refreshed) => {
               if (active) setFiles(refreshed);
@@ -142,6 +152,9 @@ export default function App() {
   }
 
   // Compute per-tag file counts from the full unfiltered list.
+  // WHY client-side from the 100-row cap: listFilesWithTags(100) returns at
+  // most 100 rows, so counts may be understated for large libraries. Acceptable
+  // for v0.5.1; a dedicated count_files_for_tag Tauri command lands with FTS5.
   const counts: Record<string, number> = {};
   for (const f of files) {
     for (const t of f.tags) {
@@ -180,6 +193,7 @@ export default function App() {
           <TagSidebar
             tags={tags}
             counts={counts}
+            totalCount={files.length}
             selectedTagId={selectedTagId}
             onSelect={setSelectedTagId}
           />

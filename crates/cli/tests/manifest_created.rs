@@ -44,6 +44,15 @@ fn manifest_db_created_after_scan() {
     let env_dir = tempfile::tempdir().expect("env dir");
     mk_fixture(td.path());
 
+    // WHY: running as root (common in CI containers) writes the manifest to
+    // /.perima/manifest.db, which is shared across test runs and accumulates
+    // rows. Delete it before scanning so the row-count assertion sees exactly
+    // the 3 fixtures from this run.
+    let candidate = Path::new("/.perima/manifest.db");
+    if candidate.exists() {
+        let _ = std::fs::remove_file(candidate);
+    }
+
     let output = Command::new(bin())
         .arg("scan")
         .arg(td.path())

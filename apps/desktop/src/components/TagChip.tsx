@@ -11,9 +11,11 @@ interface TagChipProps {
 /**
  * Compute a procedural color index (0..11) from a tag name.
  *
- * WHY byte-sum mod 12: blake3 isn't available in the TS bundle; a simple
- * byte-sum of the UTF-8 encoding collides rarely enough for cosmetic use.
- * Collisions are two tags sharing a chip color — harmless.
+ * WHY byte-sum mod 12 (not spec's blake3[0] % 12): blake3 isn't available
+ * in the TS bundle without a WASM dependency. The byte-sum is a deliberate
+ * intentional deviation from the spec for cosmetic coloring only — collisions
+ * (two tags sharing a chip color) are harmless. If a native/backend shell
+ * ever needs to agree on chip color, revisit with a shared WASM blake3.
  */
 function colorIndexFor(name: string): number {
   const bytes = new TextEncoder().encode(name);
