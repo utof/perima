@@ -1,7 +1,9 @@
 **/*.md
+!CHANGELOG.md
 target/
 .DS_Store
 *.swp
 node_modules/
 apps/desktop/dist/
 apps/desktop/dist-types/
+.codex
