@@ -23,7 +23,16 @@ fmt-check:
 fmt:
     cargo fmt --all
 
-ci: fmt-check clippy test doctest docs-coverage
+build-frontend:
+    cd apps/desktop && bun install --frozen-lockfile && bun run build
+
+test-frontend:
+    cd apps/desktop && bun install --frozen-lockfile && bun run test
+
+lint-frontend:
+    cd apps/desktop && bun install --frozen-lockfile && bun run lint
+
+ci: fmt-check clippy test doctest docs-coverage build-frontend test-frontend lint-frontend
 
 verify:
     @if command -v cargo-kani >/dev/null 2>&1; then \
