@@ -12,6 +12,28 @@ roadmap milestone triggers `1.0.0`.
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-04-16
+
+### Fixed
+
+- **Watcher errors surface in the desktop UI** (utof/perima#8).
+  `App.tsx` wires `subscribeToFileEvents` + `startWatch` failure
+  paths into a dismissible `WatcherBanner`. Previously these
+  errors only logged to `console.warn`, leaving users to wonder
+  why the file table had stopped refreshing.
+- **`perima_desktop::run` no longer panics on config errors.**
+  Replaced `expect()` with `?` propagation into a new
+  `RunError = Box<dyn Error + Send + Sync>` alias that matches
+  the error type Tauri's `.setup()` callback already expects.
+  (Minor public API change; no in-tree callers.)
+
+### Added
+
+- `WatcherBanner` component (`role="alert"`, yellow non-blocking
+  treatment distinct from scan errors).
+- Unit test for `WatcherState` cancel-token lifecycle.
+- Vitest test for watcher subscribe failure → banner renders.
+
 ## [0.3.1] — 2026-04-16
 
 ### Fixed
@@ -95,6 +117,7 @@ roadmap milestone triggers `1.0.0`.
   `cli`, `desktop`, `ci`, `deps`, `docs`, `release`) rather than development
   milestones.
 
-[Unreleased]: https://github.com/utof/perima/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/utof/perima/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/utof/perima/releases/tag/v0.3.2
 [0.3.1]: https://github.com/utof/perima/releases/tag/v0.3.1
 [0.3.0]: https://github.com/utof/perima/releases/tag/v0.3.0

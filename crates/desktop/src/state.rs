@@ -53,3 +53,40 @@ impl Default for WatcherState {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn watcher_state_cancel_lifecycle() {
+        let state = WatcherState::new();
+
+        // Starts empty.
+        assert!(state.cancel.lock().await.is_none());
+
+        // Inject a token (simulating start_watch's effect on the cancel field).
+        let token = CancellationToken::new();
+        {
+            let mut guard = state.cancel.lock().await;
+            *guard = Some(token.clone());
+        }
+        assert!(state.cancel.lock().await.is_some());
+        assert!(!token.is_cancelled());
+
+        // Simulate stop_watch: take + cancel.
+        let extracted = {
+            let mut guard = state.cancel.lock().await;
+            guard.take()
+        };
+        if let Some(t) = extracted {
+            t.cancel();
+        }
+        assert!(state.cancel.lock().await.is_none());
+        assert!(
+            token.is_cancelled(),
+            "the token we handed to state.cancel must propagate cancellation"
+        );
+    }
+}

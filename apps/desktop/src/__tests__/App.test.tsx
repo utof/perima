@@ -1,4 +1,4 @@
-import { render, act } from "@testing-library/react";
+import { render, screen, act } from "@testing-library/react";
 import { describe, expect, test, vi, beforeEach } from "vitest";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -78,5 +78,25 @@ describe("App file-event debounce", () => {
     );
     // Exactly one refresh for 5 rapid events — the whole point of debounce.
     expect(postCalls).toHaveLength(1);
+  });
+
+  test("surfaces watcher banner when subscribeToFileEvents fails", async () => {
+    (invoke as Mock).mockResolvedValue([]);
+    (listen as Mock).mockRejectedValue(new Error("channel closed"));
+
+    render(<App />);
+    // Wait for the promise chain in the subscribe effect to run.
+    // WHY act(): the rejected promise lands a setState via the .catch.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // The banner renders with role="alert". Its text begins with "Watcher:"
+    // and includes the wrapped error message.
+    expect(
+      screen.getByText(/Failed to subscribe to watcher events.*channel closed/),
+    ).toBeInTheDocument();
   });
 });

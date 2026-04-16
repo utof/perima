@@ -4,6 +4,7 @@ import type { UnsubscribeFn } from "./api";
 import FileTable from "./components/FileTable";
 import ScanButton from "./components/ScanButton";
 import StatusBar from "./components/StatusBar";
+import WatcherBanner from "./components/WatcherBanner";
 import type { FileEntry, ScanResult } from "./types";
 
 /**
@@ -20,6 +21,10 @@ export default function App() {
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // WHY: Watcher failures are non-blocking (the table is still accurate,
+  // just not live-updating). Surface them via a dismissible banner rather
+  // than the scan `error` state so they don't mask the StatusBar output.
+  const [watcherError, setWatcherError] = useState<string | null>(null);
 
   useEffect(() => {
     // WHY: Populate the table on mount so existing indexed files are visible
@@ -69,7 +74,12 @@ export default function App() {
           fn();
         }
       })
-      .catch((err) => console.warn("subscribeToFileEvents failed:", err));
+      .catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (active) {
+          setWatcherError(`Failed to subscribe to watcher events: ${msg}`);
+        }
+      });
 
     return () => {
       active = false;
@@ -96,8 +106,8 @@ export default function App() {
     // are logged but must not prevent the scan from being reported as
     // complete.
     api.startWatch(path).match(
-      () => {},
-      (err) => console.warn("startWatch failed:", err),
+      () => setWatcherError(null),
+      (err) => setWatcherError(`Failed to start watcher: ${err}`),
     );
   }
 
@@ -111,6 +121,11 @@ export default function App() {
           scanning={scanning}
         />
       </header>
+
+      <WatcherBanner
+        message={watcherError}
+        onDismiss={() => setWatcherError(null)}
+      />
 
       <main className="flex-1 overflow-auto p-4">
         <FileTable files={files} loading={loading} />

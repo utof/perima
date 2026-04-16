@@ -14,22 +14,28 @@ pub mod state;
 
 use tauri_specta::{Builder, collect_commands};
 
+/// Boxed error type used by [`run`].
+///
+/// WHY: the `run()` body assembles errors from three distinct origins —
+/// `perima_core::CoreError` (config resolution), `specta_typescript`'s
+/// export error (debug-only binding dump), and `tauri::Error` (event-loop
+/// failure). A boxed trait object is the minimum-friction union that
+/// accepts `?` from all three and matches what Tauri's own `.setup(...)`
+/// callback uses, so there is no second conversion layer to maintain.
+pub type RunError = Box<dyn std::error::Error + Send + Sync>;
+
 /// Build and run the Tauri application.
 ///
 /// Wires `AppState` and `WatcherState`, registers IPC commands, and starts
 /// the event loop.
 ///
-/// # Panics
-/// Panics if platform directories cannot be resolved (only occurs on systems
-/// where `directories::ProjectDirs::from` returns `None`, which is highly
-/// unusual in production). This is a fatal misconfiguration; propagating it
-/// as a `Result` would not help since the app cannot run without a data dir.
-///
 /// # Errors
-/// Returns a [`tauri::Error`] if the app fails to initialize or the event
-/// loop exits with an error.
-pub fn run() -> Result<(), tauri::Error> {
-    let cfg = config::resolve_config().expect("failed to resolve perima config");
+/// Returns a [`RunError`] if config resolution fails, if TypeScript binding
+/// export fails in debug builds, or if the Tauri event loop exits with an
+/// error. No panic paths remain; all previously `.expect()`-ed sites now
+/// propagate via `?`.
+pub fn run() -> Result<(), RunError> {
+    let cfg = config::resolve_config()?;
 
     let app_state = state::AppState {
         data_dir: cfg.data_dir,
@@ -51,12 +57,10 @@ pub fn run() -> Result<(), tauri::Error> {
 
     // Export TypeScript bindings in debug builds only.
     #[cfg(debug_assertions)]
-    specta_builder
-        .export(
-            specta_typescript::Typescript::default(),
-            "../../apps/desktop/src/bindings.ts",
-        )
-        .expect("failed to export TypeScript bindings");
+    specta_builder.export(
+        specta_typescript::Typescript::default(),
+        "../../apps/desktop/src/bindings.ts",
+    )?;
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -67,5 +71,6 @@ pub fn run() -> Result<(), tauri::Error> {
             specta_builder.mount_events(app);
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(tauri::generate_context!())?;
+    Ok(())
 }
