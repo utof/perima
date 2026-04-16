@@ -1,4 +1,9 @@
-//! `SQLite` adapter for perima (phase 1 brings the real implementation).
+//! `SQLite` adapter for perima.
 
-/// Marker placeholder.
-pub const CRATE_NAME: &str = "perima-db";
+pub mod connection;
+pub mod errors;
+pub mod file_repo;
+
+pub use connection::open_and_migrate;
+pub use errors::Error;
+pub use file_repo::SqliteFileRepository;

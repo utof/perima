@@ -7,6 +7,17 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+perima-core = { path = "../core" }
+rusqlite.workspace  = true
+refinery.workspace  = true
+thiserror.workspace = true
+tracing.workspace   = true
+uuid.workspace      = true
+chrono.workspace    = true
+
+[dev-dependencies]
+tempfile.workspace = true
+blake3.workspace   = true
 
 [lints]
 workspace = true

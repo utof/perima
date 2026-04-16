@@ -10,6 +10,8 @@ repository.workspace = true
 perima-core = { path = "../core" }
 perima-hash = { path = "../hash" }
 perima-fs   = { path = "../fs" }
+perima-db   = { path = "../db" }
+chrono.workspace = true
 
 clap.workspace               = true
 anyhow.workspace             = true
