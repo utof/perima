@@ -14,10 +14,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "perima_desktop"
 
 [dependencies]
-perima-core = { path = "../core" }
-perima-db   = { path = "../db" }
-perima-fs   = { path = "../fs" }
-perima-hash = { path = "../hash" }
+perima-core  = { path = "../core" }
+perima-db    = { path = "../db" }
+perima-fs    = { path = "../fs" }
+perima-hash  = { path = "../hash" }
+perima-media.workspace = true
 tauri.workspace             = true
 tauri-specta.workspace      = true
 specta.workspace            = true

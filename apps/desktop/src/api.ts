@@ -7,7 +7,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ResultAsync } from "neverthrow";
-import type { FileEntry, FileEvent, ScanResult, VolumeEntry } from "./types";
+import type {
+  FileEntry,
+  FileEvent,
+  FileWithMetadata,
+  ScanResult,
+  VolumeEntry,
+} from "./types";
 
 /**
  * Wraps a Tauri `invoke` call in a `ResultAsync`, mapping thrown errors to
@@ -48,6 +54,27 @@ export function listFiles(
   volume?: string,
 ): ResultAsync<FileEntry[], string> {
   return fromInvoke("list_files", { limit, volume: volume ?? null });
+}
+
+/**
+ * List files joined with any extracted media metadata, up to `limit`
+ * rows.
+ *
+ * Metadata fields are independently nullable — a location without an
+ * extracted `file_metadata` row surfaces with every metadata column as
+ * `null` and should be treated by the UI as "pending extraction".
+ *
+ * @param limit - Maximum number of rows to return.
+ * @param volume - Optional volume UUID to filter by.
+ */
+export function listFilesWithMetadata(
+  limit: number,
+  volume?: string,
+): ResultAsync<FileWithMetadata[], string> {
+  return fromInvoke("list_files_with_metadata", {
+    limit,
+    volume: volume ?? null,
+  });
 }
 
 /**

@@ -8,8 +8,11 @@
 use std::io::Write;
 use std::path::Path;
 
-use perima_core::DeviceId;
-use perima_desktop::commands::{list_files_inner, list_volumes_inner, run_scan_inner};
+use perima_core::{BlakeHash, DeviceId, MediaMetadata, MetadataRepository};
+use perima_db::{SqliteMetadataRepository, open_and_migrate};
+use perima_desktop::commands::{
+    list_files_inner, list_files_with_metadata_inner, list_volumes_inner, run_scan_inner,
+};
 
 /// Create three fixture files that mimic the canonical CLI test fixtures.
 fn mk_fixture(dir: &Path) {
@@ -74,6 +77,60 @@ fn list_files_after_scan() {
         "expected 3 file entries, got {}",
         entries.len()
     );
+}
+
+/// After inserting metadata for a scanned file, the
+/// `list_files_with_metadata_inner` helper must return at least one row
+/// with metadata fields populated from the stored record.
+#[test]
+fn list_files_with_metadata_returns_rows() {
+    let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
+    let data_dir = tempfile::tempdir().expect("tempdir for data");
+    mk_fixture(fixture_dir.path());
+
+    let device_id = DeviceId::new();
+    run_scan_inner(fixture_dir.path(), false, data_dir.path(), device_id)
+        .expect("scan_inner should succeed");
+
+    // Attach a metadata row to one of the scanned files. We pull its
+    // hash from `list_files_inner` to guarantee FK-compatibility with
+    // the `files` row the scanner just inserted.
+    let entries = list_files_inner(data_dir.path(), 100, None).expect("list_files_inner");
+    assert!(!entries.is_empty(), "scan must have inserted ≥1 file");
+    let first_hash = BlakeHash::parse_hex(&entries[0].hash).expect("parse hash");
+
+    let db_path = data_dir.path().join("perima.db");
+    let repo = SqliteMetadataRepository::new(open_and_migrate(&db_path).expect("open"));
+    let meta = MediaMetadata {
+        hash: first_hash,
+        width: Some(640),
+        height: Some(480),
+        duration_ms: None,
+        captured_at: Some("2026-04-16T00:00:00Z".into()),
+        camera_make: Some("Acme".into()),
+        camera_model: Some("Cam One".into()),
+        codec: None,
+        bitrate_bps: None,
+        mime_type: Some("image/jpeg".into()),
+    };
+    repo.upsert_metadata(&meta, device_id)
+        .expect("upsert_metadata");
+
+    let rows = list_files_with_metadata_inner(&repo, 100, None)
+        .expect("list_files_with_metadata_inner should succeed");
+
+    assert!(
+        !rows.is_empty(),
+        "expected ≥1 FileWithMetadataPayload row, got 0"
+    );
+    let populated = rows
+        .iter()
+        .find(|r| r.hash == entries[0].hash)
+        .expect("row for inserted metadata must be present");
+    assert_eq!(populated.width, Some(640));
+    assert_eq!(populated.height, Some(480));
+    assert_eq!(populated.camera_make.as_deref(), Some("Acme"));
+    assert_eq!(populated.mime_type.as_deref(), Some("image/jpeg"));
 }
 
 /// After a successful scan, `list_volumes_inner` must return at least one volume.

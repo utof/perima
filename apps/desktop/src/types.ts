@@ -28,6 +28,47 @@ export interface FileEntry {
   first_seen: string;
 }
 
+/**
+ * A file location joined with any extracted media metadata.
+ *
+ * Metadata fields are all independently nullable — a location without a
+ * matching `file_metadata` row surfaces with every metadata column as
+ * `null`, which the UI should treat as "pending extraction", not
+ * "no metadata exists".
+ */
+export interface FileWithMetadata {
+  /** 64-char lowercase hex BLAKE3 hash. */
+  hash: string;
+  /** File size in bytes. */
+  size: number;
+  /** UUID of the volume that contains this file. */
+  volume_id: string;
+  /** Path relative to the volume root. */
+  relative_path: string;
+  /** Lifecycle status: "active" | "missing" | "moved" | "stale". */
+  status: string;
+  /** ISO 8601 timestamp of first indexing. */
+  first_seen: string;
+  /** Pixel width (images / video). */
+  width: number | null;
+  /** Pixel height (images / video). */
+  height: number | null;
+  /** Duration in milliseconds (video / audio). */
+  duration_ms: number | null;
+  /** ISO 8601 UTC capture timestamp. */
+  captured_at: string | null;
+  /** Camera manufacturer (EXIF `Make`). */
+  camera_make: string | null;
+  /** Camera model (EXIF `Model`). */
+  camera_model: string | null;
+  /** Codec identifier (e.g. "avc1", "hevc"). */
+  codec: string | null;
+  /** Overall bitrate in bits per second. */
+  bitrate_bps: number | null;
+  /** MIME type as detected at extraction time. */
+  mime_type: string | null;
+}
+
 /** A storage volume known to perima. */
 export interface VolumeEntry {
   /** UUIDv7 primary key. */

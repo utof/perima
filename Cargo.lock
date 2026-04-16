@@ -3187,6 +3187,7 @@ dependencies = [
  "perima-db",
  "perima-fs",
  "perima-hash",
+ "perima-media",
  "rayon",
  "serde",
  "serde_json",

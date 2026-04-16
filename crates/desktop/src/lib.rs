@@ -1,17 +1,23 @@
 //! Tauri desktop backend for perima.
 //!
-//! Exposes `scan`, `list_files`, `list_volumes`, `start_watch`, `stop_watch`,
-//! and `is_watching` as Tauri IPC commands.
-//! `AppState` holds the resolved `Config` (data dir + device id) and is
-//! injected into every command via `tauri::State`.
+//! Exposes `scan`, `list_files`, `list_files_with_metadata`,
+//! `list_volumes`, `start_watch`, `stop_watch`, and `is_watching` as
+//! Tauri IPC commands.
+//! `AppState` holds the resolved `Config` (data dir + device id) plus
+//! a shared `Arc<SqliteMetadataRepository>`, and is injected into every
+//! command via `tauri::State`.
 //! `WatcherState` holds the active [`perima_fs::DebouncedWatcher`] and its
 //! cancellation token.
 
 pub mod commands;
 pub mod config;
 pub mod events;
+pub mod payloads;
 pub mod state;
 
+use std::sync::Arc;
+
+use perima_db::{SqliteMetadataRepository, open_and_migrate};
 use tauri_specta::{Builder, collect_commands};
 
 /// Boxed error type used by [`run`].
@@ -37,10 +43,17 @@ pub type RunError = Box<dyn std::error::Error + Send + Sync>;
 pub fn run() -> Result<(), RunError> {
     let cfg = config::resolve_config()?;
 
-    let app_state = state::AppState {
-        data_dir: cfg.data_dir,
-        device_id: cfg.device_id,
-    };
+    // WHY eager open + Arc-wrap: `SqliteMetadataRepository` holds a
+    // `Mutex<Connection>` and is deliberately shared — Task 5 wires it
+    // into `AppState`, and a future v0.4.1 background `MetadataQueue`
+    // worker will clone the same `Arc`. A fresh `open_and_migrate`
+    // here also guarantees V001 + V002 migrations run before the first
+    // command fires. Under WAL mode the extra open is free.
+    let db_path = cfg.data_dir.join("perima.db");
+    let metadata_conn = open_and_migrate(&db_path)?;
+    let metadata_repo = Arc::new(SqliteMetadataRepository::new(metadata_conn));
+
+    let app_state = state::AppState::new(cfg.data_dir, cfg.device_id, metadata_repo);
 
     // WHY: tauri-specta Builder collects #[specta::specta]-annotated commands
     // and generates TypeScript bindings at build time (debug only). The invoke
@@ -49,6 +62,7 @@ pub fn run() -> Result<(), RunError> {
     let specta_builder = Builder::<tauri::Wry>::new().commands(collect_commands![
         commands::scan,
         commands::list_files,
+        commands::list_files_with_metadata,
         commands::list_volumes,
         commands::start_watch,
         commands::stop_watch,

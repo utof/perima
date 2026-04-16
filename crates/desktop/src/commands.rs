@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use perima_core::{CoreError, DeviceId, EventBus, FileEvent, LocationStatus, VolumeId};
+use perima_core::{
+    CoreError, DeviceId, EventBus, FileEvent, LocationStatus, MetadataRepository, VolumeId,
+};
 use perima_db::{SqliteFileRepository, SqliteVolumeRepository, open_and_migrate};
 use perima_fs::{DebouncedWatcher, WalkdirScanner};
 use perima_hash::Blake3Service;
@@ -20,6 +22,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use crate::events::TauriEventEmitter;
+use crate::payloads::FileWithMetadataPayload;
 use crate::state::{AppState, WatcherState};
 
 // ---------------------------------------------------------------------------
@@ -353,6 +356,59 @@ pub fn list_files_inner(
     let records =
         perima_core::FileRepository::list_file_locations(&repo, limit as usize, volume_id)?;
     Ok(records.into_iter().map(FileEntry::from).collect())
+}
+
+/// List indexed file locations joined with any extracted media metadata.
+///
+/// Returns up to `limit` [`FileWithMetadataPayload`] rows ordered by
+/// relative path. Locations without a corresponding `file_metadata`
+/// row surface with all metadata fields as `None` — callers should
+/// treat that as "pending extraction", not "no metadata exists".
+///
+/// # Errors
+/// Returns a `String` description of any [`perima_core::CoreError`].
+// WHY allow: same reason as `scan` — Tauri owns `State` and `Option<String>` params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn list_files_with_metadata(
+    limit: u32,
+    volume: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<FileWithMetadataPayload>, String> {
+    let volume_id = volume
+        .map(|v| {
+            uuid::Uuid::parse_str(&v)
+                .map(VolumeId)
+                .map_err(|e| format!("bad volume UUID: {e}"))
+        })
+        .transpose()?;
+    list_files_with_metadata_inner(state.metadata_repo.as_ref(), limit, volume_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Inner list-files-with-metadata logic extracted for testability without
+/// a live Tauri state.
+///
+/// WHY: mirrors `run_scan_inner` — allows integration tests to exercise
+/// the command's logic through the [`MetadataRepository`] trait without
+/// constructing a `tauri::State`.
+///
+/// # Errors
+/// Returns [`perima_core::CoreError`] on any repository failure.
+pub fn list_files_with_metadata_inner<R>(
+    repo: &R,
+    limit: u32,
+    volume: Option<VolumeId>,
+) -> Result<Vec<FileWithMetadataPayload>, perima_core::CoreError>
+where
+    R: MetadataRepository + ?Sized,
+{
+    let rows = repo.list_with_metadata(limit as usize, volume)?;
+    Ok(rows
+        .into_iter()
+        .map(FileWithMetadataPayload::from)
+        .collect())
 }
 
 /// List all known volumes with their current mount paths on this machine.

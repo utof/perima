@@ -1,22 +1,60 @@
 //! Shared application state injected into every Tauri command.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use perima_core::DeviceId;
+use perima_db::SqliteMetadataRepository;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 /// State shared across all Tauri commands via `tauri::State<AppState>`.
 ///
-/// WHY: only `data_dir` and `device_id` are held here — no DB connection.
-/// Each command opens its own connection to avoid lifetime / `Send` issues
-/// with Tauri's async command system. Under `SQLite` WAL mode the second
-/// open is instant because migrations already ran.
+/// WHY `data_dir` + `device_id` without a general DB handle: commands
+/// that read through `FileRepository` / `VolumeRepository` open their
+/// own `rusqlite::Connection` per-call. That adapter predates `&self`
+/// traits and uses `&mut self`, which collides with `Arc`-sharing. WAL
+/// mode makes the second open a no-op so per-call-open is cheap.
+///
+/// WHY `metadata_repo: Arc<SqliteMetadataRepository>` is a deliberate
+/// deviation from the per-call-open pattern: the `MetadataRepository`
+/// trait was authored with `&self` (`Mutex<Connection>` inside) expressly
+/// so a single handle can be cloned into the background
+/// `MetadataQueue` worker (future v0.4.1 work) AND into Tauri
+/// commands. Opening per-call would create a new `Mutex` each time,
+/// defeating the shared-worker pattern the queue relies on. Task 5 of
+/// the v0.4.0 plan calls this out explicitly.
 pub struct AppState {
     /// Resolved data directory (where `perima.db` lives).
     pub data_dir: PathBuf,
     /// Stable device identifier.
     pub device_id: DeviceId,
+    /// Shared metadata repository handle.
+    ///
+    /// See struct-level WHY for the rationale behind holding this
+    /// directly (rather than re-opening a connection per command).
+    pub metadata_repo: Arc<SqliteMetadataRepository>,
+}
+
+impl AppState {
+    /// Construct a new `AppState` from a resolved config + metadata repo.
+    ///
+    /// WHY a constructor (rather than public struct literal): the
+    /// `metadata_repo` field is the first non-Copy piece of state and
+    /// the call-site in `run()` benefits from a named constructor that
+    /// documents the Arc-sharing contract.
+    #[must_use]
+    pub const fn new(
+        data_dir: PathBuf,
+        device_id: DeviceId,
+        metadata_repo: Arc<SqliteMetadataRepository>,
+    ) -> Self {
+        Self {
+            data_dir,
+            device_id,
+            metadata_repo,
+        }
+    }
 }
 
 /// Holds an active filesystem watcher so commands can start and stop it.
