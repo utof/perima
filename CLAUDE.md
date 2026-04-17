@@ -43,6 +43,13 @@ shell scripts stop scaling.
 - **`codebase-memory-mcp` is available** — use it for indexed code search,
   graph queries, call-path tracing, ADRs. Prefer it over Grep for
   cross-crate structural questions ("who calls X?", "what depends on Y?").
+- **`LSP` tool (rust-analyzer plugin) is available** — deferred, load
+  via `ToolSearch select:LSP`. For Rust symbol queries ("where is
+  `TagRepository` defined?", "who implements `MetadataExtractor`?",
+  "callers of `upsert_metadata`") prefer LSP over grep; it uses
+  rust-analyzer's semantic index and won't false-match comments or
+  similar names in other languages. Fall back to Grep only for text
+  in docs/comments or cross-language search.
 
 ## Test stack (pinned, don't re-litigate)
 

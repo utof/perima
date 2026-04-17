@@ -6,6 +6,7 @@
 # artifacts + binding rules to continue autonomous work across
 # sessions. Local WIP .md files elsewhere in the repo remain gitignored.
 !docs/superpowers/**/*.md
+!docs/routines/**/*.md
 target/
 .DS_Store
 *.swp
