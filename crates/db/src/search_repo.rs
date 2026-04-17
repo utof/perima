@@ -146,6 +146,16 @@ mod tests {
 
     use crate::tag_repo::SqliteTagRepository;
 
+    const DEV: &str = "dev";
+    const TS: &str = "2026-01-01T00:00:00Z";
+
+    /// Produce a deterministic 64-hex-char hash from a small integer.
+    fn hash_n(n: u8) -> String {
+        // WHY format: first two chars encode `n`; remaining 62 are '0'.
+        // Gives 256 distinct valid-length hashes without hand-writing literals.
+        format!("{:02x}{}", n, "0".repeat(62))
+    }
+
     fn test_db() -> (tempfile::TempDir, SqliteSearchRepository) {
         let td = tempfile::tempdir().expect("tempdir");
         let conn = crate::connection::open_and_migrate(&td.path().join("test.db")).expect("open");
@@ -177,17 +187,23 @@ mod tests {
         conn.execute(
             "INSERT OR IGNORE INTO files
                  (blake3_hash, file_size, first_seen, updated_at, device_id)
-             VALUES (?1, 1024, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'dev')",
-            rusqlite::params![hash],
+             VALUES (?1, 1024, ?2, ?2, ?3)",
+            rusqlite::params![hash, TS, DEV],
         )
         .expect("insert file");
         conn.execute(
             "INSERT OR IGNORE INTO file_locations
                  (id, blake3_hash, volume_id, relative_path, status,
                   first_seen, updated_at, device_id)
-             VALUES (?1, ?2, ?3, ?4, 'active',
-                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'dev')",
-            rusqlite::params![uuid::Uuid::now_v7().to_string(), hash, volume, path],
+             VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5, ?6)",
+            rusqlite::params![
+                uuid::Uuid::now_v7().to_string(),
+                hash,
+                volume,
+                path,
+                TS,
+                DEV
+            ],
         )
         .expect("insert file_location");
     }
@@ -198,9 +214,8 @@ mod tests {
             "INSERT OR REPLACE INTO file_metadata
                  (blake3_hash, mime_type, camera_model, captured_at,
                   extracted_at, updated_at, device_id)
-             VALUES (?1, ?2, ?3, ?4,
-                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'dev')",
-            rusqlite::params![hash, mime, camera, captured],
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+            rusqlite::params![hash, mime, camera, captured, TS, DEV],
         )
         .expect("insert metadata");
     }
@@ -319,7 +334,8 @@ mod tests {
             insert_file(&conn, HASH_A, VOL, "img.jpg");
             insert_metadata(&conn, HASH_A, "image/jpeg", "", "");
         }
-        // Wait for metadata insert trigger to run, then attach a tag.
+        // Metadata insert has already fired `search_after_metadata_insert`;
+        // now attach a tag to fire `search_after_file_tags_insert`.
         let tag = tag_repo.upsert_tag("triggertag", device()).expect("upsert");
         let hash = perima_core::BlakeHash::parse_hex(HASH_A).expect("hash");
         tag_repo.attach(&hash, tag.id, device()).expect("attach");
@@ -434,8 +450,8 @@ mod tests {
     fn attach_tag_raw(conn: &Connection, hash: &str, tag_name: &str) {
         conn.execute(
             "INSERT OR IGNORE INTO tags (id, name, first_seen, updated_at, device_id)
-             VALUES (?1, ?2, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'dev')",
-            rusqlite::params![uuid::Uuid::now_v7().to_string(), tag_name],
+             VALUES (?1, ?2, ?3, ?3, ?4)",
+            rusqlite::params![uuid::Uuid::now_v7().to_string(), tag_name, TS, DEV],
         )
         .expect("insert tag");
         let tag_id: String = conn
@@ -448,8 +464,8 @@ mod tests {
         conn.execute(
             "INSERT OR IGNORE INTO file_tags
                  (id, blake3_hash, tag_id, first_seen, updated_at, device_id)
-             VALUES (?1, ?2, ?3, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'dev')",
-            rusqlite::params![uuid::Uuid::now_v7().to_string(), hash, tag_id],
+             VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+            rusqlite::params![uuid::Uuid::now_v7().to_string(), hash, tag_id, TS, DEV],
         )
         .expect("insert file_tag");
     }
@@ -463,7 +479,8 @@ mod tests {
     #[test]
     #[allow(non_snake_case)]
     fn test_T40_metadata_update_removes_stale_tokens() {
-        const HASH: &str = "aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000";
+        let hash_owned = hash_n(1);
+        let HASH = hash_owned.as_str();
         let (_td, repo) = test_db();
         {
             let conn = repo.conn.lock().expect("lock");
@@ -493,7 +510,8 @@ mod tests {
     #[test]
     #[allow(non_snake_case)]
     fn test_T41_tag_attach_on_metadata_less_file() {
-        const HASH: &str = "bbbb0000bbbb0000bbbb0000bbbb0000bbbb0000bbbb0000bbbb0000bbbb0000";
+        let hash_owned = hash_n(2);
+        let HASH = hash_owned.as_str();
         let (_td, repo) = test_db();
         {
             let conn = repo.conn.lock().expect("lock");
@@ -516,30 +534,31 @@ mod tests {
     #[test]
     #[allow(non_snake_case)]
     fn test_T22_rename_updates_indexed_path() {
-        const HASH: &str = "cccc0000cccc0000cccc0000cccc0000cccc0000cccc0000cccc0000cccc0000";
+        let hash_owned = hash_n(3);
+        let HASH = hash_owned.as_str();
         let (_td, repo) = test_db();
         {
             let conn = repo.conn.lock().expect("lock");
-            insert_file(&conn, HASH, VOL, "A.jpg");
+            insert_file(&conn, HASH, VOL, "oldname_22.jpg");
             insert_metadata(&conn, HASH, "image/jpeg", "", "");
         }
         // Rename: same hash, new path. V006 has no UPDATE trigger on
         // file_locations, so FTS index is not updated.
         {
             let conn = repo.conn.lock().expect("lock");
-            update_path(&conn, HASH, "A.jpg", "B.jpg");
+            update_path(&conn, HASH, "oldname_22.jpg", "newname_22.jpg");
         }
-        let old_hits = repo.search("A", 50).expect("search old");
-        let new_hits = repo.search("B", 50).expect("search new");
-        // V006 bug: old path 'A' still matches; new path 'B' does not.
+        let old_hits = repo.search("oldname_22", 50).expect("search old");
+        let new_hits = repo.search("newname_22", 50).expect("search new");
+        // V006 bug: old path 'oldname_22' still matches; new path 'newname_22' does not.
         assert!(
             old_hits.is_empty(),
-            "#22: old path 'A' still matches after rename (V006 bug)"
+            "#22: old path 'oldname_22' still matches after rename (V006 bug)"
         );
         assert_eq!(
             new_hits.len(),
             1,
-            "#22: new path 'B' does not match after rename (V006 bug)"
+            "#22: new path 'newname_22' does not match after rename (V006 bug)"
         );
     }
 
@@ -548,8 +567,10 @@ mod tests {
     #[test]
     #[allow(non_snake_case)]
     fn test_T42_hash_change_retires_old_doc() {
-        const HASH_OLD: &str = "dddd0000dddd0000dddd0000dddd0000dddd0000dddd0000dddd0000dddd0000";
-        const HASH_NEW: &str = "eeee0000eeee0000eeee0000eeee0000eeee0000eeee0000eeee0000eeee0000";
+        let hash_old_owned = hash_n(4);
+        let hash_new_owned = hash_n(5);
+        let HASH_OLD = hash_old_owned.as_str();
+        let HASH_NEW = hash_new_owned.as_str();
         let (_td, repo) = test_db();
         {
             let conn = repo.conn.lock().expect("lock");
@@ -563,8 +584,8 @@ mod tests {
             conn.execute(
                 "INSERT OR IGNORE INTO files
                      (blake3_hash, file_size, first_seen, updated_at, device_id)
-                 VALUES (?1, 2048, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'dev')",
-                rusqlite::params![HASH_NEW],
+                 VALUES (?1, 2048, ?2, ?2, ?3)",
+                rusqlite::params![HASH_NEW, TS, DEV],
             )
             .expect("insert new files row");
             conn.execute(

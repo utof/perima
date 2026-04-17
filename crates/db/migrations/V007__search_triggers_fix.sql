@@ -43,6 +43,11 @@ CREATE TABLE search_content (
     tags          TEXT    NOT NULL DEFAULT ''
 );
 
+-- WHY default unicode61 tokenizer: splits on '.', '/', '_' — so a path
+-- like "photos/sunset.jpg" indexes tokens ["photos", "sunset", "jpg"]
+-- and search for "sunset" matches. Explicit `tokenize='unicode61'` is
+-- redundant (it's the default) but should we ever want `porter` or a
+-- custom tokenizer, this is the knob.
 CREATE VIRTUAL TABLE search_index USING fts5(
     filename, relative_path, mime_type, camera_model, captured_at, tags,
     content='search_content', content_rowid='rowid'
@@ -208,6 +213,9 @@ WHEN OLD.relative_path != NEW.relative_path
      ORDER BY first_seen ASC, id ASC LIMIT 1
  )
 BEGIN
+    -- WHY NEW.* is safe here: the WHEN-guard above already asserts
+    -- NEW is the representative row for this hash, so NEW.* IS the
+    -- live state by definition.
     UPDATE search_content
     SET relative_path = NEW.relative_path,
         filename      = NEW.relative_path
