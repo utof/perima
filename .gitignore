@@ -1,6 +1,7 @@
 **/*.md
 !CHANGELOG.md
 !CLAUDE.md
+!CONTRIBUTING.md
 # WHY exception for docs/superpowers + CLAUDE.md: cloud agents
 # (scheduled remote triggers) clone the repo fresh and need spec/plan
 # artifacts + binding rules to continue autonomous work across
@@ -8,6 +9,10 @@
 !docs/superpowers/**/*.md
 !docs/routines/**/*.md
 !.claude/**/*.md
+# WHY: issue templates (.yml) and any future workflow docs live under
+# .github/; the blanket **/*.md rule would otherwise exclude markdown
+# files added there (e.g. pull_request_template.md).
+!.github/**
 target/
 .DS_Store
 *.swp

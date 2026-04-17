@@ -1,0 +1,59 @@
+# WHY: idea issues park speculative directions without committing to them.
+# The pre-work dropdown maps to needs-brainstorm / needs-web-search /
+# needs-research labels so the issue is automatically routed to the right
+# next step. Agents should auto-apply the correct pre-work label; humans
+# pick whichever matches their gut feeling.
+name: Idea (speculative)
+description: A speculative direction — not committed to ship, but worth tracking.
+title: "idea: <short summary>"
+labels: ["idea"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for **speculative** directions that are not yet ready to commit.
+        Once an idea has been brainstormed / researched and a decision made,
+        convert it to an Enhancement issue (or close it).
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Idea summary
+      description: One or two sentences. What is the idea?
+      placeholder: "e.g. Explore using BLAKE3 instead of SHA-256 for asset fingerprinting to get parallelisable hashing."
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why might this be worth exploring?
+      description: What problem would it solve, or what opportunity would it unlock?
+      placeholder: "e.g. BLAKE3 is 5–10x faster than SHA-256 on multi-core hardware; matters when ingesting large libraries."
+    validations:
+      required: false
+
+  - type: textarea
+    id: blockers
+    attributes:
+      label: Open questions / blockers
+      description: What would need to be resolved before this could become a committed feature?
+      placeholder: "e.g. Does BLAKE3 have a stable Rust crate? Is the output length compatible with our UUIDv7 key scheme?"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: prework
+    attributes:
+      label: Pre-work required
+      description: |
+        What kind of work is needed before this idea can be acted on?
+        Selecting an option auto-applies the matching `needs-*` label.
+      options:
+        - "needs-brainstorm — design decision unresolved; run a brainstorming session first"
+        - "needs-web-search — library/pattern should be verified against current (2025-26) best practice"
+        - "needs-research — deep multi-source research required before committing"
+        - "none — enough information to move straight to an Enhancement issue"
+      default: 0
+    validations:
+      required: true

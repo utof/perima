@@ -1,0 +1,6 @@
+# WHY: disabling blank issues forces every reporter (human or AI agent) to
+# pick a structured template. This keeps label coverage high and signals
+# exactly what kind of issue it is from creation. If GH Discussions are
+# enabled in the future, add a contact_links entry pointing there for
+# open-ended questions that don't fit a template.
+blank_issues_enabled: false

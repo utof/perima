@@ -1,0 +1,57 @@
+# WHY: the scope dropdown maps directly onto v1-polish / post-v1 labels so
+# the author declares scheduling intent at filing time. Agents should pick
+# the scope based on the meta-plan; humans should pick whichever fits.
+name: Enhancement / feature request
+description: A new capability or improvement to an existing one.
+title: "feat: <short summary>"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for new features or improvements to existing behaviour.
+        For speculative ideas that are not yet ready to commit, use the **Idea** template instead.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What is currently hard, impossible, or broken that this feature would fix?
+      placeholder: "e.g. There is no way to filter assets by tag in the CLI, forcing users to export to JSON and grep manually."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the behaviour you want. Be as concrete as possible (API shape, UI flow, CLI flags, etc.).
+      placeholder: "e.g. Add `perima list --tag <tag>` that returns matching asset hashes one per line."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        What other approaches did you consider? Why are they worse?
+        (Even "I only thought of one way" is a valid answer — just say so.)
+      placeholder: "e.g. Considered exposing a SQL REPL, but that leaks schema details and is harder to script."
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      description: |
+        Does this belong in v1, or is it post-v1 polish?
+        This auto-applies the matching label; you can re-label later if you disagree.
+      options:
+        - "pre-v1 (must-have for initial release)"
+        - "v1-polish (nice-to-have within v1)"
+        - "post-v1 (out of scope for v1; tracked for future)"
+      default: 2
+    validations:
+      required: true

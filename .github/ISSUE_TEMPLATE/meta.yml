@@ -1,0 +1,55 @@
+# WHY: meta issues cover repo hygiene, workflow changes, tooling decisions,
+# and process improvements — things that affect how we work, not what ships.
+# The impact dropdown helps triage: "only me" is quick-fix territory;
+# "also future agents" / "also external contributors" needs more care.
+name: Meta / process issue
+description: A change to the project's workflow, tooling, or repo hygiene — not a code feature.
+title: "meta: <short summary>"
+labels: ["meta"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for issues about **how we work**, not what the product does.
+        Examples: label cleanup, CI configuration, CLAUDE.md rule changes,
+        contributor workflow updates, template improvements.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Current state
+      description: What is happening right now that prompted this issue?
+      placeholder: "e.g. Issue labels are applied inconsistently — some bugs have no label, some have two conflicting labels."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed change
+      description: What should be different? Be specific enough that an agent could act on it.
+      placeholder: "e.g. Add a `chore` label. Audit all open issues and re-label."
+    validations:
+      required: true
+
+  - type: textarea
+    id: rationale
+    attributes:
+      label: Rationale
+      description: Why is this worth doing? What breaks or degrades without it?
+      placeholder: "e.g. AI agents rely on labels for routing — inconsistency causes misrouted work."
+    validations:
+      required: false
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Who is affected?
+      description: Helps prioritise. "Only me" items are quick-win territory; broader impact warrants more careful review.
+      options:
+        - "Only me (single dev / solo AI session)"
+        - "Also future agents (AI agents in future sessions)"
+        - "Also external contributors (humans outside this repo)"
+      default: 0
+    validations:
+      required: true

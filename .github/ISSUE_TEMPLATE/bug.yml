@@ -1,0 +1,68 @@
+# WHY: structured form ensures every bug report carries the minimum signal
+# needed to reproduce the problem. LLM agents filing bugs should fill in
+# all fields; humans only the ones they know.
+name: Bug report
+description: Something is not working as expected.
+title: "bug: <short summary>"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Fill in as many fields as you can.
+        If you are an AI agent, populate every field from available context.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What went wrong?
+      description: A clear description of the problem. One or two sentences is fine.
+      placeholder: "e.g. perima crashes when ingesting a HEIF file with an embedded XMP sidecar."
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What should have happened instead?
+      placeholder: "e.g. The file should be ingested and its metadata stored without error."
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What actually happened? Include error messages, panics, or wrong output verbatim.
+      placeholder: |
+        Paste the exact error / stack trace here.
+        `RUST_BACKTRACE=1` output is very helpful.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact, minimal reproduction sequence.
+      placeholder: |
+        1. Run `perima ingest ./samples/photo.heic`
+        2. Observe output …
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: |
+        Version info helps bisect regressions.
+        Run `perima --version` or note the git commit hash.
+        Include OS + Tauri version when the desktop app is involved.
+      placeholder: |
+        perima: v0.5.0 (or git sha abc1234)
+        OS: Ubuntu 24.04 / macOS 15.3 / Windows 11
+        Tauri: 2.x (if desktop issue)
+    validations:
+      required: false
