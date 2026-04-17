@@ -75,7 +75,10 @@ shell scripts stop scaling.
 - TS: `eslint-plugin-tsdoc`, TypeDoc `--validation.notDocumented`.
 - Every non-obvious decision gets a `// WHY:` comment. Standard
   doc-comments explain the API; WHY-comments explain the reasoning.
-- `DECISIONS.md` (local-only, gitignored) logs architectural choices.
+- Architectural decisions: CLAUDE.md (living rules) + phase specs
+  (intent snapshots) + commit WHY blocks (ground truth) carry the load.
+  No separate DECISIONS.md — per 2026-04-17 research, flat decision
+  logs rot faster than they're maintained in a solo AI-heavy workflow.
 - Unified doc site: **Astro Starlight** (Tauri-stack aligned, handles
   polyglot via MDX). Rust doctests via `mdbook test` in CI on the core
   crate. `cargo doc` + TypeDoc feed Starlight; introduce the site
