@@ -603,4 +603,429 @@ mod tests {
             "#42: old doc not retired when hash changed at same path (V006 bug)"
         );
     }
+
+    // ── Task 4: regression-pin tests (post-V007 behaviour) ──────────────────
+    // WHY regression-pin: all six pass against V007 with no impl changes.
+    // They lock multi-surface invariants that no single-bug regression test
+    // covers. Labelled regression-pin (not TDD red→green) per the plan's
+    // bundling justification.
+
+    const VOL2: &str = "00000000-0000-0000-0000-000000000002";
+
+    /// Soft-delete a `file_locations` row by setting its `deleted_at` column.
+    ///
+    /// WHY helper: three tests share the same two-step pattern of updating
+    /// `deleted_at` on a specific `(hash, relative_path)` pair.
+    fn soft_delete_location(conn: &Connection, hash: &str, path: &str) {
+        conn.execute(
+            "UPDATE file_locations SET deleted_at = ?1
+             WHERE blake3_hash = ?2 AND relative_path = ?3",
+            rusqlite::params![TS, hash, path],
+        )
+        .expect("soft_delete_location");
+    }
+
+    /// Insert a secondary `file_locations` row on a specific volume for an
+    /// existing `files` hash. Unlike [`insert_file`] this does NOT INSERT into
+    /// `files` — caller has already seeded that row via `insert_file` for the
+    /// representative location.
+    ///
+    /// WHY helper: the I4 test needs two locations for the same hash on
+    /// different volumes; `insert_file` alone insists on `INSERT OR IGNORE`
+    /// into `files` which is fine, but the location insert benefits from an
+    /// explicit volume-aware helper.
+    fn insert_file_at_volume(conn: &Connection, hash: &str, path: &str, volume: &str) {
+        conn.execute(
+            "INSERT OR IGNORE INTO files
+                 (blake3_hash, file_size, first_seen, updated_at, device_id)
+             VALUES (?1, 1024, ?2, ?2, ?3)",
+            rusqlite::params![hash, TS, DEV],
+        )
+        .expect("insert files (secondary location)");
+        conn.execute(
+            "INSERT OR IGNORE INTO file_locations
+                 (id, blake3_hash, volume_id, relative_path, status,
+                  first_seen, updated_at, device_id)
+             VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5, ?6)",
+            rusqlite::params![
+                uuid::Uuid::now_v7().to_string(),
+                hash,
+                volume,
+                path,
+                TS,
+                DEV
+            ],
+        )
+        .expect("insert secondary file_location");
+    }
+
+    /// Volume-scoped rename helper: UPDATE `file_locations.relative_path` for
+    /// a specific `(hash, volume_id, old_path)` triple. Needed when two
+    /// locations share the same `relative_path` on different volumes and the
+    /// caller wants to rename exactly one.
+    fn update_path_at_volume(
+        conn: &Connection,
+        hash: &str,
+        old_path: &str,
+        new_path: &str,
+        volume: &str,
+    ) {
+        conn.execute(
+            "UPDATE file_locations SET relative_path = ?1
+             WHERE blake3_hash = ?2 AND relative_path = ?3 AND volume_id = ?4",
+            rusqlite::params![new_path, hash, old_path, volume],
+        )
+        .expect("update_path_at_volume");
+    }
+
+    /// Hit-count wrapper over `SearchRepository::search(q, 50)`.
+    fn search_count(repo: &SqliteSearchRepository, q: &str) -> usize {
+        repo.search(q, 50).expect("search_count").len()
+    }
+
+    /// I4: "multi-location rename preserves findability."
+    ///
+    /// Per the v0.6.3 spec §Non-goals: the representative FTS doc is
+    /// one-per-hash, indexed under the first-seen active location. This test
+    /// verifies that the co-existence of multiple locations does NOT break
+    /// the rename trigger — the file remains findable via its current
+    /// representative-path tokens across both a non-representative rename
+    /// (no-op on FTS) and a representative rename (updates FTS).
+    ///
+    /// WHY not "secondary location's path is separately searchable": the spec
+    /// explicitly scopes that as out-of-scope multi-volume awareness; the
+    /// representative is authoritative.
+    #[test]
+    fn test_multi_location_rename_preserves_findability() {
+        let hash = hash_n(10);
+        let (_td, repo) = test_db();
+        {
+            let conn = repo.conn.lock().expect("lock");
+            // Representative (first-seen) location on VOL.
+            insert_file(&conn, &hash, VOL, "shared_mlr.jpg");
+            // Second location on VOL2, same relative_path.
+            insert_file_at_volume(&conn, &hash, "shared_mlr.jpg", VOL2);
+        }
+
+        // Rename the non-representative (VOL2) location. Trigger 2b is gated
+        // on NEW being the representative, so the rename should NOT affect
+        // search_content; the representative's "shared_mlr" token still matches.
+        {
+            let conn = repo.conn.lock().expect("lock");
+            update_path_at_volume(&conn, &hash, "shared_mlr.jpg", "renamed_mlr.jpg", VOL2);
+        }
+        assert_eq!(
+            search_count(&repo, "shared_mlr"),
+            1,
+            "non-rep rename must not affect FTS — representative path still matches"
+        );
+
+        // Rename the representative (VOL) location. Trigger 2b fires and
+        // updates search_content.relative_path + filename.
+        {
+            let conn = repo.conn.lock().expect("lock");
+            update_path_at_volume(&conn, &hash, "shared_mlr.jpg", "alpha_mlr.jpg", VOL);
+        }
+        assert_eq!(
+            search_count(&repo, "shared_mlr"),
+            0,
+            "rep rename retires old path token from FTS"
+        );
+        assert_eq!(
+            search_count(&repo, "alpha_mlr"),
+            1,
+            "rep rename indexes new path token in FTS"
+        );
+    }
+
+    /// C1: soft-deleting the representative location of a two-location file
+    /// must re-point `search_content` to the surviving sibling, not retire the doc.
+    ///
+    /// After the delete:
+    /// - search("vol1") → 0 (representative was on vol1; path retired)
+    /// - search("vol2") → 1 (surviving sibling on vol2 is now indexed)
+    #[test]
+    fn test_representative_location_soft_delete_repoints() {
+        let hash = hash_n(11);
+        let (_td, repo) = test_db();
+        {
+            let conn = repo.conn.lock().expect("lock");
+            // First (representative) location on VOL / vol1 path.
+            insert_file(&conn, &hash, VOL, "vol1/repfile_c1.jpg");
+            // Second location on VOL2 / vol2 path — same hash.
+            conn.execute(
+                "INSERT OR IGNORE INTO files
+                     (blake3_hash, file_size, first_seen, updated_at, device_id)
+                 VALUES (?1, 1024, ?2, ?2, ?3)",
+                rusqlite::params![hash, TS, DEV],
+            )
+            .expect("insert files");
+            conn.execute(
+                "INSERT OR IGNORE INTO file_locations
+                     (id, blake3_hash, volume_id, relative_path, status,
+                      first_seen, updated_at, device_id)
+                 VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5, ?6)",
+                rusqlite::params![
+                    uuid::Uuid::now_v7().to_string(),
+                    hash,
+                    VOL2,
+                    "vol2/repfile_c1.jpg",
+                    TS,
+                    DEV
+                ],
+            )
+            .expect("insert second location");
+        }
+        // Soft-delete the first (representative) location.
+        {
+            let conn = repo.conn.lock().expect("lock");
+            soft_delete_location(&conn, &hash, "vol1/repfile_c1.jpg");
+        }
+        // vol1 token must no longer match (representative retired from index).
+        let vol1_hits = repo.search("vol1", 50).expect("search vol1");
+        assert_eq!(
+            vol1_hits.len(),
+            0,
+            "C1: search on deleted representative's path must return zero"
+        );
+        // vol2 token must still match (search_content re-pointed to sibling).
+        let vol2_hits = repo.search("vol2", 50).expect("search vol2");
+        assert_eq!(
+            vol2_hits.len(),
+            1,
+            "C1: sibling location must be discoverable after representative soft-delete"
+        );
+        assert_eq!(vol2_hits[0].blake3_hash, hash);
+    }
+
+    /// Soft-deleting the *only* location of a file must retire both the
+    /// `search_content` row and the FTS doc.
+    ///
+    /// After the delete:
+    /// - `search_content` row count for this hash → 0
+    /// - `search_index` query for any term → 0 results for this hash
+    #[test]
+    fn test_last_location_soft_delete_retires_doc() {
+        let hash = hash_n(12);
+        let (_td, repo) = test_db();
+        {
+            let conn = repo.conn.lock().expect("lock");
+            insert_file(&conn, &hash, VOL, "solo_retire_lsd.jpg");
+            insert_metadata(&conn, &hash, "image/jpeg", "RetireCamera", "");
+        }
+        // Trigger must have indexed via metadata insert; verify first.
+        let pre = repo.search("RetireCamera", 50).expect("pre-search");
+        assert_eq!(pre.len(), 1, "file must be indexed before soft-delete");
+
+        // Soft-delete the only location.
+        {
+            let conn = repo.conn.lock().expect("lock");
+            soft_delete_location(&conn, &hash, "solo_retire_lsd.jpg");
+        }
+
+        // FTS search must return empty.
+        let hits = repo.search("RetireCamera", 50).expect("post-search");
+        assert!(
+            hits.is_empty(),
+            "last-location soft-delete must remove the file from FTS search"
+        );
+
+        // search_content row must be gone.
+        let sc_count: i64 = {
+            let conn = repo.conn.lock().expect("lock");
+            conn.query_row(
+                "SELECT COUNT(*) FROM search_content WHERE blake3_hash = ?1",
+                rusqlite::params![hash],
+                |r| r.get(0),
+            )
+            .expect("count search_content")
+        };
+        assert_eq!(
+            sc_count, 0,
+            "search_content row must be deleted after last-location soft-delete"
+        );
+    }
+
+    /// I5: calling `SearchRepository::rebuild()` twice produces an identical
+    /// result set; no row-count drift in `search_content`.
+    ///
+    /// Stricter than the earlier `rebuild_is_idempotent` test: asserts the
+    /// exact `search_content` row count is stable across two rebuilds, not
+    /// just that searches still return results.
+    #[test]
+    fn test_rebuild_idempotence_post_v007() {
+        let (_td, repo) = test_db();
+        {
+            let conn = repo.conn.lock().expect("lock");
+            for i in 20u8..23u8 {
+                let h = hash_n(i);
+                insert_file(&conn, &h, VOL, &format!("idempotent_{i}.jpg"));
+                insert_metadata(&conn, &h, "image/jpeg", "", "");
+            }
+        }
+        repo.rebuild().expect("rebuild 1");
+        let count_after_first: i64 = {
+            let conn = repo.conn.lock().expect("lock");
+            conn.query_row("SELECT COUNT(*) FROM search_content", [], |r| r.get(0))
+                .expect("count after first rebuild")
+        };
+
+        repo.rebuild().expect("rebuild 2");
+        let count_after_second: i64 = {
+            let conn = repo.conn.lock().expect("lock");
+            conn.query_row("SELECT COUNT(*) FROM search_content", [], |r| r.get(0))
+                .expect("count after second rebuild")
+        };
+
+        assert_eq!(
+            count_after_first, count_after_second,
+            "I5: search_content row count must be stable across two rebuilds (no drift)"
+        );
+        assert_eq!(
+            count_after_first, 3,
+            "I5: exactly 3 rows expected (one per file)"
+        );
+
+        // FTS search results must also be identical in content.
+        let hits_first = repo
+            .search("idempotent", 50)
+            .expect("search after rebuild 2");
+        assert_eq!(
+            hits_first.len(),
+            3,
+            "I5: all 3 files must be discoverable after double rebuild"
+        );
+    }
+
+    /// I6: a single `BEGIN…COMMIT` updating `file_metadata.camera_model` +
+    /// attaching a new tag + renaming `file_locations.relative_path` must
+    /// produce FTS docs that reflect ALL three changes after commit.
+    ///
+    /// WHY fire-order independence: the three business triggers (2b, 3b, 4a)
+    /// all update `search_content` from joined live state, so regardless of
+    /// `SQLite`'s trigger-fire order the final `search_content` row converges.
+    #[test]
+    fn test_combined_transaction_update() {
+        let hash = hash_n(13);
+        let (_td, repo) = test_db();
+        {
+            let conn = repo.conn.lock().expect("lock");
+            insert_file(&conn, &hash, VOL, "combined_old_ctx.jpg");
+            insert_metadata(&conn, &hash, "image/jpeg", "OldCamera", "");
+        }
+
+        // Pre-condition: old tokens indexed.
+        let pre = repo.search("OldCamera", 50).expect("pre OldCamera");
+        assert_eq!(pre.len(), 1, "pre-condition: OldCamera must be indexed");
+
+        // Execute all three mutations in one transaction.
+        {
+            let conn = repo.conn.lock().expect("lock");
+            conn.execute_batch("BEGIN;").expect("begin");
+            // 1. Rename the location (trigger 2b if it is the representative).
+            conn.execute(
+                "UPDATE file_locations SET relative_path = 'combined_new_ctx.jpg'
+                 WHERE blake3_hash = ?1 AND relative_path = 'combined_old_ctx.jpg'",
+                rusqlite::params![hash],
+            )
+            .expect("rename");
+            // 2. Update camera_model (trigger 3b).
+            conn.execute(
+                "UPDATE file_metadata SET camera_model = 'NewCamera'
+                 WHERE blake3_hash = ?1",
+                rusqlite::params![hash],
+            )
+            .expect("update metadata");
+            // 3. Attach a new tag (trigger 4a).
+            attach_tag_raw(&conn, &hash, "combined_tag_ctx");
+            conn.execute_batch("COMMIT;").expect("commit");
+        }
+
+        // FTS must reflect NEW camera_model.
+        let new_cam = repo.search("NewCamera", 50).expect("NewCamera");
+        assert_eq!(
+            new_cam.len(),
+            1,
+            "I6: NewCamera must be indexed post-commit"
+        );
+
+        // FTS must no longer contain OLD camera_model.
+        let old_cam = repo.search("OldCamera", 50).expect("OldCamera after");
+        assert!(
+            old_cam.is_empty(),
+            "I6: OldCamera must not appear after metadata update in combined tx"
+        );
+
+        // FTS must reflect the new tag.
+        let tag_hits = repo.search("combined_tag_ctx", 50).expect("tag");
+        assert_eq!(tag_hits.len(), 1, "I6: new tag must be indexed post-commit");
+
+        // FTS must reflect the new path token.
+        let new_path = repo.search("combined_new_ctx", 50).expect("new path");
+        assert_eq!(
+            new_path.len(),
+            1,
+            "I6: new relative_path token must be indexed post-commit"
+        );
+
+        // FTS must no longer match the old path token.
+        let old_path = repo.search("combined_old_ctx", 50).expect("old path");
+        assert!(
+            old_path.is_empty(),
+            "I6: old relative_path token must not appear after rename in combined tx"
+        );
+    }
+
+    /// Trigger 5: renaming a tag must update every `search_content` row that
+    /// references it. After `UPDATE tags SET name = 'holiday'` for the tag
+    /// previously named "vacation":
+    /// - search("vacation") → 0
+    /// - search("holiday")  → 3 (all files that had the tag attached)
+    #[test]
+    fn test_tag_name_rename_propagates() {
+        let (_td, repo) = test_db();
+        let hashes: Vec<String> = (30u8..33u8).map(hash_n).collect();
+        {
+            let conn = repo.conn.lock().expect("lock");
+            for (i, h) in hashes.iter().enumerate() {
+                insert_file(&conn, h, VOL, &format!("trnp_{i}.jpg"));
+                // Attach tag "vacation" to all three files.
+                attach_tag_raw(&conn, h, "vacation");
+            }
+        }
+
+        // Pre-condition: all 3 files discoverable under "vacation".
+        let pre = repo.search("vacation", 50).expect("pre-vacation");
+        assert_eq!(
+            pre.len(),
+            3,
+            "pre-condition: all 3 files must be indexed under 'vacation'"
+        );
+
+        // Rename the tag — trigger 5 must update all three search_content rows.
+        {
+            let conn = repo.conn.lock().expect("lock");
+            conn.execute(
+                "UPDATE tags SET name = 'holiday' WHERE name = 'vacation'",
+                [],
+            )
+            .expect("rename tag");
+        }
+
+        // Old name must yield zero results.
+        let old_hits = repo.search("vacation", 50).expect("vacation after rename");
+        assert_eq!(
+            old_hits.len(),
+            0,
+            "trigger 5: 'vacation' must return zero after tag rename"
+        );
+
+        // New name must match all three files.
+        let new_hits = repo.search("holiday", 50).expect("holiday");
+        assert_eq!(
+            new_hits.len(),
+            3,
+            "trigger 5: 'holiday' must match all 3 files after tag rename"
+        );
+    }
 }
