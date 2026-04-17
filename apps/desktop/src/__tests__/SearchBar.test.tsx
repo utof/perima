@@ -131,4 +131,32 @@ describe("SearchBar", () => {
       (screen.getByRole("searchbox") as HTMLInputElement).value,
     ).toBe("");
   });
+
+  it("does not fire search for single-character query", async () => {
+    mockSearch.mockReturnValue(okAsync([hit]));
+    render(<SearchBar onResultClick={vi.fn()} />);
+
+    fireEvent.change(screen.getByRole("searchbox"), {
+      target: { value: "a" },
+    });
+
+    await advanceAndFlush(300);
+
+    // Guard is MIN_QUERY_LEN=2 — single char must be skipped.
+    expect(mockSearch).not.toHaveBeenCalled();
+    expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+  });
+
+  it("fires search for two-character query (boundary)", async () => {
+    mockSearch.mockReturnValue(okAsync([hit]));
+    render(<SearchBar onResultClick={vi.fn()} />);
+
+    fireEvent.change(screen.getByRole("searchbox"), {
+      target: { value: "ab" },
+    });
+
+    await advanceAndFlush(300);
+
+    expect(mockSearch).toHaveBeenCalledWith("ab", 50);
+  });
 });

@@ -5,6 +5,16 @@ import type { SearchHit } from "../types";
 /** Milliseconds to wait after the user stops typing before firing a search. */
 const DEBOUNCE_MS = 300;
 
+/**
+ * Minimum query length before firing a search.
+ *
+ * WHY 2: single-char FTS5 queries on a large corpus are expensive and
+ * produce noisy high-recall results. Two chars is the smallest window
+ * that meaningfully narrows the index while staying responsive for
+ * short tag names like "UI" or "JP".
+ */
+const MIN_QUERY_LEN = 2;
+
 interface SearchBarProps {
   /** Called when the user clicks a search result row. */
   onResultClick: (hit: SearchHit) => void;
@@ -28,7 +38,8 @@ export default function SearchBar({ onResultClick }: SearchBarProps) {
 
   useEffect(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
-    if (query.trim() === "") {
+    const trimmed = query.trim();
+    if (trimmed.length < MIN_QUERY_LEN) {
       setHits(null);
       setOpen(false);
       setSearching(false);
@@ -36,7 +47,7 @@ export default function SearchBar({ onResultClick }: SearchBarProps) {
     }
     setSearching(true);
     timerRef.current = setTimeout(() => {
-      api.search(query.trim(), 50).match(
+      api.search(trimmed, 50).match(
         (results) => {
           setHits(results);
           setOpen(true);
