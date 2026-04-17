@@ -88,6 +88,11 @@ function stripUnsafe(s: string): string {
  * (`listFilesWithTags(100)`) so counts are cheap and reactive.
  * Facet counts reflect the visible result set only; full-corpus
  * counts are a post-v1 optimization (spec Non-goals).
+ *
+ * WHY id-keyed not name-keyed: tag names are mutable (user rename),
+ * tag ids are UUIDv7-stable. Keying on id survives renames.
+ *
+ * Unordered; callers sort if display order matters.
  */
 export function computeFacets(files: FileWithTags[]): Record<string, number> {
   const counts: Record<string, number> = {};
