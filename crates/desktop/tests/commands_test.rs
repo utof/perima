@@ -9,12 +9,14 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use perima_core::{BlakeHash, DeviceId, MediaMetadata, MetadataRepository};
-use perima_db::{SqliteMetadataRepository, SqliteTagRepository, open_and_migrate};
+use perima_core::{BlakeHash, DeviceId, MediaMetadata, MetadataRepository, SearchRepository};
+use perima_db::{
+    SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository, open_and_migrate,
+};
 use perima_desktop::commands::{
     attach_tag_inner, detach_tag_inner, list_files_inner, list_files_with_metadata_inner,
     list_files_with_tags_inner, list_tags_inner, list_volumes_inner, run_scan_inner,
-    run_scan_inner_with_metadata,
+    run_scan_inner_with_metadata, search_inner,
 };
 use perima_desktop::config::resolve_with_app_data_dir;
 
@@ -362,5 +364,50 @@ fn thumbnail_root_matches_asset_protocol_scope() {
         thumb_root.ends_with("perima/thumbnails"),
         "thumbnail root {} must end in perima/thumbnails (matches $APPDATA/perima/thumbnails/** scope literal)",
         thumb_root.display(),
+    );
+}
+
+/// Smoke test for the `search` Tauri command path — plan Task 5 Step 5.
+///
+/// Scans a fixture dir, rebuilds the FTS5 index, runs `search_inner`
+/// via the `SearchRepository` trait, and asserts the query returns the
+/// seeded filename. Exercises the inner helper end-to-end without
+/// constructing `tauri::State`.
+#[tokio::test]
+async fn search_returns_hit_after_scan_and_rebuild() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let data_dir = td.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("mkdir data");
+    let fixture_dir = td.path().join("fixture");
+    mk_fixture(&fixture_dir);
+
+    let device = DeviceId::new();
+    run_scan_inner(&fixture_dir, false, &data_dir, device)
+        .await
+        .expect("scan");
+
+    let db_path = data_dir.join("perima.db");
+    let search_conn = open_and_migrate(&db_path).expect("open search conn");
+    let search_repo = SqliteSearchRepository::new(search_conn);
+    search_repo.rebuild().expect("rebuild index");
+
+    // `alpha.txt` is one of the mk_fixture files; unicode61 splits on
+    // `.` so the `alpha` token is indexed.
+    let hits = search_inner(&search_repo, "alpha", 10).expect("search");
+    assert!(
+        hits.iter().any(|h| h.relative_path.ends_with("alpha.txt")),
+        "expected a hit ending in alpha.txt, got: {:?}",
+        hits.iter().map(|h| &h.relative_path).collect::<Vec<_>>()
+    );
+
+    // Empty query must return [] without hitting FTS5.
+    let empty = search_inner(&search_repo, "   ", 10).expect("empty search");
+    assert!(empty.is_empty(), "whitespace-only query must return []");
+
+    // Limit clamp: passing 0 must not panic or return garbage.
+    let zero_limit = search_inner(&search_repo, "alpha", 0).expect("zero limit");
+    assert!(
+        !zero_limit.is_empty(),
+        "limit=0 should fall back to default, not empty"
     );
 }

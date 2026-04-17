@@ -1086,10 +1086,27 @@ fn persist_file<R: perima_core::FileRepository + ?Sized>(
 // Full-text search commands
 // ---------------------------------------------------------------------------
 
+/// Upper bound on `limit` for the `search` command.
+///
+/// WHY 500: FTS5 ranking cost scales with result set size; 500 is enough
+/// for paginated UI while preventing a runaway `u32::MAX` from pinning
+/// the mutex for seconds. Matches the plan's Task 5 Step 3 guard.
+const SEARCH_LIMIT_MAX: u32 = 500;
+
+/// Default `limit` when the frontend omits one.
+const SEARCH_LIMIT_DEFAULT: u32 = 100;
+
 /// Run a `FTS5` full-text search and return ranked results.
 ///
+/// Empty/whitespace-only queries short-circuit to `[]` without hitting
+/// `FTS5` (empty-match queries are an error at the FTS5 parser, not a
+/// valid zero-result query).
+///
+/// `limit` is clamped to `[1, 500]`; callers passing `0` get the
+/// default; callers passing anything larger than `500` get `500`.
+///
 /// # Errors
-/// Returns a string error on empty query or `SQLite`/`FTS5` errors.
+/// Returns a string error on `SQLite`/`FTS5` errors.
 // WHY allow: Tauri owns `State` + primitive params.
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
@@ -1102,12 +1119,29 @@ pub fn search(
     search_inner(state.search_repo.as_ref(), &query, limit).map_err(|e| e.to_string())
 }
 
-fn search_inner(
+/// Inner search logic extracted for testability without a live Tauri
+/// state. Follows the `run_scan_inner` / `list_files_with_metadata_inner`
+/// convention of all other commands in this module.
+///
+/// # Errors
+/// Returns [`CoreError`] on repository failure.
+pub fn search_inner(
     repo: &dyn SearchRepository,
     query: &str,
     limit: u32,
 ) -> Result<Vec<SearchHitPayload>, CoreError> {
-    let hits = repo.search(query, limit)?;
+    // Guard: empty / whitespace-only queries return `[]` without touching
+    // FTS5. The FTS5 MATCH parser rejects empty strings.
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    // Clamp limit: 0 → default; anything > MAX → MAX.
+    let clamped = if limit == 0 {
+        SEARCH_LIMIT_DEFAULT
+    } else {
+        limit.min(SEARCH_LIMIT_MAX)
+    };
+    let hits = repo.search(query, clamped)?;
     Ok(hits.into_iter().map(SearchHitPayload::from).collect())
 }
 
