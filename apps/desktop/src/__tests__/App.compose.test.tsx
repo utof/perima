@@ -10,8 +10,8 @@ import { file } from "../lib/__tests__/fixtures";
  * deliberately — if a test breaks, the composition semantics changed
  * and the failure is the intended signal.
  *
- * MIRRORS: App.tsx `searchActive → composeVisible → sortByRank (when
- * searchActive) → computeFacets` derivation block. Keep in sync.
+ * MIRRORS: App.tsx derivation block — composeVisible, then sortByRank
+ * when searchActive, then computeFacets. Keep in sync.
  */
 describe("App composition invariant", () => {
   const files = [
