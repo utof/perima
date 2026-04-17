@@ -9,6 +9,9 @@ import { file } from "../lib/__tests__/fixtures";
  * visibleFiles / facetCounts derivation should be reflected here
  * deliberately — if a test breaks, the composition semantics changed
  * and the failure is the intended signal.
+ *
+ * MIRRORS: App.tsx `searchActive → composeVisible → sortByRank (when
+ * searchActive) → computeFacets` derivation block. Keep in sync.
  */
 describe("App composition invariant", () => {
   const files = [
