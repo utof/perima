@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import * as api from "./api";
 import type { UnsubscribeFn } from "./api";
 import FileGrid from "./components/FileGrid";
@@ -50,6 +50,11 @@ export default function App() {
   const [viewMode, setViewMode] = useState<ViewMode>("table");
   const [searchHits, setSearchHits] = useState<Set<string> | null>(null);
   const [hitRanks, setHitRanks] = useState<Map<string, number>>(new Map());
+  // WHY: stored for future status-line / search-persistence use (Task 8+).
+  // Not yet consumed in render; ESLint-silenced rather than dropped per spec
+  // section "State (owned by App.tsx)".
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [searchQuery, setSearchQuery] = useState("");
 
   useEffect(() => {
     // WHY: Populate the list on mount so existing indexed files are visible
@@ -162,20 +167,28 @@ export default function App() {
    * WHY Set + Map instead of the raw SearchHit[]: composeVisible does an
    * O(1) membership check per file; sortByRank does an O(1) rank lookup.
    * Storing the raw array would mean O(n*m) filtering per render.
+   *
+   * WHY useCallback with empty deps: SearchBar's useEffect lists
+   * onQueryChange in its dependency array. Without memoisation, every
+   * App re-render (triggered by setSearchHits / setHitRanks below) would
+   * produce a new handler identity, re-run the effect, re-arm the 300 ms
+   * timer, and re-fire api.search — an infinite feedback loop. React
+   * guarantees that state-setter identities (setSearchHits etc.) are
+   * stable across renders, so the empty deps array is correct.
    */
-  // WHY _query: the raw query string is accepted but not yet consumed in
-  // v0.6.2 (no status-line display). The underscore-prefix satisfies the
-  // no-unused-vars rule while keeping the function signature stable for
-  // when a results-count display lands in Task 8.
-  function handleSearchChange(_query: string, hits: SearchHit[] | null) {
-    if (hits === null) {
-      setSearchHits(null);
-      setHitRanks(new Map());
-    } else {
-      setSearchHits(new Set(hits.map((h) => h.blake3_hash)));
-      setHitRanks(new Map(hits.map((h) => [h.blake3_hash, h.rank])));
-    }
-  }
+  const handleSearchChange = useCallback(
+    (query: string, hits: SearchHit[] | null) => {
+      setSearchQuery(query);
+      if (hits === null) {
+        setSearchHits(null);
+        setHitRanks(new Map());
+      } else {
+        setSearchHits(new Set(hits.map((h) => h.blake3_hash)));
+        setHitRanks(new Map(hits.map((h) => [h.blake3_hash, h.rank])));
+      }
+    },
+    [],
+  );
 
   const searchActive = searchHits !== null;
   const baseVisible = composeVisible(files, selectedTagId, searchHits);

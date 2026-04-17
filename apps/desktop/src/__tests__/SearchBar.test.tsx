@@ -145,4 +145,23 @@ describe("SearchBar", () => {
     // No listbox — list re-sort happens in App, not here.
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
+
+  it("does not re-fire search on parent re-render (C1 regression)", async () => {
+    mockSearch.mockReturnValue(okAsync([hit]));
+    const onChange = vi.fn();
+    const { rerender } = render(<SearchBar onQueryChange={onChange} />);
+
+    fireEvent.change(screen.getByRole("searchbox"), {
+      target: { value: "sunset" },
+    });
+    await advanceAndFlush(300);
+
+    expect(mockSearch).toHaveBeenCalledTimes(1);
+
+    // Simulate parent re-render with the SAME callback identity (post-fix behaviour).
+    rerender(<SearchBar onQueryChange={onChange} />);
+    await advanceAndFlush(300);
+
+    expect(mockSearch).toHaveBeenCalledTimes(1);
+  });
 });
