@@ -1,5 +1,17 @@
 set shell := ["bash", "-eo", "pipefail", "-c"]
 
+# WHY these exports: perima-desktop's tauri-build step needs
+# PKG_CONFIG_PATH + LIBRARY_PATH pointing at the locally-built Tauri
+# toolchain (webkit2gtk/libsoup/etc.) under /tmp. RUSTFLAGS moved to
+# `.cargo/config.toml` ([build] rustflags). PATH prepended so
+# cargo-installed binaries (just itself, etc.) are findable from
+# non-interactive shells (git hooks, CI) that don't source ~/.bashrc.
+# Harmless on machines without /tmp/tauri-* — ld only consults -L
+# paths when a missing symbol needs them.
+export PATH := env_var("HOME") + "/.cargo/bin:" + env_var("HOME") + "/.local/bin:" + env_var("PATH")
+export PKG_CONFIG_PATH := "/tmp/tauri-pc"
+export LIBRARY_PATH := "/tmp/tauri-libs:/usr/lib/x86_64-linux-gnu"
+
 default: ci
 
 test:

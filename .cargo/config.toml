@@ -1,0 +1,13 @@
+# Cargo workspace config.
+#
+# WHY rustflags here (not RUSTFLAGS env var): perima-desktop links
+# against a locally-built Tauri toolchain (webkit2gtk, libsoup, etc.)
+# that lives under /tmp/tauri-libs on this dev VM. Without these -L
+# flags, `cargo clippy` / `cargo test` fail to locate the system libs
+# during tauri-build. Putting them here eliminates the need to `export
+# RUSTFLAGS=...` at the start of every shell invocation.
+#
+# Harmless on machines that don't have these paths — rustc only
+# consults -L directories when it actually needs to resolve a library.
+[build]
+rustflags = ["-L/tmp/tauri-libs", "-L/usr/lib/x86_64-linux-gnu"]
