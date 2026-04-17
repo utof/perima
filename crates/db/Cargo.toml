@@ -16,8 +16,9 @@ uuid.workspace      = true
 chrono.workspace    = true
 
 [dev-dependencies]
-tempfile.workspace = true
-blake3.workspace   = true
+tempfile.workspace  = true
+blake3.workspace    = true
+proptest.workspace  = true
 
 [lints]
 workspace = true

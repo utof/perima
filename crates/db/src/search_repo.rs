@@ -976,6 +976,26 @@ mod tests {
         );
     }
 
+    // ── Task 5: proptest — FTS5 invariant across tag churn ──────────────────
+
+    /// Soft-delete a `file_tags` row by setting `deleted_at` (tag detach).
+    ///
+    /// WHY raw SQL: proptest body has only a single `Connection` from the
+    /// `SqliteSearchRepository`'s mutex; using `SqliteTagRepository` would
+    /// require a second open connection and a `TempDir` with WAL on, which
+    /// adds noise without adding coverage. The trigger fires on the SQL UPDATE
+    /// regardless of which layer issues it.
+    fn detach_tag_raw(conn: &Connection, hash: &str, tag_name: &str) {
+        conn.execute(
+            "UPDATE file_tags SET deleted_at = ?1, updated_at = ?1, device_id = ?2
+             WHERE blake3_hash = ?3
+               AND tag_id = (SELECT id FROM tags WHERE name = ?4 AND deleted_at IS NULL)
+               AND deleted_at IS NULL",
+            rusqlite::params![TS, DEV, hash, tag_name],
+        )
+        .expect("detach_tag_raw");
+    }
+
     /// Trigger 5: renaming a tag must update every `search_content` row that
     /// references it. After `UPDATE tags SET name = 'holiday'` for the tag
     /// previously named "vacation":
@@ -1027,5 +1047,123 @@ mod tests {
             3,
             "trigger 5: 'holiday' must match all 3 files after tag rename"
         );
+    }
+
+    // ── Task 5: proptest — FTS5 trigger invariant across random tag churn ───
+
+    /// Operations exercised by the property: Attach or Detach a (file, tag) pair.
+    #[derive(Debug, Clone)]
+    enum TagOp {
+        Attach(usize, usize),
+        Detach(usize, usize),
+    }
+
+    /// Small universe: 3 files × 3 tags — large enough to generate
+    /// interesting interactions, small enough that the invariant check
+    /// (O(files × tags) FTS queries) completes inside the default proptest
+    /// timeout.
+    const PROP_FILES: &[&str] = &[
+        "7100000000000000000000000000000000000000000000000000000000000000",
+        "7200000000000000000000000000000000000000000000000000000000000000",
+        "7300000000000000000000000000000000000000000000000000000000000000",
+    ];
+    const PROP_TAGS: &[&str] = &["alpha", "beta", "gamma"];
+    const PROP_VOL: &str = "00000000-0000-0000-0000-000000000099";
+
+    proptest::proptest! {
+        /// **Invariant:** after every Attach / Detach operation, for every
+        /// `(file, tag)` pair, `MATCH tag_name` returns the file iff
+        /// `file_tags.deleted_at IS NULL` for that pair.
+        ///
+        /// WHY random sequences: fixed-input tests (Task 4) cover specific
+        /// triggers; randomised churn covers interaction effects — e.g.
+        /// double-attach, detach-never-attached, attach-after-detach-after-attach.
+        #[test]
+        fn fts_consistent_under_tag_churn(
+            ops in proptest::collection::vec(
+                proptest::prop_oneof![
+                    proptest::strategy::Strategy::prop_map(
+                        (0..PROP_FILES.len(), 0..PROP_TAGS.len()),
+                        |(f, t)| TagOp::Attach(f, t),
+                    ),
+                    proptest::strategy::Strategy::prop_map(
+                        (0..PROP_FILES.len(), 0..PROP_TAGS.len()),
+                        |(f, t)| TagOp::Detach(f, t),
+                    ),
+                ],
+                0..30,
+            ),
+        ) {
+            // Fresh DB per proptest case — each case is independent.
+            let (_td, repo) = test_db();
+
+            // Seed all three files (no metadata needed; trigger 4a covers
+            // metadata-less files, which T41 already pins as a fixed test).
+            {
+                let conn = repo.conn.lock().expect("lock");
+                for (i, hash) in PROP_FILES.iter().enumerate() {
+                    insert_file(
+                        &conn,
+                        hash,
+                        PROP_VOL,
+                        &format!("prop_file_{i}.jpg"),
+                    );
+                }
+            }
+
+            // Shadow state: (file_idx, tag_idx) → currently attached?
+            let mut attached: std::collections::HashMap<(usize, usize), bool> =
+                std::collections::HashMap::new();
+
+            for op in &ops {
+                {
+                    let conn = repo.conn.lock().expect("lock");
+                    match *op {
+                        TagOp::Attach(f, t) => {
+                            // attach_tag_raw is idempotent (INSERT OR IGNORE +
+                            // existing file_tags rows with deleted_at non-NULL
+                            // are ignored); re-attaching after a detach creates
+                            // a fresh row, so we unconditionally set attached=true.
+                            attach_tag_raw(&conn, PROP_FILES[f], PROP_TAGS[t]);
+                            attached.insert((f, t), true);
+                        }
+                        TagOp::Detach(f, t) => {
+                            // Only detach when the shadow state says the pair is
+                            // active; otherwise the UPDATE is a harmless no-op
+                            // and the shadow stays false.
+                            if *attached.get(&(f, t)).unwrap_or(&false) {
+                                detach_tag_raw(&conn, PROP_FILES[f], PROP_TAGS[t]);
+                                attached.insert((f, t), false);
+                            }
+                        }
+                    }
+                } // mutex guard dropped before the invariant queries below.
+
+                // Invariant check: for every (file, tag) pair the FTS result
+                // must agree with the shadow state.
+                for (f_idx, &file_hash) in PROP_FILES.iter().enumerate() {
+                    for (t_idx, &tag_name) in PROP_TAGS.iter().enumerate() {
+                        let is_attached =
+                            *attached.get(&(f_idx, t_idx)).unwrap_or(&false);
+                        let hits = repo
+                            .search(tag_name, 50)
+                            .expect("proptest search");
+                        let found = hits
+                            .iter()
+                            .any(|h| h.blake3_hash == file_hash);
+                        proptest::prop_assert_eq!(
+                            found,
+                            is_attached,
+                            "FTS invariant violated: file={} tag={} \
+                             attached={} found={}",
+                            file_hash,
+                            tag_name,
+                            is_attached,
+                            found
+                        );
+                    }
+                }
+            }
+        }
     }
 }
