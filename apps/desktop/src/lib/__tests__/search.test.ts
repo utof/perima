@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildFtsQuery, computeFacets } from "../search";
-import type { FileWithTags } from "../../types";
+import { file } from "./fixtures";
 
 describe("buildFtsQuery", () => {
   it("quotes plain tokens with implicit AND", () => {
@@ -45,29 +45,6 @@ describe("buildFtsQuery", () => {
     expect(buildFtsQuery("foo bar*")).toBe('"foo" "bar"*');
   });
 });
-
-function file(hash: string, tagIds: string[]): FileWithTags {
-  return {
-    hash,
-    size: 0,
-    volume_id: "vol",
-    relative_path: `${hash}.jpg`,
-    status: "active",
-    first_seen: "2026-01-01T00:00:00Z",
-    width: null,
-    height: null,
-    duration_ms: null,
-    captured_at: null,
-    camera_make: null,
-    camera_model: null,
-    codec: null,
-    bitrate_bps: null,
-    mime_type: null,
-    thumbnail_path: null,
-    thumbnail_status: null,
-    tags: tagIds.map((id) => ({ id, name: `tag-${id}`, first_seen: "2026-01-01T00:00:00Z" })),
-  };
-}
 
 describe("computeFacets", () => {
   it("returns empty object on empty file list", () => {
