@@ -39,4 +39,8 @@ describe("buildFtsQuery", () => {
   it("strips leading dash on a token (FTS5 negation hazard)", () => {
     expect(buildFtsQuery("-foo")).toBe('"foo"');
   });
+
+  it("wraps multi-token prefix queries with earlier tokens quoted + last token asterisked", () => {
+    expect(buildFtsQuery("foo bar*")).toBe('"foo" "bar"*');
+  });
 });

@@ -44,6 +44,10 @@ export function buildFtsQuery(raw: string): string {
     const sanitized = stripUnsafe(withoutStar);
     const tokens = sanitized.split(/\s+/).filter((t) => t !== "");
     if (tokens.length === 0) return "";
+    // WHY: the length guard above guarantees tokens is non-empty, making !
+    // safe here at runtime. Any future change to stripUnsafe must preserve
+    // the invariant that a non-empty `sanitized` string produces at least
+    // one token after split+filter, or this assertion will throw.
     const last = tokens.pop()!;
     const prefix = tokens.map((t) => `"${t}"`).join(" ");
     const suffix = `"${last}"*`;
@@ -59,6 +63,18 @@ export function buildFtsQuery(raw: string): string {
 /** Strip FTS5-unsafe characters before tokenisation. */
 function stripUnsafe(s: string): string {
   return s
-    .replace(/[()"]/g, "")   // bare parens and bare quotes
-    .replace(/(^|\s)-/g, "$1"); // leading dash on a token
+    // WHY: parens and bare `"` are stripped here rather than relying on the
+    // phrase-passthrough guard above. That guard only short-circuits when the
+    // entire input is wrapped in balanced quotes; unpaired quotes and mid-token
+    // quotes that reach this path would produce malformed FTS5 syntax
+    // (e.g. `foo"bar` causes a parse error). Stripping them unconditionally is
+    // safe because the tokens are immediately re-quoted by the callers.
+    .replace(/[()"]/g, "")
+    // WHY: FTS5 treats a token whose first character is `-` as a negation
+    // operator (e.g. `-foo` means NOT foo). We only strip the dash when it
+    // appears at the very start of a token (start-of-string or after
+    // whitespace) — not mid-token — so hyphenated words like `file-name` are
+    // preserved. A word-boundary (`\b`) match would incorrectly strip dashes
+    // inside tokens on some Unicode ranges; the `(^|\s)` anchor is precise.
+    .replace(/(^|\s)-/g, "$1");
 }
