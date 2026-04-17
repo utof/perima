@@ -1,22 +1,28 @@
 import type { Tag } from "../types";
 
-/** Props for {@link TagSidebar}. */
 interface TagSidebarProps {
-  /** Tags to render. */
+  /** Full tag list (all known tags). */
   tags: Tag[];
-  /** Map from tag id to attachment count (for display only). */
+  /** Tag id → file count within the current visible set. */
   counts: Record<string, number>;
-  /** Total unfiltered file count, shown next to "All". */
+  /** Total visible file count (displayed on the "All" row). */
   totalCount: number;
-  /** Selected tag id, or null for "All". */
   selectedTagId: string | null;
-  /** Called when the user selects a tag or "All". */
   onSelect: (tagId: string | null) => void;
+  /**
+   * Rendering mode (optional; defaults to "all" so existing callers
+   * that don't pass this prop continue to work):
+   * - "all": show every tag in `tags` (no search active).
+   * - "facets": show only tags with counts \> 0 (search active; the
+   *   sidebar becomes a facet panel over the current results).
+   */
+  mode?: "all" | "facets";
 }
 
 /**
- * Sidebar lists all tags plus an "All" selector. Clicking a row
- * calls `onSelect` with the tag id (or null for "All").
+ * Left-column filter: "All" + per-tag rows with attachment counts and
+ * aria-pressed toggle state. Single-select for v0.5.x; multi-select
+ * tracked as post-v1 per issue #32.
  */
 export default function TagSidebar({
   tags,
@@ -24,7 +30,13 @@ export default function TagSidebar({
   totalCount,
   selectedTagId,
   onSelect,
+  mode = "all",
 }: TagSidebarProps) {
+  const visibleTags =
+    mode === "facets"
+      ? tags.filter((t) => (counts[t.id] ?? 0) > 0)
+      : tags;
+
   return (
     <nav
       className="w-48 bg-gray-800 border-r border-gray-700 p-2 flex flex-col gap-1 overflow-y-auto"
@@ -36,7 +48,12 @@ export default function TagSidebar({
         active={selectedTagId === null}
         onClick={() => onSelect(null)}
       />
-      {tags.map((t) => (
+      {mode === "facets" && visibleTags.length === 0 && (
+        <p className="px-2 py-1.5 text-xs text-gray-500 italic">
+          No tags in current results
+        </p>
+      )}
+      {visibleTags.map((t) => (
         <SidebarRow
           key={t.id}
           label={t.name}
@@ -64,7 +81,7 @@ function SidebarRow({
     "flex items-center justify-between px-2 py-1.5 text-sm rounded cursor-pointer transition-colors";
   const activeCls = "bg-blue-600 text-white";
   const inactiveCls = "text-gray-300 hover:bg-gray-700";
-  const countCls = active ? "text-xs text-blue-200 ml-2" : "text-xs text-gray-400 ml-2";
+  const countCls = active ? "text-blue-200" : "text-gray-400";
   return (
     <button
       type="button"
@@ -74,7 +91,7 @@ function SidebarRow({
     >
       <span className="truncate">{label}</span>
       {count !== undefined && (
-        <span className={countCls}>{count}</span>
+        <span className={`text-xs ml-2 ${countCls}`}>{count}</span>
       )}
     </button>
   );

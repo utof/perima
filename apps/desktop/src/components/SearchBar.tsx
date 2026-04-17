@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import * as api from "../api";
+import { buildFtsQuery } from "../lib/search";
 import type { SearchHit } from "../types";
 
 /** Milliseconds to wait after the user stops typing before firing a search. */
@@ -15,85 +16,101 @@ const DEBOUNCE_MS = 300;
  */
 const MIN_QUERY_LEN = 2;
 
+/**
+ * Upper bound for a single search call.
+ *
+ * WHY 500: the v0.6.2 design re-sorts the visible list by BM25 rank
+ * while a search is active. The list itself is capped at 100 rows via
+ * `listFilesWithTags(100)`, so 500 is ≥ 5× headroom — enough to cover
+ * the visible set even when many files outside the visible set also
+ * match (they're filtered out by `composeVisible`). The Tauri `search`
+ * command also clamps to 500 server-side (SEARCH_LIMIT_MAX in
+ * crates/desktop/src/commands.rs).
+ */
+const SEARCH_LIMIT = 500;
+
 interface SearchBarProps {
-  /** Called when the user clicks a search result row. */
-  onResultClick: (hit: SearchHit) => void;
+  /**
+   * Fires whenever the debounced query resolves (with hits) or clears.
+   *
+   * Three cases for the two arguments:
+   * 1. `(raw, hits)` — user typed ≥ MIN_QUERY_LEN; `hits` may be `[]` if
+   *    the query matched nothing.
+   * 2. `("", null)` — user cleared input (via ✕ or deleting chars) or
+   *    typed less than MIN_QUERY_LEN. App should reset `searchHits` to
+   *    `null` (distinct from `new Set()` — the latter means "searched,
+   *    zero results").
+   * 3. Same as #2 on backend error (swallowed; non-fatal).
+   */
+  onQueryChange: (query: string, hits: SearchHit[] | null) => void;
 }
 
 /**
- * Debounced full-text search bar.
+ * Debounced FTS5 search input.
  *
- * WHY self-contained (not lifting query state to App): the search panel is
- * ephemeral — it appears when a query is active and disappears on clear or
- * blur. Lifting state would force App to re-render the entire tree on every
- * keystroke. The parent only needs the selected result, not the live query.
+ * WHY self-contained sanitiser + IPC call: keeps the input component
+ * deciding *when* to query (debounce, min-length guard) while the
+ * *what* (buildFtsQuery) lives in the shared lib/search module. The
+ * parent App.tsx only needs to know about the resolved (raw, hits)
+ * pair — not the FTS5 grammar.
  */
-export default function SearchBar({ onResultClick }: SearchBarProps) {
+export default function SearchBar({ onQueryChange }: SearchBarProps) {
   const [query, setQuery] = useState("");
-  const [hits, setHits] = useState<SearchHit[] | null>(null);
-  const [searching, setSearching] = useState(false);
-  const [open, setOpen] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  // Track whether the last fire was "cleared" to avoid refiring on
+  // an already-cleared state when the user backspaces past MIN_QUERY_LEN.
+  const clearedRef = useRef(true);
 
   useEffect(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
     const trimmed = query.trim();
+
     if (trimmed.length < MIN_QUERY_LEN) {
-      setHits(null);
-      setOpen(false);
-      setSearching(false);
+      // Covers: empty input, 1-char input, whitespace-only input.
+      // Fire clear exactly once per transition into the cleared state.
+      if (!clearedRef.current) {
+        clearedRef.current = true;
+        onQueryChange("", null);
+      }
       return;
     }
-    setSearching(true);
+
     timerRef.current = setTimeout(() => {
-      api.search(trimmed, 50).match(
-        (results) => {
-          setHits(results);
-          setOpen(true);
-          setSearching(false);
+      const ftsQuery = buildFtsQuery(trimmed);
+      if (ftsQuery === "") {
+        // Sanitiser returned nothing (all chars were unsafe). Treat as cleared.
+        clearedRef.current = true;
+        onQueryChange("", null);
+        return;
+      }
+      api.search(ftsQuery, SEARCH_LIMIT).match(
+        (hits) => {
+          clearedRef.current = false;
+          onQueryChange(trimmed, hits);
         },
         () => {
-          // WHY: search errors are non-fatal; show empty results rather than
-          // surfacing a red banner for a transient FTS5 syntax error.
-          setHits([]);
-          setOpen(true);
-          setSearching(false);
+          // WHY swallow: FTS5 parse errors on edge-case input
+          // (unbalanced quotes after sanitiser, weird unicode). Showing
+          // an empty result list is honest; a red banner would flash on
+          // every keystroke that happens to produce transient bad input.
+          clearedRef.current = false;
+          onQueryChange(trimmed, []);
         },
       );
     }, DEBOUNCE_MS);
+
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [query]);
-
-  // Close dropdown on outside click.
-  useEffect(() => {
-    function handlePointerDown(e: PointerEvent) {
-      if (
-        containerRef.current &&
-        !containerRef.current.contains(e.target as Node)
-      ) {
-        setOpen(false);
-      }
-    }
-    document.addEventListener("pointerdown", handlePointerDown);
-    return () => document.removeEventListener("pointerdown", handlePointerDown);
-  }, []);
+  }, [query, onQueryChange]);
 
   function handleClear() {
     setQuery("");
-    setHits(null);
-    setOpen(false);
-  }
-
-  function handleHitClick(hit: SearchHit) {
-    onResultClick(hit);
-    setOpen(false);
+    // The effect above will fire onQueryChange("", null) on the next render.
   }
 
   return (
-    <div ref={containerRef} className="relative w-72">
+    <div className="relative w-72">
       <div className="flex items-center bg-gray-700 rounded border border-gray-600 focus-within:border-blue-500">
         <span className="pl-3 text-gray-400 text-sm select-none">🔍</span>
         <input
@@ -102,9 +119,6 @@ export default function SearchBar({ onResultClick }: SearchBarProps) {
           placeholder="Search…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          onFocus={() => {
-            if (hits !== null) setOpen(true);
-          }}
           className="flex-1 bg-transparent px-2 py-1.5 text-sm text-gray-100 placeholder-gray-400 outline-none"
         />
         {query && (
@@ -118,35 +132,6 @@ export default function SearchBar({ onResultClick }: SearchBarProps) {
           </button>
         )}
       </div>
-
-      {open && (
-        <div
-          role="listbox"
-          aria-label="Search results"
-          className="absolute z-50 w-full mt-1 bg-gray-800 border border-gray-600 rounded shadow-lg max-h-72 overflow-y-auto"
-        >
-          {searching && (
-            <p className="px-3 py-2 text-sm text-gray-400">Searching…</p>
-          )}
-          {!searching && hits !== null && hits.length === 0 && (
-            <p className="px-3 py-2 text-sm text-gray-400">(no results)</p>
-          )}
-          {!searching &&
-            hits !== null &&
-            hits.map((hit) => (
-              <button
-                key={hit.blake3_hash}
-                type="button"
-                role="option"
-                aria-selected={false}
-                onClick={() => handleHitClick(hit)}
-                className="w-full text-left px-3 py-2 text-sm text-gray-200 hover:bg-gray-700 focus:bg-gray-700 focus:outline-none truncate"
-              >
-                {hit.relative_path}
-              </button>
-            ))}
-        </div>
-      )}
     </div>
   );
 }

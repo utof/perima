@@ -8,6 +8,7 @@ import SearchBar from "./components/SearchBar";
 import StatusBar from "./components/StatusBar";
 import TagSidebar from "./components/TagSidebar";
 import WatcherBanner from "./components/WatcherBanner";
+import { composeVisible, computeFacets, sortByRank } from "./lib/search";
 import type { FileWithTags, ScanResult, SearchHit, Tag } from "./types";
 
 /**
@@ -47,9 +48,8 @@ export default function App() {
   // used to and the grid gets its thumbnail fields "for free" — no need
   // to double-fetch on toggle.
   const [viewMode, setViewMode] = useState<ViewMode>("table");
-  // WHY null (not ""): null means "no active search hit"; the empty string
-  // is not a valid hash and would silently hide the whole list.
-  const [searchHash, setSearchHash] = useState<string | null>(null);
+  const [searchHits, setSearchHits] = useState<Set<string> | null>(null);
+  const [hitRanks, setHitRanks] = useState<Map<string, number>>(new Map());
 
   useEffect(() => {
     // WHY: Populate the list on mount so existing indexed files are visible
@@ -155,48 +155,41 @@ export default function App() {
     );
   }
 
-  // Compute per-tag file counts from the full unfiltered list.
-  // WHY client-side from the 100-row cap: listFilesWithTags(100) returns at
-  // most 100 rows, so counts may be understated for large libraries. Acceptable
-  // for v0.5.1; a dedicated count_files_for_tag Tauri command lands with FTS5.
-  const counts: Record<string, number> = {};
-  for (const f of files) {
-    for (const t of f.tags) {
-      counts[t.id] = (counts[t.id] ?? 0) + 1;
+  /**
+   * Receives debounced (query, hits) from SearchBar. Lifts into App state
+   * so the visible-file composition can re-run.
+   *
+   * WHY Set + Map instead of the raw SearchHit[]: composeVisible does an
+   * O(1) membership check per file; sortByRank does an O(1) rank lookup.
+   * Storing the raw array would mean O(n*m) filtering per render.
+   */
+  // WHY _query: the raw query string is accepted but not yet consumed in
+  // v0.6.2 (no status-line display). The underscore-prefix satisfies the
+  // no-unused-vars rule while keeping the function signature stable for
+  // when a results-count display lands in Task 8.
+  function handleSearchChange(_query: string, hits: SearchHit[] | null) {
+    if (hits === null) {
+      setSearchHits(null);
+      setHitRanks(new Map());
+    } else {
+      setSearchHits(new Set(hits.map((h) => h.blake3_hash)));
+      setHitRanks(new Map(hits.map((h) => [h.blake3_hash, h.rank])));
     }
   }
 
-  // Filter visible files by active search hit OR selected tag.
-  // WHY search takes precedence over tag filter: the user explicitly picked a
-  // result from the search dropdown, so we narrow to that single hash; the tag
-  // sidebar selection is a secondary axis that the search overrides.
-  const visibleFiles = searchHash !== null
-    ? files.filter((f) => f.hash === searchHash)
-    : selectedTagId === null
-      ? files
-      : files.filter((f) => f.tags.some((t) => t.id === selectedTagId));
-
-  function handleSearchResult(hit: SearchHit) {
-    setSearchHash(hit.blake3_hash);
-    setSelectedTagId(null);
-  }
+  const searchActive = searchHits !== null;
+  const baseVisible = composeVisible(files, selectedTagId, searchHits);
+  const visibleFiles = searchActive ? sortByRank(baseVisible, hitRanks) : baseVisible;
+  const facetCounts = computeFacets(visibleFiles);
+  const sidebarMode: "all" | "facets" = searchActive ? "facets" : "all";
+  const sidebarTotalCount = searchActive ? visibleFiles.length : files.length;
 
   return (
     <div className="bg-gray-900 text-gray-100 min-h-screen flex flex-col">
       <header className="flex items-center justify-between px-6 py-4 bg-gray-800 border-b border-gray-700">
         <h1 className="text-xl font-bold tracking-wide">perima</h1>
         <div className="flex items-center gap-3">
-          <SearchBar onResultClick={handleSearchResult} />
-          {searchHash !== null && (
-            <button
-              type="button"
-              onClick={() => setSearchHash(null)}
-              className="text-xs text-blue-400 hover:text-blue-200"
-              aria-label="Clear search filter"
-            >
-              ✕ search
-            </button>
-          )}
+          <SearchBar onQueryChange={handleSearchChange} />
           <ViewModeToggle mode={viewMode} onChange={setViewMode} />
           <ScanButton
             onScanComplete={handleScanComplete}
@@ -215,10 +208,11 @@ export default function App() {
         {tags.length > 0 && (
           <TagSidebar
             tags={tags}
-            counts={counts}
-            totalCount={files.length}
+            counts={facetCounts}
+            totalCount={sidebarTotalCount}
             selectedTagId={selectedTagId}
             onSelect={setSelectedTagId}
+            mode={sidebarMode}
           />
         )}
         <main className="flex-1 overflow-auto p-4">
