@@ -345,6 +345,48 @@ mod tests {
     }
 
     #[test]
+    fn search_rank_orders_better_match_first() {
+        // WHY: plan Task 1 Step 2 required this test — the whole point of
+        // FTS5 over LIKE is BM25 ranking. Two files both contain "vacation"
+        // in their filename; only one also has the matching TAG attached.
+        // BM25 weights multi-field matches higher, so the tagged hit must
+        // rank before the filename-only hit. In FTS5 lower rank = better
+        // match (SQLite convention; default `rank` returns negative BM25
+        // score, smaller = better).
+        const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let (_td, repo, tag_repo) = test_db_with_tag_repo();
+        {
+            let conn = repo.conn.lock().expect("lock");
+            insert_file(&conn, HASH_A, VOL, "vacation_tagged.jpg");
+            insert_metadata(&conn, HASH_A, "image/jpeg", "", "");
+            insert_file(&conn, HASH_B, VOL, "vacation_only.jpg");
+            insert_metadata(&conn, HASH_B, "image/jpeg", "", "");
+        }
+        // Attach the matching tag only to HASH_A so the BM25 signal is
+        // stronger for that row.
+        let tag = tag_repo.upsert_tag("vacation", device()).expect("upsert");
+        let hash_a = perima_core::BlakeHash::parse_hex(HASH_A).expect("hash A");
+        tag_repo.attach(&hash_a, tag.id, device()).expect("attach");
+
+        repo.rebuild().expect("rebuild");
+        let hits = repo.search("vacation", 50).expect("search");
+        assert_eq!(hits.len(), 2, "both files should hit on 'vacation'");
+        assert_eq!(
+            hits[0].blake3_hash,
+            HASH_A,
+            "tagged file must rank above filename-only file (got order: {:?})",
+            hits.iter().map(|h| &h.blake3_hash).collect::<Vec<_>>()
+        );
+        assert!(
+            hits[0].rank <= hits[1].rank,
+            "FTS5 BM25 rank must be non-increasing (lower = better); \
+             got [0]={}, [1]={}",
+            hits[0].rank,
+            hits[1].rank
+        );
+    }
+
+    #[test]
     fn filename_without_slash_is_indexed_correctly() {
         let (_td, repo) = test_db();
         {
