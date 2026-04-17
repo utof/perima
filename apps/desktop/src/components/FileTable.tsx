@@ -65,19 +65,19 @@ export default function FileTable({ files, loading }: FileTableProps) {
       <table className="w-full text-sm text-gray-200">
         <thead className="bg-gray-800">
           <tr>
-            <th className={thCls} onClick={() => handleSort("hash")}>
+            <th className={thCls} onClick={() => { handleSort("hash"); }}>
               HASH{arrow("hash")}
             </th>
-            <th className={thCls} onClick={() => handleSort("size")}>
+            <th className={thCls} onClick={() => { handleSort("size"); }}>
               SIZE{arrow("size")}
             </th>
-            <th className={thCls} onClick={() => handleSort("volume_id")}>
+            <th className={thCls} onClick={() => { handleSort("volume_id"); }}>
               VOLUME{arrow("volume_id")}
             </th>
-            <th className={thCls} onClick={() => handleSort("relative_path")}>
+            <th className={thCls} onClick={() => { handleSort("relative_path"); }}>
               PATH{arrow("relative_path")}
             </th>
-            <th className={thCls} onClick={() => handleSort("status")}>
+            <th className={thCls} onClick={() => { handleSort("status"); }}>
               STATUS{arrow("status")}
             </th>
             <th className={thCls}>TAGS</th>

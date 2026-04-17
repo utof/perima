@@ -59,7 +59,7 @@ export default function App() {
   useEffect(() => {
     // WHY: Populate the list on mount so existing indexed files are visible
     // immediately without requiring the user to trigger a scan.
-    api.listFilesWithTags(100).match(
+    void api.listFilesWithTags(100).match(
       (result) => {
         setFiles(result);
         setLoading(false);
@@ -69,8 +69,8 @@ export default function App() {
         setLoading(false);
       },
     );
-    api.listTags().match(
-      (result) => setTags(result),
+    void api.listTags().match(
+      (result) => { setTags(result); },
       () => {
         // WHY: tag fetch failure is non-fatal; the file list still renders.
       },
@@ -99,7 +99,7 @@ export default function App() {
           // tag re-fetch on every file event would be wasteful and
           // incorrect; tags refresh after scan (handleScanComplete) where
           // new tags may actually have been created.
-          api.listFilesWithTags(100).match(
+          void api.listFilesWithTags(100).match(
             (refreshed) => {
               if (active) setFiles(refreshed);
             },
@@ -117,7 +117,7 @@ export default function App() {
           fn();
         }
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
         if (active) {
           setWatcherError(`Failed to subscribe to watcher events: ${msg}`);
@@ -140,12 +140,12 @@ export default function App() {
     setScanResult(result);
     setScanning(false);
     // Refresh file list and tags after a successful scan.
-    api.listFilesWithTags(100).match(
-      (refreshed) => setFiles(refreshed),
-      (err) => setError(err),
+    void api.listFilesWithTags(100).match(
+      (refreshed) => { setFiles(refreshed); },
+      (err) => { setError(err); },
     );
-    api.listTags().match(
-      (refreshed) => setTags(refreshed),
+    void api.listTags().match(
+      (refreshed) => { setTags(refreshed); },
       () => {
         // WHY: tag fetch failure is non-fatal after scan.
       },
@@ -154,9 +154,9 @@ export default function App() {
     // updates flow without an extra user gesture. Non-blocking: failures
     // are logged but must not prevent the scan from being reported as
     // complete.
-    api.startWatch(path).match(
-      () => setWatcherError(null),
-      (err) => setWatcherError(`Failed to start watcher: ${err}`),
+    void api.startWatch(path).match(
+      () => { setWatcherError(null); },
+      (err) => { setWatcherError(`Failed to start watcher: ${err}`); },
     );
   }
 
@@ -214,7 +214,7 @@ export default function App() {
 
       <WatcherBanner
         message={watcherError}
-        onDismiss={() => setWatcherError(null)}
+        onDismiss={() => { setWatcherError(null); }}
       />
 
       <div className="flex-1 flex overflow-hidden">
@@ -224,7 +224,7 @@ export default function App() {
             counts={facetCounts}
             totalCount={sidebarTotalCount}
             selectedTagId={selectedTagId}
-            onSelect={setSelectedTagId}
+            onSelect={(id) => { setSelectedTagId(id); }}
             mode={sidebarMode}
           />
         )}
@@ -272,7 +272,7 @@ function ViewModeToggle({
         type="button"
         className={`${base} ${mode === "table" ? active : inactive}`}
         aria-pressed={mode === "table"}
-        onClick={() => onChange("table")}
+        onClick={() => { onChange("table"); }}
       >
         Table
       </button>
@@ -280,7 +280,7 @@ function ViewModeToggle({
         type="button"
         className={`${base} ${mode === "grid" ? active : inactive}`}
         aria-pressed={mode === "grid"}
-        onClick={() => onChange("grid")}
+        onClick={() => { onChange("grid"); }}
       >
         Grid
       </button>

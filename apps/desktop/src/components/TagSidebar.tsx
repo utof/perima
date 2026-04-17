@@ -46,7 +46,7 @@ export default function TagSidebar({
         label="All"
         count={totalCount}
         active={selectedTagId === null}
-        onClick={() => onSelect(null)}
+        onClick={() => { onSelect(null); }}
       />
       {mode === "facets" && visibleTags.length === 0 && (
         <p className="px-2 py-1.5 text-xs text-gray-500 italic">
@@ -59,7 +59,7 @@ export default function TagSidebar({
           label={t.name}
           count={counts[t.id] ?? 0}
           active={selectedTagId === t.id}
-          onClick={() => onSelect(t.id)}
+          onClick={() => { onSelect(t.id); }}
         />
       ))}
     </nav>

@@ -20,5 +20,8 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 // The default mock returns an unsubscribe stub; individual tests override
 // it via `(listen as Mock).mockImplementation(...)` to capture the handler.
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async () => () => {}),
+  // WHY: non-async — returns a resolved promise via Promise.resolve so
+  // the type signature matches `listen`'s Promise<UnlistenFn> without
+  // triggering @typescript-eslint/require-await on an empty async fn.
+  listen: vi.fn(() => Promise.resolve(() => { /* noop unsubscribe stub */ })),
 }));

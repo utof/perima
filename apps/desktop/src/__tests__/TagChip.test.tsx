@@ -27,7 +27,7 @@ describe("TagChip", () => {
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
-  test("calls onRemove when x clicked", async () => {
+  test("calls onRemove when x clicked", () => {
     const onRemove = vi.fn();
     render(<TagChip tag={sampleTag} onRemove={onRemove} />);
     const btn = screen.getByRole("button", { name: /remove vacation/i });

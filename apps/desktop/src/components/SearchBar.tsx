@@ -83,7 +83,7 @@ export default function SearchBar({ onQueryChange }: SearchBarProps) {
         onQueryChange("", null);
         return;
       }
-      api.search(ftsQuery, SEARCH_LIMIT).match(
+      void api.search(ftsQuery, SEARCH_LIMIT).match(
         (hits) => {
           clearedRef.current = false;
           onQueryChange(trimmed, hits);
@@ -118,7 +118,7 @@ export default function SearchBar({ onQueryChange }: SearchBarProps) {
           aria-label="Search files"
           placeholder="Search…"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => { setQuery(e.target.value); }}
           className="flex-1 bg-transparent px-2 py-1.5 text-sm text-gray-100 placeholder-gray-400 outline-none"
         />
         {query && (

@@ -96,13 +96,13 @@ describe("SearchBar", () => {
     await advanceAndFlush(300);
 
     onChange.mockClear();
-    await act(async () => {
+    act(() => {
       fireEvent.click(screen.getByLabelText("Clear search"));
     });
 
     expect(onChange).toHaveBeenCalledWith("", null);
     expect(
-      (screen.getByRole("searchbox") as HTMLInputElement).value,
+      screen.getByRole<HTMLInputElement>("searchbox").value,
     ).toBe("");
   });
 

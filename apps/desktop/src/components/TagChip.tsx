@@ -43,7 +43,10 @@ const CHIP_COLORS = [
  * A colored pill displaying a tag name, with optional remove button.
  */
 export default function TagChip({ tag, onRemove }: TagChipProps) {
-  const bg = CHIP_COLORS[colorIndexFor(tag.name)];
+  // WHY fallback to bg-blue-700: colorIndexFor is bounded to 0..11 which
+  // matches CHIP_COLORS.length exactly; the fallback satisfies strict-type-checked
+  // (noUncheckedIndexedAccess sees the index as `number`, not a literal).
+  const bg = CHIP_COLORS[colorIndexFor(tag.name)] ?? "bg-blue-700";
   return (
     <span
       className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${bg} text-white`}
