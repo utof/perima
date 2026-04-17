@@ -12,6 +12,30 @@ roadmap milestone triggers `1.0.0`.
 
 ## [Unreleased]
 
+## [0.6.3] — 2026-04-17
+
+### Fixed
+
+- **#40 FTS5 contentless-delete blank payloads.** V006's sync triggers tried to remove old tokens with empty-string payloads on a contentless FTS5 table — a silent no-op. Stale tokens accumulated on metadata updates and tag detaches.
+- **#41 tag attach on metadata-less file.** `search_rowid_map` only seeded on `file_metadata` insert, so tag attach on a file without metadata was silently ignored until rebuild.
+- **#22 FTS5 stale-rename.** No `file_locations` UPDATE trigger — rename (same hash, new path) left old path indexed.
+- **#42 hash change at same path.** No trigger on `file_locations.blake3_hash` change — replace-in-place left stale FTS doc.
+
+### Changed
+
+- **V007 migration: external-content FTS5.** Switch from contentless (`content=""`) to external-content (`content='search_content'`). External-content supports `INSERT INTO search_index(search_index, rowid) VALUES('delete', rowid)` — delete-by-rowid without needing OLD column values. `search_rowid_map` dropped; the new `search_content` materialised table takes its role.
+- **Ten triggers in six logical categories** cover every indexable mutation surface. Trigger 2 is split 2a/2b/2c by WHEN-gate (hash change, rename, soft-delete). Universal invariant: every trigger body reinserts `search_content` from joined live state (never `NEW.*` for column values), so fire-order is irrelevant across same-transaction multi-table updates.
+- **Representative-selection rule:** first-seen active `file_locations` per hash, tiebroken by `id ASC`. Consistent across bulk-populate, rebuild, trigger 2b guard, trigger 2c re-point, and `search()` join.
+- **SearchRepository::rebuild()** rewritten to match new schema.
+- **Build env cleanup** (`646d6c9`): `.cargo/config.toml` + `justfile` exports eliminate the per-command `export RUSTFLAGS=... export PKG_CONFIG_PATH=...` ritual. `just ci` now works from a plain shell.
+- **release-plz-pr job dropped** from `.github/workflows/release-plz.yml` (`2d63597`). We use direct `chore(release):` commits, not PR-gated releases. Revisit at v1.0 ceremony.
+
+### Notes
+
+- **Migration on launch** re-indexes your library. Transparent to end-users but may add a one-time delay on first launch after upgrade for large libraries (>100k files). Progress logging tracked as post-v1 polish.
+- **Multi-location semantics unchanged:** one FTS doc per hash, indexed under first-seen active location (v0.6.0 rule). Multi-path indexing remains out of scope. Non-representative location renames don't affect search.
+- **32 new tests** landed (4 regression + 6 integration + 1 proptest w/ 256 cases by default).
+
 ## [0.6.2] — 2026-04-17
 
 ### Fixed
@@ -489,7 +513,8 @@ tuning filed as follow-up (see Project section below).
   `cli`, `desktop`, `ci`, `deps`, `docs`, `release`) rather than development
   milestones.
 
-[Unreleased]: https://github.com/utof/perima/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/utof/perima/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/utof/perima/releases/tag/v0.6.3
 [0.6.2]: https://github.com/utof/perima/releases/tag/v0.6.2
 [0.6.1]: https://github.com/utof/perima/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/utof/perima/compare/v0.5.1...v0.6.0
