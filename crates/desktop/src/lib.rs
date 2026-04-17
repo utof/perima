@@ -1,6 +1,4 @@
 //! Tauri desktop backend for perima.
-
-#![forbid(unsafe_code)]
 //!
 //! Exposes `scan`, `list_files`, `list_files_with_metadata`,
 //! `list_volumes`, `start_watch`, `stop_watch`, `is_watching`,
@@ -11,6 +9,8 @@
 //! handles, injected into every command via `tauri::State`.
 //! `WatcherState` holds the active [`perima_fs::DebouncedWatcher`] and its
 //! cancellation token.
+
+#![forbid(unsafe_code)]
 
 pub mod commands;
 pub mod config;

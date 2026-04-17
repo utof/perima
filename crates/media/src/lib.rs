@@ -1,6 +1,4 @@
 //! Media metadata extractors and the async processing queue.
-
-#![forbid(unsafe_code)]
 //!
 //! This crate implements the `MetadataExtractor` port declared in
 //! `perima-core` for image and video files, and wraps extraction in a
@@ -10,6 +8,8 @@
 //! The extractors are confined here so the rest of the workspace stays
 //! free of `image`, `kamadak-exif`, `mp4parse`, and `mime_guess`
 //! dependencies.
+
+#![forbid(unsafe_code)]
 
 pub mod extractor;
 pub mod queue;
