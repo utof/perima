@@ -1,3 +1,5 @@
+import type { FileWithTags } from "../types";
+
 /**
  * Search-related pure functions. No React imports; test directly.
  *
@@ -77,4 +79,22 @@ function stripUnsafe(s: string): string {
     // preserved. A word-boundary (`\b`) match would incorrectly strip dashes
     // inside tokens on some Unicode ranges; the `(^|\s)` anchor is precise.
     .replace(/(^|\s)-/g, "$1");
+}
+
+/**
+ * Tally tag occurrences across a file set.
+ *
+ * WHY client-side: for v0.6.2 the list is capped at 100 rows
+ * (`listFilesWithTags(100)`) so counts are cheap and reactive.
+ * Facet counts reflect the visible result set only; full-corpus
+ * counts are a post-v1 optimization (spec Non-goals).
+ */
+export function computeFacets(files: FileWithTags[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const f of files) {
+    for (const t of f.tags) {
+      counts[t.id] = (counts[t.id] ?? 0) + 1;
+    }
+  }
+  return counts;
 }
