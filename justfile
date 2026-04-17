@@ -44,7 +44,13 @@ test-frontend:
 lint-frontend:
     cd apps/desktop && bun install --frozen-lockfile && bun run lint
 
-ci: fmt-check clippy test doctest docs-coverage build-frontend test-frontend lint-frontend
+deny:
+    cargo deny check
+
+typos:
+    typos
+
+ci: fmt-check clippy test doctest docs-coverage deny typos build-frontend test-frontend lint-frontend
 
 verify:
     @if command -v cargo-kani >/dev/null 2>&1; then \

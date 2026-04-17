@@ -2,6 +2,8 @@
 //!
 //! Zero framework dependencies.
 
+#![forbid(unsafe_code)]
+
 pub mod errors;
 pub mod events;
 pub mod ids;

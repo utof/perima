@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false  # WHY: intra-workspace only; not published to crates.io
 
 # WHY: staticlib + cdylib + rlib — Tauri's build system needs cdylib for the
 # native binary entrypoint; rlib allows `cargo test` integration tests to link

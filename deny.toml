@@ -1,0 +1,81 @@
+# cargo-deny config. Run via `cargo deny check` or `just deny` (add to justfile).
+
+[graph]
+# Restrict to our supported platforms.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+[licenses]
+# Explicit allowlist. Add more as deps require.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",  # used by target-lexicon (Tauri transitive)
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Deny multiple versions of the same crate where possible (warn; don't fail).
+multiple-versions = "warn"
+wildcards = "deny"  # no `foo = "*"` deps in external crates
+# WHY: workspace-internal path deps (perima-core, perima-db, etc.) have no
+# version field by convention; allow-wildcard-paths exempts them from the
+# wildcards check while still catching real external wildcard deps.
+allow-wildcard-paths = true
+
+[advisories]
+# RustSec advisory DB check. Fail on vulnerabilities.
+version = 2
+yanked = "warn"
+# WHY: the crates below are transitive deps pulled in by Tauri or GTK bindings.
+# We cannot upgrade or replace them — they are owned by upstream. Each entry is
+# pinned to its RUSTSEC advisory ID so a new advisory for the same crate is
+# NOT silently ignored.
+ignore = [
+    # gtk-rs GTK3 bindings (10 crates) — unmaintained; Tauri 2.x pulls them on Linux.
+    # GTK4 migration is tracked by Tauri upstream; no fix available for us.
+    { id = "RUSTSEC-2024-0411", reason = "gtk-rs GTK3 transitive from Tauri 2 Linux; no upgrade path" },
+    { id = "RUSTSEC-2024-0412", reason = "gtk-rs GTK3 transitive from Tauri 2 Linux; no upgrade path" },
+    { id = "RUSTSEC-2024-0413", reason = "gtk-rs GTK3 transitive from Tauri 2 Linux; no upgrade path" },
+    { id = "RUSTSEC-2024-0414", reason = "gtk-rs GTK3 transitive from Tauri 2 Linux; no upgrade path" },
+    { id = "RUSTSEC-2024-0415", reason = "gtk-rs GTK3 transitive from Tauri 2 Linux; no upgrade path" },
+    { id = "RUSTSEC-2024-0416", reason = "gtk-rs GTK3 transitive from Tauri 2 Linux; no upgrade path" },
+    { id = "RUSTSEC-2024-0417", reason = "gtk-rs GTK3 transitive from Tauri 2 Linux; no upgrade path" },
+    { id = "RUSTSEC-2024-0418", reason = "gtk-rs GTK3 transitive from Tauri 2 Linux; no upgrade path" },
+    { id = "RUSTSEC-2024-0419", reason = "gtk-rs GTK3 transitive from Tauri 2 Linux; no upgrade path" },
+    { id = "RUSTSEC-2024-0420", reason = "gtk-rs GTK3 transitive from Tauri 2 Linux; no upgrade path" },
+    # fxhash — unmaintained; Tauri transitive.
+    { id = "RUSTSEC-2025-0057", reason = "fxhash: Tauri transitive; no direct dep" },
+    # unic-* family — unmaintained; tauri-utils transitive via urlpattern.
+    { id = "RUSTSEC-2025-0075", reason = "unic-char-range: tauri-utils transitive; no upgrade" },
+    { id = "RUSTSEC-2025-0080", reason = "unic-common: tauri-utils transitive; no upgrade" },
+    { id = "RUSTSEC-2025-0081", reason = "unic-ucd-ident: tauri-utils transitive; no upgrade" },
+    # additional unic advisories identified during initial deny.toml tuning
+    { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version: tauri-utils transitive; no upgrade" },
+    { id = "RUSTSEC-2025-0099", reason = "unic-char-property: tauri-utils transitive; no upgrade" },
+    { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident: tauri-utils transitive; no upgrade" },
+    { id = "RUSTSEC-2025-0101", reason = "tauri-utils transitive via urlpattern; no upgrade" },
+    # paste macro — unmaintained; GTK bindings transitive.
+    { id = "RUSTSEC-2024-0436", reason = "paste: GTK-rs transitive; no direct dep" },
+    # proc-macro-error — unmaintained; GTK bindings transitive.
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: GTK-rs transitive; no direct dep" },
+]
+
+[sources]
+# Only crates.io + git repos explicitly listed.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

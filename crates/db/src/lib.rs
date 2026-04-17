@@ -1,5 +1,7 @@
 //! `SQLite` adapter for perima.
 
+#![forbid(unsafe_code)]
+
 pub mod connection;
 pub mod errors;
 pub mod file_repo;

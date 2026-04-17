@@ -1,0 +1,31 @@
+# typos configuration for perima.
+
+[default]
+# Files typos scans. Sensible default excludes target/, node_modules/, etc.
+
+[files]
+extend-exclude = [
+    "target/",
+    "node_modules/",
+    "*.lock",
+    "*.svg",
+    "dist/",
+    "*.snap",
+    "CHANGELOG.md",  # existing past-tense entries; don't retro-edit
+]
+
+[default.extend-words]
+# Project-specific words typos would flag as misspellings.
+perima = "perima"
+rusqlite = "rusqlite"
+# WHY: false positives from SQL keywords used as verb stems (INSERTs, SELECTing,
+# UPDATEs) and file-type abbreviations (PNGs). Typos strips the suffix and flags
+# the root; these overrides tell it the root is intentional.
+INSER = "INSER"
+SELEC = "SELEC"
+UPDAT = "UPDAT"
+PN = "PN"
+# WHY: `caf` appears in test strings for `café` written as `caf\u{00e9}` /
+# `caf\u{0301}` — the backslash breaks the word boundary so typos sees `caf`
+# in isolation. Not a typo; it's an intentional Unicode normalization test case.
+caf = "caf"

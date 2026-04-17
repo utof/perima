@@ -1,5 +1,7 @@
 //! `perima` command-line entry point.
 
+#![forbid(unsafe_code)]
+
 mod cmd;
 mod config;
 mod logging;

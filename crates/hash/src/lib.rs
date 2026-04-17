@@ -1,5 +1,7 @@
 //! BLAKE3-based content-hashing adapter for perima.
 
+#![forbid(unsafe_code)]
+
 pub mod blake3_service;
 pub mod errors;
 

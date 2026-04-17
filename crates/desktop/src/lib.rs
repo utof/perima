@@ -1,4 +1,6 @@
 //! Tauri desktop backend for perima.
+
+#![forbid(unsafe_code)]
 //!
 //! Exposes `scan`, `list_files`, `list_files_with_metadata`,
 //! `list_volumes`, `start_watch`, `stop_watch`, `is_watching`,

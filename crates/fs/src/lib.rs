@@ -1,5 +1,7 @@
 //! Filesystem scanning, watching, and path normalization for perima.
 
+#![forbid(unsafe_code)]
+
 pub mod errors;
 pub mod paths;
 pub mod volumes;
