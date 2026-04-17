@@ -7,6 +7,7 @@
 # sessions. Local WIP .md files elsewhere in the repo remain gitignored.
 !docs/superpowers/**/*.md
 !docs/routines/**/*.md
+!.claude/**/*.md
 target/
 .DS_Store
 *.swp
