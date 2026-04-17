@@ -5,6 +5,8 @@ use std::sync::Mutex;
 use perima_core::{CoreError, SearchHit, SearchRepository};
 use rusqlite::Connection;
 
+use crate::errors::Error;
+
 /// Rusqlite-backed full-text search repository.
 ///
 /// WHY `Mutex<Connection>`: same rationale as `SqliteTagRepository` —
@@ -42,7 +44,7 @@ impl SearchRepository for SqliteSearchRepository {
                  ORDER BY rank
                  LIMIT ?2",
             )
-            .map_err(|e| CoreError::Internal(format!("prepare search: {e}")))?;
+            .map_err(Error::from)?;
 
         let hits = stmt
             .query_map(rusqlite::params![query, limit], |row| {
@@ -53,9 +55,9 @@ impl SearchRepository for SqliteSearchRepository {
                     rank: row.get(3)?,
                 })
             })
-            .map_err(|e| CoreError::Internal(format!("search query: {e}")))?
+            .map_err(Error::from)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| CoreError::Internal(format!("search collect: {e}")))?;
+            .map_err(Error::from)?;
 
         Ok(hits)
     }
@@ -69,14 +71,14 @@ impl SearchRepository for SqliteSearchRepository {
 
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|e| CoreError::Internal(format!("begin immediate: {e}")))?;
+            .map_err(Error::from)?;
 
         // Wipe both the FTS5 index and the rowid map.
         tx.execute_batch(
             "DELETE FROM search_rowid_map;
              INSERT INTO search_index(search_index) VALUES('delete-all');",
         )
-        .map_err(|e| CoreError::Internal(format!("wipe index: {e}")))?;
+        .map_err(Error::from)?;
 
         // Populate the rowid map: one representative location per hash.
         // WHY INSERT OR IGNORE: the UNIQUE constraint on blake3_hash in
@@ -89,7 +91,7 @@ impl SearchRepository for SqliteSearchRepository {
              JOIN file_locations fl ON fl.blake3_hash = f.blake3_hash
              WHERE f.deleted_at IS NULL AND fl.deleted_at IS NULL;",
         )
-        .map_err(|e| CoreError::Internal(format!("rebuild rowid_map: {e}")))?;
+        .map_err(Error::from)?;
 
         // Populate the FTS5 index from the rowid map.
         // WHY filename = relative_path: SQLite has no built-in REVERSE() for
@@ -114,10 +116,9 @@ impl SearchRepository for SqliteSearchRepository {
              FROM search_rowid_map srm
              LEFT JOIN file_metadata m ON m.blake3_hash = srm.blake3_hash;",
         )
-        .map_err(|e| CoreError::Internal(format!("rebuild fts5: {e}")))?;
+        .map_err(Error::from)?;
 
-        tx.commit()
-            .map_err(|e| CoreError::Internal(format!("commit rebuild: {e}")))?;
+        tx.commit().map_err(Error::from)?;
         Ok(())
     }
 }
