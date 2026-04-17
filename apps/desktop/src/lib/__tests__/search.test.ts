@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildFtsQuery, computeFacets } from "../search";
+import { buildFtsQuery, computeFacets, composeVisible, sortByRank } from "../search";
 import { file } from "./fixtures";
 
 describe("buildFtsQuery", () => {
@@ -72,5 +72,77 @@ describe("computeFacets", () => {
       file(`h${i}`, ["vacation"]),
     );
     expect(computeFacets(files)).toEqual({ vacation: 5 });
+  });
+});
+
+describe("composeVisible", () => {
+  const files = [
+    file("a", ["vacation"]),
+    file("b", ["vacation", "sunset"]),
+    file("c", ["sunset"]),
+    file("d", []),
+  ];
+
+  it("returns all files when no filters", () => {
+    expect(composeVisible(files, null, null)).toEqual(files);
+  });
+
+  it("filters by tag id", () => {
+    expect(composeVisible(files, "vacation", null).map((f) => f.hash)).toEqual([
+      "a",
+      "b",
+    ]);
+  });
+
+  it("filters by search hit set", () => {
+    const hits = new Set(["b", "d"]);
+    expect(composeVisible(files, null, hits).map((f) => f.hash)).toEqual([
+      "b",
+      "d",
+    ]);
+  });
+
+  it("intersects tag and search filters (THE #25 regression)", () => {
+    const hits = new Set(["a", "b", "c"]);
+    expect(composeVisible(files, "vacation", hits).map((f) => f.hash)).toEqual([
+      "a",
+      "b",
+    ]);
+  });
+
+  it("returns empty list on empty search hit set", () => {
+    expect(composeVisible(files, null, new Set())).toEqual([]);
+  });
+
+  it("returns empty list on unknown tag id", () => {
+    expect(composeVisible(files, "nonexistent", null)).toEqual([]);
+  });
+});
+
+describe("sortByRank", () => {
+  it("orders files by rank ascending (lower = better)", () => {
+    const visible = [file("a", []), file("b", []), file("c", [])];
+    const ranks = new Map([
+      ["a", -1.0],
+      ["b", -2.5],
+      ["c", -1.5],
+    ]);
+    expect(sortByRank(visible, ranks).map((f) => f.hash)).toEqual([
+      "b",
+      "c",
+      "a",
+    ]);
+  });
+
+  it("appends files missing from rank map at the end", () => {
+    const visible = [file("a", []), file("b", []), file("c", [])];
+    const ranks = new Map([["a", -1.0]]);
+    const result = sortByRank(visible, ranks).map((f) => f.hash);
+    expect(result[0]).toBe("a");
+    expect(result.slice(1).sort()).toEqual(["b", "c"]);
+  });
+
+  it("returns empty list unchanged", () => {
+    expect(sortByRank([], new Map())).toEqual([]);
   });
 });

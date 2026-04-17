@@ -98,3 +98,53 @@ export function computeFacets(files: FileWithTags[]): Record<string, number> {
   }
   return counts;
 }
+
+/**
+ * Compose the visible file set from base list + optional tag + optional search hits.
+ *
+ * - `selectedTagId === null`: no tag filter.
+ * - `searchHits === null`: no search active (returns tag-filtered list).
+ * - `searchHits instanceof Set` with 0 entries: search active, zero matches
+ *   (returns []). Distinct from null — this is the spec's `searchActive`
+ *   invariant.
+ *
+ * THE core invariant of #25: when both filters are active, the result
+ * is the INTERSECTION, not one overriding the other.
+ */
+export function composeVisible(
+  files: FileWithTags[],
+  selectedTagId: string | null,
+  searchHits: Set<string> | null,
+): FileWithTags[] {
+  return files.filter((f) => {
+    if (selectedTagId !== null && !f.tags.some((t) => t.id === selectedTagId)) {
+      return false;
+    }
+    if (searchHits !== null && !searchHits.has(f.hash)) {
+      return false;
+    }
+    return true;
+  });
+}
+
+/**
+ * Sort files by BM25 rank (ascending — lower = better per FTS5 convention).
+ *
+ * Files whose hash is not in `hitRanks` are appended to the end. In practice
+ * `composeVisible` ensures every visible file has a hit (when searchHits is
+ * non-null), so the fallback only fires on defensive misuse.
+ */
+export function sortByRank(
+  files: FileWithTags[],
+  hitRanks: Map<string, number>,
+): FileWithTags[] {
+  const ranked: Array<{ file: FileWithTags; rank: number }> = [];
+  const unranked: FileWithTags[] = [];
+  for (const f of files) {
+    const r = hitRanks.get(f.hash);
+    if (r === undefined) unranked.push(f);
+    else ranked.push({ file: f, rank: r });
+  }
+  ranked.sort((a, b) => a.rank - b.rank);
+  return [...ranked.map((x) => x.file), ...unranked];
+}
