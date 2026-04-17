@@ -12,6 +12,65 @@ roadmap milestone triggers `1.0.0`.
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-04-17
+
+### Fixed
+
+- **Search + tag filter composition (#25).** In v0.6.1, clicking a
+  search result silently cleared the tag-sidebar selection, making
+  tag-scoped search impossible. v0.6.2 makes the two filters AND-compose:
+  the visible list is always the intersection of the active tag (if
+  any) and the active search match set (if any). Pinned by
+  `App.compose.test.tsx` snapshot.
+- **SearchBar feedback loop.** The original Task 4+5+6 bundle had
+  `onQueryChange` in the SearchBar `useEffect` deps and App.tsx passed
+  a fresh closure every render — causing `api.search` to re-fire on
+  every parent re-render. Fixed in `c1d5c17`: `handleSearchChange`
+  wrapped in `useCallback` with empty deps; regression test added.
+
+### Changed
+
+- **Search UX: live inline narrowing + facet sidebar** (#32).
+  - Typing in the search bar now narrows the file list in place; the
+    dropdown preview is removed.
+  - While a search is active the list re-sorts by FTS5 BM25 rank
+    (lower = better match); the prior sort restores when the search
+    clears.
+  - The tag sidebar transforms into a facet panel when a search is
+    active: only tags present in the current visible result set are
+    shown, with live counts that reflect the narrowed list.
+  - Clicking a sidebar tag AND-composes with the active search
+    (instead of replacing it). Clicking again toggles the tag filter
+    off.
+- **SearchBar input limit raised from 50 → 500 results** per query to
+  feed the in-list re-sort (Tauri command clamps at 500 server-side).
+- **Query sanitiser** added: plain-text input is auto-quoted; explicit
+  phrase queries (`"blue ridge"`) and prefix queries (`sunse*`) are
+  honoured; unsafe chars (bare parens, leading dashes, unpaired
+  quotes) are stripped. Advanced FTS5 operators (NEAR, column
+  filters, AND/OR keywords) are not exposed — tracked for post-v1
+  query DSL.
+
+### Notes
+
+- **Facet counts reflect visible result set only** (capped at 100
+  rows via `listFilesWithTags(100)`). Full-corpus counts are a
+  post-v1 optimization.
+- **Escape key** only clears the search input while focused. Full
+  Escape stack (pop filters, pop detail view, etc.) is scope of #28
+  (keyboard registry) and #27 (three-pane layout).
+- **Stale search hits after watcher refresh:** when the file watcher
+  fires a list refresh while a search is active, `searchHits` is not
+  automatically re-queried. User can retype to re-fire. Post-v1 fix:
+  auto-re-search on watcher-driven refresh.
+- **Process:** Task 4+5+6 bundled into a single commit `8fa9bf9`
+  because the three components share a compile-time type contract
+  (SearchBar prop shape, TagSidebar optional `mode` prop, App.tsx
+  composition derivation) that cannot be changed in isolation under
+  the workspace's no-`--no-verify` rule. Follow-up `fix(desktop):
+  c1d5c17` addresses the two Critical/Important findings from the
+  bundle's Opus review.
+
 ## [0.6.1] — 2026-04-16
 
 Desktop search UI layer on top of the v0.6.0 search backend.
@@ -430,7 +489,8 @@ tuning filed as follow-up (see Project section below).
   `cli`, `desktop`, `ci`, `deps`, `docs`, `release`) rather than development
   milestones.
 
-[Unreleased]: https://github.com/utof/perima/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/utof/perima/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/utof/perima/releases/tag/v0.6.2
 [0.6.1]: https://github.com/utof/perima/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/utof/perima/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/utof/perima/releases/tag/v0.5.1
