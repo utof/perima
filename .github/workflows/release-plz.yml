@@ -4,11 +4,20 @@ on:
   push:
     branches: [main]
 
-# WHY concurrency group: release-plz opens PRs with a stable branch
-# name; concurrent runs would clobber each other. Serialize.
+# WHY single concurrency group: serialise release attempts on main so a
+# rapid-fire push sequence doesn't race the tag-creation step.
 concurrency:
   group: release-plz-${{ github.ref }}
   cancel-in-progress: false
+
+# WHY only the `release` command (no `release-pr`): perima uses direct
+# `chore(release):` commits authored by the dev, pre-commit-verified
+# via `just ci`. The `release-pr` flow (release-plz drafts a PR →
+# reviewer merges → tag cut) is redundant here and requires the repo
+# "Allow GitHub Actions to create PRs" permission, which we keep OFF
+# for supply-chain reasons. If we adopt PR-gated releases later
+# (e.g. for v1.0), re-add a `release-plz-pr` job + flip the setting
+# at that time with explicit intent. See issue #50.
 
 jobs:
   release-plz-release:
@@ -18,8 +27,7 @@ jobs:
       contents: write
       # WHY pull-requests: write: release-plz queries commits->PRs to
       # build changelog entries ("closes #N", etc). Without at least
-      # read, GitHub returns 403 on /commits/{sha}/pulls. Write is a
-      # superset granted for symmetry with the PR job.
+      # read, GitHub returns 403 on /commits/{sha}/pulls.
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
@@ -30,23 +38,5 @@ jobs:
         uses: release-plz/action@v0.5
         with:
           command: release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  release-plz-pr:
-    name: Release-plz PR
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Run release-plz
-        uses: release-plz/action@v0.5
-        with:
-          command: release-pr
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,9 +1,15 @@
 # release-plz configuration.
 #
-# WHY release-pr mode (not direct): release commits must pass CI before
-# tagging. CLAUDE.md's rule "never commit unreviewed work" applies to
-# release commits too. Release-PR mode opens a PR, CI runs on PR open,
-# merge-after-green tags the release.
+# WHY direct `chore(release):` commits (not release-pr mode): the dev
+# writes `chore(release): vX.Y.Z` by hand with CHANGELOG + version
+# bumps, pre-commit `just ci` verifies green, push to main triggers
+# release-plz's `release` command, tag + GH Release are cut.
+#
+# Release-PR mode (release-plz drafts a PR → CI on PR → merge → tag)
+# is disabled in .github/workflows/release-plz.yml. That flow requires
+# the repo "Allow GitHub Actions to create PRs" permission, which we
+# keep OFF for supply-chain hygiene. Revisit if we adopt PR-gated
+# releases later. See issue #50.
 
 [workspace]
 # WHY publish=false: no crates.io distribution in v0.x. When we publish
