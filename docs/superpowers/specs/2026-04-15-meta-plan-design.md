@@ -1,12 +1,34 @@
 # perima meta-plan — phase roadmap toward v1
 
-**Status:** revised after reviewer pass #1
+**Status:** revised after reviewer pass #1; amended 2026-04-17
 **Author:** Claude Opus 4.6 (autonomous mode)
 **Date:** 2026-04-15
 **Scope:** Phase-level sequencing for perima v1. Each phase below gets
 its own brainstorm → spec → plan → execute cycle when it becomes the
 current phase. This document is the *skeleton*, not the plan for
 every phase.
+
+---
+
+## Progress snapshot (as of 2026-04-17)
+
+| Phase | Status | Tags |
+|---|---|---|
+| 0 — Scaffold & gates | ✅ done | `phase-0-complete` |
+| 1a/1b/1c — Indexing core + CLI | ✅ done | `phase-1a-complete`, `phase-1b-complete`, `phase-1-complete` |
+| 2 — Tauri shell | ✅ done | `phase-2-complete` |
+| 3 — Watching + incremental updates | ✅ done | `v0.3.0` through `v0.3.2` |
+| 4 — Thumbnails + media metadata | ✅ done | `v0.4.0` through `v0.4.3` |
+| 5a — Tags | ✅ done | `v0.5.0`, `v0.5.1` |
+| 5b — Search + filter | ✅ done | `v0.6.0`, `v0.6.1` |
+| 5b follow-ups (v0.6.2/v0.6.3) | in progress | (post-review cleanup; issue #25 live faceted search + issue #22 FTS5 stale-rename) |
+| 6 — Local HTTP API | pending | — |
+| 7 — Docs site (Starlight) | pending | — |
+| 8 — Plugin API | pending | — |
+| 9 — v1 hardening | pending | — |
+
+Update this table when a phase ships. Source of truth for detail is
+CHANGELOG.md + the per-phase specs under `docs/superpowers/specs/`.
 
 ---
 
@@ -71,8 +93,14 @@ demoable form. Subsequent phases add capability on the same base.
 - **CI:** mirror of pre-commit on every push. **Nightly job:** kani.
 - `// WHY:` comment convention stated in `CLAUDE.md` (already present);
   `clippy` not blocked by their absence — they are reviewer-enforced.
-- `.gitignore` preserved (`**/*.md`).
-- `DECISIONS.md` stub (gitignored).
+- `.gitignore` preserved (`**/*.md` with narrow whitelist: `CHANGELOG.md`,
+  `CLAUDE.md`, `docs/superpowers/**/*.md`, `docs/routines/**/*.md`,
+  `.claude/**/*.md`).
+- ~~`DECISIONS.md` stub (gitignored).~~ **2026-04-17 revision:** a flat
+  DECISIONS.md was created at phase 0 but became stale after 12 entries.
+  Per deep-research verdict, we rely on CLAUDE.md (living rules), phase
+  specs (intent snapshots), and commit WHY blocks (ground truth) instead.
+  No separate decisions log.
 - **Exit (autonomously verifiable):** `just ci` green on empty crates;
   CI pipeline green; `cargo clippy` produces zero warnings; doc-coverage
   script exits 0.
@@ -81,8 +109,13 @@ demoable form. Subsequent phases add capability on the same base.
 
 Internally split into three plans (1a/1b/1c) per 2026-04-16 spec
 reviewer — scope of phase 1 exceeds one sensible implementation plan.
-Each sub-phase owns a spec + plan + reviewer pass + commits. The
-`phase-1-complete` tag lands at the end of 1c.
+Each sub-phase owns a spec + plan + reviewer pass + commits.
+
+**Tagging note (2026-04-17 revision):** phases 0-2 used
+`phase-N-complete` milestone tags as a historical convention. From v0.3.0
+onward the project adopted **semver tags** (`v0.N.x`) with release-plz
+auto-tagging on `chore(release):` commits. The `phase-N-complete` tags
+remain in history as historical markers only; do not create new ones.
 
 - **1a** — core types, trait ports (hash + scanner + file + volume
   repositories), BLAKE3 adapter, filesystem walker, path
@@ -94,7 +127,8 @@ Each sub-phase owns a spec + plan + reviewer pass + commits. The
   implementations, `scan` persists, `perima ls` reads.
 - **1c** — volume detection, `volume_mounts`, per-drive
   `.perima/manifest.db` creation, `perima volumes` command,
-  integration tests, property tests, `phase-1-complete` tag.
+  integration tests, property tests. (Shipped pre-semver as the
+  historical `phase-1-complete` tag; semver equivalent is v0.2.x.)
 
 - **Domain types** in `crates/core`: `BlakeHash`, `FileSize`,
   `MediaPath`, `VolumeId`, `DeviceId`, `DiscoveredFile`, `HashedFile`.
@@ -298,13 +332,23 @@ verification-before-completion → tag phase.`
   Mitigation (honest, consistent with autonomous-mode rule): UI phases
   (2, 4, 5a, 5b) ship with **headless IPC tests + component snapshot
   tests only**. Visual polish is an explicit **non-goal for v1**;
-  tracked in a post-v1 polish phase. We do not stop for human
+  tracked post-v1 via [issue #27 (three-pane layout)](https://github.com/utof/perima/issues/27)
+  and its sub-issues (#28-#31, #33-#35). We do not stop for human
   review, and we do not pretend tests cover aesthetics.
 - **Scope creep mid-phase.** Reviewer subagent checks each task
   against the phase spec, not the meta-plan.
+- **Review-gate skipping.** Observed in v0.6.x: the cloud trigger
+  shipped 4 feat commits with zero `fix(...)` review-fix commits, vs
+  v0.5.1's 1:1 ratio. Mitigated 2026-04-17 via tightened rules in
+  `.claude/commands/autonomous-continue.md` (Rule 3: every feat
+  commit must be followed by two-stage review; "zero fix commits
+  across a phase = red flag requiring justification in release body").
+  Tracked as [issue #26](https://github.com/utof/perima/issues/26).
 - **Phase-plan rot.** Re-read + revise this meta-plan before starting
-  each phase. Meta-plan is regenerated (not patched) after phase 5b
-  given the most churn happens there.
+  each phase. Originally called for full regeneration after phase 5b;
+  2026-04-17 decision is to amend in place (progress snapshot,
+  decision-log walkback, risk updates). Regenerate only if post-v1
+  scope clarifies substantially.
 - **kani cost.** On-demand only, never per-commit.
 - **cr-sqlite maintenance risk.** Research doc flags last release
   2025-01. v1 does not depend on cr-sqlite. Post-v1 sync phase ships
