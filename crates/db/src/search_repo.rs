@@ -1058,7 +1058,7 @@ mod tests {
     /// the first-seen active location for its target hash.
     ///
     /// Bug in V007 trigger 2a (lines 186-200): the UPDATE unconditionally sets
-    /// `filename = NEW.relative_path`, violating the "first_seen ASC,id ASC
+    /// `filename = NEW.relative_path`, violating the "`first_seen` ASC, id ASC
     /// representative" rule codex found at lines 94-97 of V007.
     #[test]
     #[allow(non_snake_case)]
@@ -1103,8 +1103,8 @@ mod tests {
         );
     }
 
-    /// T45a (#3a): combined UPDATE of blake3_hash + deleted_at must NOT seed
-    /// a search_content row for the NEW (tombstoned) hash.
+    /// T45a (#3a): combined UPDATE of `blake3_hash` + `deleted_at` must NOT seed
+    /// a `search_content` row for the NEW (tombstoned) hash.
     ///
     /// Bug in V007 trigger 2a: no `NEW.deleted_at IS NULL` guard — fires even
     /// when the updated row is simultaneously tombstoned.
@@ -1162,7 +1162,7 @@ mod tests {
     /// Bug in V007: trigger 2c handles soft-delete (`OLD.deleted_at IS NULL
     /// AND NEW.deleted_at IS NOT NULL`) but there is no inverse trigger for
     /// restore. After restore the row's representative-selection value is
-    /// back in play but search_content is still empty.
+    /// back in play but `search_content` is still empty.
     #[test]
     #[allow(non_snake_case)]
     fn test_T45b_location_restore_recreates_fts_doc() {
@@ -1204,7 +1204,7 @@ mod tests {
     /// T46 (#4): soft-deleting a `file_metadata` row must clear its tokens
     /// from FTS.
     ///
-    /// Bug in V007 trigger 3b (lines 269-276): blindly copies NEW.mime_type
+    /// Bug in V007 trigger 3b (lines 269-276): blindly copies `NEW.mime_type`
     /// etc. with no `deleted_at` filter, and there is no dedicated soft-delete
     /// trigger — so MIME/camera/capture tokens of a tombstoned metadata row
     /// stay indexed.
@@ -1243,8 +1243,8 @@ mod tests {
     /// of a row a peer already deleted).
     ///
     /// V007 bug: trigger at V007:252-266 has no `NEW.deleted_at IS NULL`
-    /// guard; blindly copies NEW.mime_type / camera_model / captured_at
-    /// into search_content even when NEW arrives soft-deleted.
+    /// guard; blindly copies `NEW.mime_type` / `camera_model` / `captured_at`
+    /// into `search_content` even when NEW arrives soft-deleted.
     #[test]
     #[allow(non_snake_case)]
     fn test_T47_tombstoned_metadata_insert_skipped() {
@@ -1279,9 +1279,9 @@ mod tests {
     /// table AND the joined entity.
     ///
     /// V007 bug: trigger at V007:132-151 filters `ft.deleted_at IS NULL` but
-    /// not `t.deleted_at IS NULL`, and LEFT JOINs file_metadata without
+    /// not `t.deleted_at IS NULL`, and LEFT JOINs `file_metadata` without
     /// `m.deleted_at IS NULL`. A new location inserted after a
-    /// search_content row retirement re-seeds the doc with tokens from
+    /// `search_content` row retirement re-seeds the doc with tokens from
     /// tombstoned tags/metadata.
     #[test]
     #[allow(non_snake_case)]
@@ -1557,7 +1557,7 @@ mod tests {
         .expect("restore_tag_raw");
     }
 
-    /// Restore a soft-deleted file_metadata row.
+    /// Restore a soft-deleted `file_metadata` row.
     fn restore_metadata_raw(conn: &Connection, hash: &str) {
         conn.execute(
             "UPDATE file_metadata SET deleted_at = NULL, updated_at = ?1
@@ -1588,7 +1588,7 @@ mod tests {
         .expect("set_metadata_variant");
     }
 
-    /// A single expected search_content row computed from joined live state,
+    /// A single expected `search_content` row computed from joined live state,
     /// using per-field subqueries independent of `rebuild()`'s SQL shape.
     #[derive(Debug, PartialEq, Eq, Hash, Clone)]
     struct GroundTruthRow {
@@ -1600,10 +1600,10 @@ mod tests {
         tags: String,
     }
 
-    /// Compute expected search_content from joined live state.
-    /// Per-hash: one row iff an active file_location exists. Fields populated
+    /// Compute expected `search_content` from joined live state.
+    /// Per-hash: one row iff an active `file_location` exists. Fields populated
     /// from first-seen active location (path) + active metadata (mime/camera/
-    /// capture) + GROUP_CONCAT of active (file_tags × tags) names (tags).
+    /// capture) + `GROUP_CONCAT` of active (`file_tags` × tags) names (tags).
     fn compute_ground_truth(conn: &Connection) -> Vec<GroundTruthRow> {
         let mut stmt = conn
             .prepare(
@@ -1671,7 +1671,7 @@ mod tests {
         out
     }
 
-    /// Read actual search_content into the same shape, with `tags`
+    /// Read actual `search_content` into the same shape, with `tags`
     /// tokens sorted so the comparison is order-insensitive.
     fn read_search_content(conn: &Connection) -> Vec<GroundTruthRow> {
         let mut stmt = conn
