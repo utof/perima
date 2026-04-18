@@ -408,22 +408,39 @@ impl FileRepository for SqliteFileRepository {
             .conn
             .lock()
             .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
+        // WHY separate SQL strings per branch instead of `(?1 IS NULL OR fl.volume_id = ?1)`:
+        // the OR-with-NULL predicate defeats index use on `idx_file_locations_volume_path`;
+        // EXPLAIN QUERY PLAN reports SCAN + TEMP B-TREE sort even when a concrete
+        // volume_id is supplied. Branching here keeps both shapes index-eligible.
         let vol_filter = volume.map(|v| v.0.to_string());
-        let mut stmt = conn
-            .prepare(
-                "SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
-                        fl.status, fl.first_seen
-                 FROM file_locations fl
-                 JOIN files f ON f.blake3_hash = fl.blake3_hash
-                 WHERE fl.deleted_at IS NULL
-                   AND (?1 IS NULL OR fl.volume_id = ?1)
-                 ORDER BY fl.relative_path
-                 LIMIT ?2",
-            )
-            .map_err(Error::from)?;
+        let sql: &str = if vol_filter.is_some() {
+            "SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
+                    fl.status, fl.first_seen
+             FROM file_locations fl
+             JOIN files f ON f.blake3_hash = fl.blake3_hash
+             WHERE fl.deleted_at IS NULL AND fl.volume_id = ?1
+             ORDER BY fl.relative_path
+             LIMIT ?2"
+        } else {
+            "SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
+                    fl.status, fl.first_seen
+             FROM file_locations fl
+             JOIN files f ON f.blake3_hash = fl.blake3_hash
+             WHERE fl.deleted_at IS NULL
+             ORDER BY fl.relative_path
+             LIMIT ?1"
+        };
+        let mut stmt = conn.prepare(sql).map_err(Error::from)?;
+
+        let limit_i64 = limit_to_i64(limit);
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(v) = vol_filter.as_deref() {
+            params.push(Box::new(v.to_owned()));
+        }
+        params.push(Box::new(limit_i64));
 
         let rows = stmt
-            .query_map(rusqlite::params![vol_filter, limit_to_i64(limit)], |row| {
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
                 let hash_hex: String = row.get(0)?;
                 let size: i64 = row.get(1)?;
                 let vol_str: String = row.get(2)?;

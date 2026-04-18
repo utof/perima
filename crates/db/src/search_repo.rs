@@ -122,9 +122,11 @@ impl SearchRepository for SqliteSearchRepository {
                         JOIN tags t ON t.id = ft.tag_id
                         WHERE ft.blake3_hash = fl.blake3_hash
                           AND ft.deleted_at IS NULL
+                          AND t.deleted_at IS NULL
                     ), '')
              FROM file_locations fl
              LEFT JOIN file_metadata m ON m.blake3_hash = fl.blake3_hash
+                                       AND m.deleted_at IS NULL
              WHERE fl.deleted_at IS NULL
                AND fl.id = (
                    SELECT id FROM file_locations
@@ -976,6 +978,361 @@ mod tests {
         );
     }
 
+    // ── v0.6.4 RED regression tests (codex-surfaced bugs in V007) ───────────
+
+    /// Soft-delete a tag row (simulates `SqliteTagRepository::delete_tag`).
+    fn soft_delete_tag_raw(conn: &Connection, tag_name: &str) {
+        conn.execute(
+            "UPDATE tags SET deleted_at = ?1, updated_at = ?1, device_id = ?2
+             WHERE name = ?3 AND deleted_at IS NULL",
+            rusqlite::params![TS, DEV, tag_name],
+        )
+        .expect("soft_delete_tag_raw");
+    }
+
+    /// Clear `deleted_at` on a soft-deleted `file_locations` row (restore).
+    fn restore_location(conn: &Connection, hash: &str, path: &str) {
+        conn.execute(
+            "UPDATE file_locations SET deleted_at = NULL, updated_at = ?1
+             WHERE blake3_hash = ?2 AND relative_path = ?3",
+            rusqlite::params![TS, hash, path],
+        )
+        .expect("restore_location");
+    }
+
+    /// Soft-delete a `file_metadata` row.
+    fn soft_delete_metadata(conn: &Connection, hash: &str) {
+        conn.execute(
+            "UPDATE file_metadata SET deleted_at = ?1, updated_at = ?1
+             WHERE blake3_hash = ?2 AND deleted_at IS NULL",
+            rusqlite::params![TS, hash],
+        )
+        .expect("soft_delete_metadata");
+    }
+
+    /// T43 (#1): soft-deleting a tag must remove its tokens from FTS.
+    /// Bug in V007: no trigger on `tags.deleted_at`; aggregation queries
+    /// filter `ft.deleted_at IS NULL` but never `t.deleted_at IS NULL`,
+    /// so tokens of a soft-deleted tag remain indexed forever.
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_T43_tag_soft_delete_removes_tokens_from_fts() {
+        let hash_owned = hash_n(43);
+        let hash_s = hash_owned.as_str();
+        let (_td, repo) = test_db();
+        {
+            let conn = repo.conn.lock().expect("lock");
+            insert_file(&conn, hash_s, VOL, "cabin_43.jpg");
+            attach_tag_raw(&conn, hash_s, "vacation_43");
+        }
+        // Pre-condition: tag indexed.
+        assert_eq!(
+            search_count(&repo, "vacation_43"),
+            1,
+            "pre: tag token must match before soft-delete"
+        );
+
+        {
+            let conn = repo.conn.lock().expect("lock");
+            soft_delete_tag_raw(&conn, "vacation_43");
+        }
+
+        // V007 bug: token still matches after soft-delete.
+        assert_eq!(
+            search_count(&repo, "vacation_43"),
+            0,
+            "#1: soft-deleted tag token must NOT match (V007 bug: no tag-soft-delete trigger)"
+        );
+
+        // rebuild() must also drop the leaked token (aggregation filter fix).
+        repo.rebuild().expect("rebuild");
+        assert_eq!(
+            search_count(&repo, "vacation_43"),
+            0,
+            "#1: rebuild() must not reintroduce the soft-deleted tag token"
+        );
+    }
+
+    /// T44 (#2): `search_after_location_hash_change` must NOT overwrite an
+    /// existing representative's indexed path with NEW.* when NEW is not
+    /// the first-seen active location for its target hash.
+    ///
+    /// Bug in V007 trigger 2a (lines 186-200): the UPDATE unconditionally sets
+    /// `filename = NEW.relative_path`, violating the "first_seen ASC,id ASC
+    /// representative" rule codex found at lines 94-97 of V007.
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_T44_hash_change_preserves_representative_path() {
+        let hash_a = hash_n(44);
+        let hash_b = hash_n(45);
+        let a_s = hash_a.as_str();
+        let b_s = hash_b.as_str();
+        let (_td, repo) = test_db();
+        {
+            let conn = repo.conn.lock().expect("lock");
+            // HASH_A's representative location: earlier_44.jpg (first_seen=TS).
+            insert_file(&conn, a_s, VOL, "earlier_44.jpg");
+            // HASH_B's only location: later_44.jpg (first_seen=TS+1 via second row).
+            insert_file(&conn, b_s, VOL, "later_44.jpg");
+        }
+        // Pre-condition: searching "earlier_44" hits HASH_A's doc.
+        assert_eq!(
+            search_count(&repo, "earlier_44"),
+            1,
+            "pre: representative path for HASH_A must match"
+        );
+
+        // Change later_44.jpg's hash from HASH_B to HASH_A (file content changed
+        // at that path to match HASH_A). Trigger 2a fires for the hash change.
+        {
+            let conn = repo.conn.lock().expect("lock");
+            conn.execute(
+                "UPDATE file_locations SET blake3_hash = ?1
+                 WHERE blake3_hash = ?2 AND relative_path = 'later_44.jpg'",
+                rusqlite::params![a_s, b_s],
+            )
+            .expect("hash change");
+        }
+
+        // V007 bug: trigger 2a's UPDATE overwrote search_content(HASH_A) with
+        // later_44.jpg, clobbering the representative path earlier_44.jpg.
+        assert_eq!(
+            search_count(&repo, "earlier_44"),
+            1,
+            "#2: representative's indexed path must remain 'earlier_44' after non-rep hash-change"
+        );
+    }
+
+    /// T45a (#3a): combined UPDATE of blake3_hash + deleted_at must NOT seed
+    /// a search_content row for the NEW (tombstoned) hash.
+    ///
+    /// Bug in V007 trigger 2a: no `NEW.deleted_at IS NULL` guard — fires even
+    /// when the updated row is simultaneously tombstoned.
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_T45a_soft_delete_with_hash_change_skips_fts_insert() {
+        let hash_old = hash_n(46);
+        let hash_new = hash_n(47);
+        let old_s = hash_old.as_str();
+        let new_s = hash_new.as_str();
+        let (_td, repo) = test_db();
+        {
+            let conn = repo.conn.lock().expect("lock");
+            insert_file(&conn, old_s, VOL, "combined_45.jpg");
+            conn.execute(
+                "INSERT OR IGNORE INTO files
+                     (blake3_hash, file_size, first_seen, updated_at, device_id)
+                 VALUES (?1, 2048, ?2, ?2, ?3)",
+                rusqlite::params![new_s, TS, DEV],
+            )
+            .expect("insert new files row");
+        }
+
+        // Combined: blake3_hash change + deleted_at set in one UPDATE.
+        {
+            let conn = repo.conn.lock().expect("lock");
+            conn.execute(
+                "UPDATE file_locations SET blake3_hash = ?1, deleted_at = ?2
+                 WHERE blake3_hash = ?3 AND relative_path = 'combined_45.jpg'",
+                rusqlite::params![new_s, TS, old_s],
+            )
+            .expect("hash change + soft-delete");
+        }
+
+        // Verify no search_content row exists for hash_new (tombstoned
+        // simultaneously — trigger 2a must not insert).
+        let sc_count_new: i64 = {
+            let conn = repo.conn.lock().expect("lock");
+            conn.query_row(
+                "SELECT COUNT(*) FROM search_content WHERE blake3_hash = ?1",
+                rusqlite::params![new_s],
+                |r| r.get(0),
+            )
+            .expect("count sc new")
+        };
+        assert_eq!(
+            sc_count_new, 0,
+            "#3a: combined hash-change+soft-delete must not leak NEW hash into search_content"
+        );
+    }
+
+    /// T45b (#3b): restoring a soft-deleted sole-location row must recreate
+    /// the FTS doc.
+    ///
+    /// Bug in V007: trigger 2c handles soft-delete (`OLD.deleted_at IS NULL
+    /// AND NEW.deleted_at IS NOT NULL`) but there is no inverse trigger for
+    /// restore. After restore the row's representative-selection value is
+    /// back in play but search_content is still empty.
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_T45b_location_restore_recreates_fts_doc() {
+        let hash = hash_n(48);
+        let hash_s = hash.as_str();
+        let (_td, repo) = test_db();
+        {
+            let conn = repo.conn.lock().expect("lock");
+            insert_file(&conn, hash_s, VOL, "restore_45_token.jpg");
+        }
+        // Pre: indexed.
+        assert_eq!(search_count(&repo, "restore_45_token"), 1, "pre: indexed");
+
+        // Soft-delete the only location.
+        {
+            let conn = repo.conn.lock().expect("lock");
+            soft_delete_location(&conn, hash_s, "restore_45_token.jpg");
+        }
+        assert_eq!(
+            search_count(&repo, "restore_45_token"),
+            0,
+            "after soft-delete: retired"
+        );
+
+        // Restore by clearing deleted_at.
+        {
+            let conn = repo.conn.lock().expect("lock");
+            restore_location(&conn, hash_s, "restore_45_token.jpg");
+        }
+
+        // V007 bug: no restore trigger → FTS doc never recreated.
+        assert_eq!(
+            search_count(&repo, "restore_45_token"),
+            1,
+            "#3b: restore must recreate the FTS doc (V007 bug: no restore trigger)"
+        );
+    }
+
+    /// T46 (#4): soft-deleting a `file_metadata` row must clear its tokens
+    /// from FTS.
+    ///
+    /// Bug in V007 trigger 3b (lines 269-276): blindly copies NEW.mime_type
+    /// etc. with no `deleted_at` filter, and there is no dedicated soft-delete
+    /// trigger — so MIME/camera/capture tokens of a tombstoned metadata row
+    /// stay indexed.
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_T46_metadata_soft_delete_clears_tokens() {
+        let hash = hash_n(49);
+        let hash_s = hash.as_str();
+        let (_td, repo) = test_db();
+        {
+            let conn = repo.conn.lock().expect("lock");
+            insert_file(&conn, hash_s, VOL, "meta_soft_46.jpg");
+            insert_metadata(&conn, hash_s, "image/jpeg", "CanonGone46", "");
+        }
+        assert_eq!(
+            search_count(&repo, "CanonGone46"),
+            1,
+            "pre: camera token indexed"
+        );
+
+        {
+            let conn = repo.conn.lock().expect("lock");
+            soft_delete_metadata(&conn, hash_s);
+        }
+
+        // V007 bug: tokens remain after metadata soft-delete.
+        assert_eq!(
+            search_count(&repo, "CanonGone46"),
+            0,
+            "#4: soft-deleted metadata's camera token must NOT match (V007 bug)"
+        );
+    }
+
+    /// T47 (reviewer #2): `search_after_metadata_insert` must not seed FTS
+    /// tokens when the metadata row is already tombstoned (e.g. CRDT merge
+    /// of a row a peer already deleted).
+    ///
+    /// V007 bug: trigger at V007:252-266 has no `NEW.deleted_at IS NULL`
+    /// guard; blindly copies NEW.mime_type / camera_model / captured_at
+    /// into search_content even when NEW arrives soft-deleted.
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_T47_tombstoned_metadata_insert_skipped() {
+        let hash = hash_n(50);
+        let hash_s = hash.as_str();
+        let (_td, repo) = test_db();
+        {
+            let conn = repo.conn.lock().expect("lock");
+            insert_file(&conn, hash_s, VOL, "ghost_47.jpg");
+            // Directly INSERT metadata with deleted_at already set — simulates
+            // a CRDT merge from a peer that already soft-deleted the row.
+            conn.execute(
+                "INSERT INTO file_metadata
+                     (blake3_hash, mime_type, camera_model, captured_at,
+                      extracted_at, updated_at, deleted_at, device_id)
+                 VALUES (?1, 'image/ghost', 'GhostCam47', '', ?2, ?2, ?2, ?3)",
+                rusqlite::params![hash_s, TS, DEV],
+            )
+            .expect("insert tombstoned metadata");
+        }
+
+        // V007 bug: tokens indexed even though metadata arrived tombstoned.
+        assert_eq!(
+            search_count(&repo, "GhostCam47"),
+            0,
+            "reviewer #2: tombstoned metadata INSERT must not seed live tokens"
+        );
+    }
+
+    /// T48 (reviewer #3): `search_after_file_locations_insert` must aggregate
+    /// tags + metadata with `deleted_at IS NULL` filters on BOTH the link
+    /// table AND the joined entity.
+    ///
+    /// V007 bug: trigger at V007:132-151 filters `ft.deleted_at IS NULL` but
+    /// not `t.deleted_at IS NULL`, and LEFT JOINs file_metadata without
+    /// `m.deleted_at IS NULL`. A new location inserted after a
+    /// search_content row retirement re-seeds the doc with tokens from
+    /// tombstoned tags/metadata.
+    #[test]
+    #[allow(non_snake_case)]
+    fn test_T48_fresh_location_seed_excludes_soft_deleted_tag_and_metadata() {
+        let hash = hash_n(51);
+        let hash_s = hash.as_str();
+        let (_td, repo) = test_db();
+        {
+            let conn = repo.conn.lock().expect("lock");
+            // Seed: one location + attached tag + metadata — all live.
+            insert_file(&conn, hash_s, VOL, "seed_48.jpg");
+            attach_tag_raw(&conn, hash_s, "ghostag_48");
+            insert_metadata(&conn, hash_s, "image/jpeg", "GhostCam48", "");
+
+            // Soft-delete the tag AND the metadata (tombstones only, not
+            // cascaded — file_tags rows remain with their original deleted_at).
+            soft_delete_tag_raw(&conn, "ghostag_48");
+            soft_delete_metadata(&conn, hash_s);
+
+            // Retire the search_content row by soft-deleting the sole location.
+            soft_delete_location(&conn, hash_s, "seed_48.jpg");
+        }
+
+        // Confirm FTS retired.
+        assert_eq!(
+            search_count(&repo, "ghostag_48"),
+            0,
+            "pre: tag token must be absent after soft-delete + retire"
+        );
+
+        // Now insert a fresh location for the same hash on VOL2 —
+        // fires search_after_file_locations_insert which re-seeds
+        // search_content(hash) from the aggregations.
+        {
+            let conn = repo.conn.lock().expect("lock");
+            insert_file_at_volume(&conn, hash_s, "reseed_48.jpg", VOL2);
+        }
+
+        // V007 bug: seed uses t/m-unfiltered JOINs, resurrecting tombstoned tokens.
+        assert_eq!(
+            search_count(&repo, "ghostag_48"),
+            0,
+            "reviewer #3: fresh-location seed must exclude soft-deleted tag tokens"
+        );
+        assert_eq!(
+            search_count(&repo, "GhostCam48"),
+            0,
+            "reviewer #3: fresh-location seed must exclude soft-deleted metadata tokens"
+        );
+    }
+
     // ── Task 5: proptest — FTS5 invariant across tag churn ──────────────────
 
     /// Soft-delete a `file_tags` row by setting `deleted_at` (tag detach).
@@ -1163,6 +1520,305 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    // ── v0.6.4 proptest — ground-truth invariant over full soft-delete op universe ──
+    //
+    // Codex finding #9 observed that the tag-churn proptest above could not
+    // catch #1-#4 because its op universe is narrow and its invariant reads
+    // only `file_tags.deleted_at`. This sibling proptest extends coverage to
+    // EVERY mutable surface that affects search_content + checks an
+    // INDEPENDENT ground-truth (not the `rebuild()` SQL — a different shape
+    // assembled per-field in this module, so a future bug re-entering both
+    // trigger and rebuild paths is still caught here).
+
+    #[derive(Debug, Clone)]
+    enum SoftOp {
+        AttachTag(usize, usize),
+        DetachTag(usize, usize),
+        SoftDeleteTag(usize),
+        RestoreTag(usize),
+        SetMetadata(usize, u8),
+        SoftDeleteMetadata(usize),
+        RestoreMetadata(usize),
+        SoftDeleteLocation(usize),
+        RestoreLocation(usize),
+    }
+
+    /// Restore a soft-deleted tag (mirrors what a CRDT merge or operator fix would do).
+    fn restore_tag_raw(conn: &Connection, tag_name: &str) {
+        conn.execute(
+            "UPDATE tags SET deleted_at = NULL, updated_at = ?1
+             WHERE name = ?2",
+            rusqlite::params![TS, tag_name],
+        )
+        .expect("restore_tag_raw");
+    }
+
+    /// Restore a soft-deleted file_metadata row.
+    fn restore_metadata_raw(conn: &Connection, hash: &str) {
+        conn.execute(
+            "UPDATE file_metadata SET deleted_at = NULL, updated_at = ?1
+             WHERE blake3_hash = ?2",
+            rusqlite::params![TS, hash],
+        )
+        .expect("restore_metadata_raw");
+    }
+
+    /// Insert or replace a metadata row for `hash` with a deterministic camera
+    /// token derived from `variant`. Used to exercise metadata-update triggers
+    /// with distinguishable tokens across rounds.
+    fn set_metadata_variant(conn: &Connection, hash: &str, variant: u8) {
+        let cam = format!("cam_{variant}");
+        let mime = format!("image/type{variant}");
+        conn.execute(
+            "INSERT INTO file_metadata
+                 (blake3_hash, mime_type, camera_model, captured_at,
+                  extracted_at, updated_at, device_id)
+             VALUES (?1, ?2, ?3, '', ?4, ?4, ?5)
+             ON CONFLICT(blake3_hash) DO UPDATE SET
+                 mime_type = excluded.mime_type,
+                 camera_model = excluded.camera_model,
+                 updated_at = excluded.updated_at,
+                 deleted_at = NULL",
+            rusqlite::params![hash, mime, cam, TS, DEV],
+        )
+        .expect("set_metadata_variant");
+    }
+
+    /// A single expected search_content row computed from joined live state,
+    /// using per-field subqueries independent of `rebuild()`'s SQL shape.
+    #[derive(Debug, PartialEq, Eq, Hash, Clone)]
+    struct GroundTruthRow {
+        blake3_hash: String,
+        relative_path: String,
+        mime_type: String,
+        camera_model: String,
+        captured_at: String,
+        tags: String,
+    }
+
+    /// Compute expected search_content from joined live state.
+    /// Per-hash: one row iff an active file_location exists. Fields populated
+    /// from first-seen active location (path) + active metadata (mime/camera/
+    /// capture) + GROUP_CONCAT of active (file_tags × tags) names (tags).
+    fn compute_ground_truth(conn: &Connection) -> Vec<GroundTruthRow> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT fl.blake3_hash
+                 FROM file_locations fl
+                 WHERE fl.deleted_at IS NULL
+                 ORDER BY fl.blake3_hash",
+            )
+            .expect("prepare hashes");
+        let hashes: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("query hashes")
+            .filter_map(Result::ok)
+            .collect();
+
+        let mut out = Vec::new();
+        for h in hashes {
+            let path: String = conn
+                .query_row(
+                    "SELECT fl.relative_path FROM file_locations fl
+                     WHERE fl.blake3_hash = ?1 AND fl.deleted_at IS NULL
+                     ORDER BY fl.first_seen ASC, fl.id ASC LIMIT 1",
+                    rusqlite::params![h],
+                    |r| r.get(0),
+                )
+                .expect("rep path");
+            let (mime, cam, cap): (String, String, String) = conn
+                .query_row(
+                    "SELECT COALESCE(mime_type, ''),
+                            COALESCE(camera_model, ''),
+                            COALESCE(captured_at, '')
+                     FROM file_metadata
+                     WHERE blake3_hash = ?1 AND deleted_at IS NULL",
+                    rusqlite::params![h],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap_or_else(|_| (String::new(), String::new(), String::new()));
+            // GROUP_CONCAT isn't deterministic across SQLite builds; compute
+            // in Rust with sort-by-name for stable comparison.
+            let mut tag_names: Vec<String> = {
+                let mut s = conn
+                    .prepare(
+                        "SELECT t.name FROM file_tags ft
+                         JOIN tags t ON t.id = ft.tag_id
+                         WHERE ft.blake3_hash = ?1
+                           AND ft.deleted_at IS NULL
+                           AND t.deleted_at IS NULL",
+                    )
+                    .expect("prepare tags");
+                s.query_map(rusqlite::params![h], |r| r.get::<_, String>(0))
+                    .expect("query tags")
+                    .filter_map(Result::ok)
+                    .collect()
+            };
+            tag_names.sort();
+            out.push(GroundTruthRow {
+                blake3_hash: h,
+                relative_path: path.clone(),
+                mime_type: mime,
+                camera_model: cam,
+                captured_at: cap,
+                tags: tag_names.join(" "),
+            });
+        }
+        out
+    }
+
+    /// Read actual search_content into the same shape, with `tags`
+    /// tokens sorted so the comparison is order-insensitive.
+    fn read_search_content(conn: &Connection) -> Vec<GroundTruthRow> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT blake3_hash, relative_path, mime_type, camera_model,
+                        captured_at, tags
+                 FROM search_content ORDER BY blake3_hash",
+            )
+            .expect("prepare sc");
+        stmt.query_map([], |r| {
+            let tags_raw: String = r.get(5)?;
+            let mut toks: Vec<&str> = tags_raw.split_whitespace().collect();
+            toks.sort_unstable();
+            Ok(GroundTruthRow {
+                blake3_hash: r.get(0)?,
+                relative_path: r.get(1)?,
+                mime_type: r.get(2)?,
+                camera_model: r.get(3)?,
+                captured_at: r.get(4)?,
+                tags: toks.join(" "),
+            })
+        })
+        .expect("query sc")
+        .filter_map(Result::ok)
+        .collect()
+    }
+
+    const SOFT_FILES: &[&str] = &[
+        "a100000000000000000000000000000000000000000000000000000000000000",
+        "a200000000000000000000000000000000000000000000000000000000000000",
+    ];
+    const SOFT_TAGS: &[&str] = &["alpha", "beta"];
+    const SOFT_VOL: &str = "00000000-0000-0000-0000-0000000000aa";
+
+    proptest::proptest! {
+        /// **Invariant:** after EVERY op, search_content rows (incrementally
+        /// maintained by triggers) must equal the ground-truth rows computed
+        /// directly from joined live state via independent per-field subqueries.
+        ///
+        /// WHY independent ground truth: if a future migration reintroduces a
+        /// shared bug into both `rebuild()` and the triggers, an invariant that
+        /// compares trigger-path ⟷ rebuild-path would pass; per-field subqueries
+        /// in this test are a second source.
+        #[test]
+        fn fts_matches_ground_truth_under_soft_delete_churn(
+            ops in proptest::collection::vec(
+                proptest::prop_oneof![
+                    proptest::strategy::Strategy::prop_map(
+                        (0..SOFT_FILES.len(), 0..SOFT_TAGS.len()),
+                        |(f, t)| SoftOp::AttachTag(f, t),
+                    ),
+                    proptest::strategy::Strategy::prop_map(
+                        (0..SOFT_FILES.len(), 0..SOFT_TAGS.len()),
+                        |(f, t)| SoftOp::DetachTag(f, t),
+                    ),
+                    proptest::strategy::Strategy::prop_map(
+                        0..SOFT_TAGS.len(),
+                        SoftOp::SoftDeleteTag,
+                    ),
+                    proptest::strategy::Strategy::prop_map(
+                        0..SOFT_TAGS.len(),
+                        SoftOp::RestoreTag,
+                    ),
+                    proptest::strategy::Strategy::prop_map(
+                        (0..SOFT_FILES.len(), 0u8..4u8),
+                        |(f, v)| SoftOp::SetMetadata(f, v),
+                    ),
+                    proptest::strategy::Strategy::prop_map(
+                        0..SOFT_FILES.len(),
+                        SoftOp::SoftDeleteMetadata,
+                    ),
+                    proptest::strategy::Strategy::prop_map(
+                        0..SOFT_FILES.len(),
+                        SoftOp::RestoreMetadata,
+                    ),
+                    proptest::strategy::Strategy::prop_map(
+                        0..SOFT_FILES.len(),
+                        SoftOp::SoftDeleteLocation,
+                    ),
+                    proptest::strategy::Strategy::prop_map(
+                        0..SOFT_FILES.len(),
+                        SoftOp::RestoreLocation,
+                    ),
+                ],
+                0..25,
+            ),
+        ) {
+            let (_td, repo) = test_db();
+            {
+                let conn = repo.conn.lock().expect("lock seed");
+                for (i, h) in SOFT_FILES.iter().enumerate() {
+                    insert_file(&conn, h, SOFT_VOL, &format!("soft_{i}.jpg"));
+                }
+            }
+
+            for op in &ops {
+                {
+                    let conn = repo.conn.lock().expect("lock op");
+                    match *op {
+                        SoftOp::AttachTag(f, t) => {
+                            attach_tag_raw(&conn, SOFT_FILES[f], SOFT_TAGS[t]);
+                        }
+                        SoftOp::DetachTag(f, t) => {
+                            detach_tag_raw(&conn, SOFT_FILES[f], SOFT_TAGS[t]);
+                        }
+                        SoftOp::SoftDeleteTag(t) => {
+                            soft_delete_tag_raw(&conn, SOFT_TAGS[t]);
+                        }
+                        SoftOp::RestoreTag(t) => {
+                            restore_tag_raw(&conn, SOFT_TAGS[t]);
+                        }
+                        SoftOp::SetMetadata(f, v) => {
+                            set_metadata_variant(&conn, SOFT_FILES[f], v);
+                        }
+                        SoftOp::SoftDeleteMetadata(f) => {
+                            soft_delete_metadata(&conn, SOFT_FILES[f]);
+                        }
+                        SoftOp::RestoreMetadata(f) => {
+                            restore_metadata_raw(&conn, SOFT_FILES[f]);
+                        }
+                        SoftOp::SoftDeleteLocation(f) => {
+                            soft_delete_location(
+                                &conn,
+                                SOFT_FILES[f],
+                                &format!("soft_{f}.jpg"),
+                            );
+                        }
+                        SoftOp::RestoreLocation(f) => {
+                            restore_location(
+                                &conn,
+                                SOFT_FILES[f],
+                                &format!("soft_{f}.jpg"),
+                            );
+                        }
+                    }
+                }
+
+                let (actual, expected) = {
+                    let conn = repo.conn.lock().expect("lock invariant");
+                    (read_search_content(&conn), compute_ground_truth(&conn))
+                };
+                proptest::prop_assert_eq!(
+                    actual,
+                    expected,
+                    "search_content drifted from ground truth after op {:?} in sequence {:?}",
+                    op, ops
+                );
             }
         }
     }

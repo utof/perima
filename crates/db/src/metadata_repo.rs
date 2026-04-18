@@ -383,28 +383,54 @@ impl MetadataRepository for SqliteMetadataRepository {
         // from "row present with all-NULL optional fields" — the
         // latter is a legitimate state (extractor ran on an
         // unsupported MIME and wrote an empty row).
-        let mut stmt = conn
-            .prepare(
-                "SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
-                        fl.status, fl.first_seen,
-                        fm.updated_at,
-                        fm.width, fm.height, fm.duration_ms, fm.captured_at,
-                        fm.camera_make, fm.camera_model, fm.codec, fm.bitrate_bps,
-                        fm.mime_type, fm.thumbnail_path, fm.thumbnail_status
-                 FROM file_locations fl
-                 JOIN files f ON f.blake3_hash = fl.blake3_hash
-                 LEFT JOIN file_metadata fm
-                   ON fm.blake3_hash = fl.blake3_hash
-                  AND fm.deleted_at IS NULL
-                 WHERE fl.deleted_at IS NULL
-                   AND (?1 IS NULL OR fl.volume_id = ?1)
-                 ORDER BY fl.relative_path
-                 LIMIT ?2",
-            )
-            .map_err(Error::from)?;
+        //
+        // WHY separate SQL strings per branch: the `(?1 IS NULL OR fl.volume_id = ?1)`
+        // OR-with-NULL predicate defeats index use on `idx_file_locations_volume_path`
+        // even when a concrete volume_id is supplied (SQLite's planner cannot
+        // factor NULL out of the disjunction). Branching at Rust level keeps
+        // both shapes index-eligible.
+        let sql: &str = if vol_filter.is_some() {
+            "SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
+                    fl.status, fl.first_seen,
+                    fm.updated_at,
+                    fm.width, fm.height, fm.duration_ms, fm.captured_at,
+                    fm.camera_make, fm.camera_model, fm.codec, fm.bitrate_bps,
+                    fm.mime_type, fm.thumbnail_path, fm.thumbnail_status
+             FROM file_locations fl
+             JOIN files f ON f.blake3_hash = fl.blake3_hash
+             LEFT JOIN file_metadata fm
+               ON fm.blake3_hash = fl.blake3_hash
+              AND fm.deleted_at IS NULL
+             WHERE fl.deleted_at IS NULL AND fl.volume_id = ?1
+             ORDER BY fl.relative_path
+             LIMIT ?2"
+        } else {
+            "SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
+                    fl.status, fl.first_seen,
+                    fm.updated_at,
+                    fm.width, fm.height, fm.duration_ms, fm.captured_at,
+                    fm.camera_make, fm.camera_model, fm.codec, fm.bitrate_bps,
+                    fm.mime_type, fm.thumbnail_path, fm.thumbnail_status
+             FROM file_locations fl
+             JOIN files f ON f.blake3_hash = fl.blake3_hash
+             LEFT JOIN file_metadata fm
+               ON fm.blake3_hash = fl.blake3_hash
+              AND fm.deleted_at IS NULL
+             WHERE fl.deleted_at IS NULL
+             ORDER BY fl.relative_path
+             LIMIT ?1"
+        };
+        let mut stmt = conn.prepare(sql).map_err(Error::from)?;
+
+        let limit_i64 = limit_to_i64(limit);
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(v) = vol_filter.as_deref() {
+            params.push(Box::new(v.to_owned()));
+        }
+        params.push(Box::new(limit_i64));
 
         let rows = stmt
-            .query_map(rusqlite::params![vol_filter, limit_to_i64(limit)], |row| {
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
                 let hash_hex: String = row.get(0)?;
                 let size: i64 = row.get(1)?;
                 let vol_str: String = row.get(2)?;
