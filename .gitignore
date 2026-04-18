@@ -1,7 +1,6 @@
 **/*.md
 !CHANGELOG.md
 !CLAUDE.md
-!CONTRIBUTING.md
 # WHY exception for docs/superpowers + CLAUDE.md: cloud agents
 # (scheduled remote triggers) clone the repo fresh and need spec/plan
 # artifacts + binding rules to continue autonomous work across
