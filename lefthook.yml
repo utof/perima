@@ -1,0 +1,76 @@
+# Lefthook config for perima — managed by lefthook; do not hand-roll
+# scripts/pre-commit again.
+#
+# Thin pre-commit (<10s) fires on every commit: fmt-check + typos +
+# ts-lint (glob-filtered so only relevant staged extensions trigger each
+# command). Thick pre-push (<90s) fires on push and mirrors CI.
+#
+# Escape hatches:
+#   LEFTHOOK=0 git commit ...          — skip all hooks
+#   LEFTHOOK=0 git push ...            — skip all hooks on push
+#   LEFTHOOK_EXCLUDE=name git commit   — skip a specific command
+#
+# WHY inline PATH export: git hooks run in non-interactive shells that
+# don't source ~/.bashrc; cargo-installed binaries aren't on PATH.
+# Env vars are prepended inline rather than via `rc` because POSIX sh
+# (dash) rejects `. relative-path` without a leading `./`, and lefthook
+# generates `[ -f .lefthook-rc.sh ] && . .lefthook-rc.sh` which fails
+# on dash. Per-command env is reliable across all POSIX shells.
+#
+# WHY PKG_CONFIG_PATH + LIBRARY_PATH per Rust command: Tauri toolchain
+# (webkit2gtk/libsoup) lives under /tmp/tauri-libs on this dev VM.
+# Without these paths, cargo build steps for perima-desktop fail to
+# locate system libraries during clippy / test / doc.
+
+min_version: "2.1.0"
+
+pre-commit:
+  parallel: true
+  commands:
+    rust-fmt:
+      # WHY glob: only runs when .rs files are staged — avoids a useless
+      # cargo fmt invocation on comment-only or docs-only commits.
+      glob: "*.rs"
+      run: export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" && cargo fmt --all -- --check
+    typos:
+      # WHY no glob: typos scans all text; it's fast enough to always run.
+      run: export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" && typos
+    ts-lint:
+      # WHY glob: only runs when TS/JS files are staged in apps/desktop.
+      root: apps/desktop
+      glob: "*.{ts,tsx,js,jsx}"
+      run: bun run lint
+
+pre-push:
+  # WHY parallel:false — steps share the incremental compile cache;
+  # serial ordering is predictable and avoids races on target/.
+  parallel: false
+  commands:
+    clippy:
+      env:
+        PKG_CONFIG_PATH: /tmp/tauri-pc
+        LIBRARY_PATH: /tmp/tauri-libs:/usr/lib/x86_64-linux-gnu
+      run: export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" && cargo clippy --workspace --all-targets -- -D warnings
+    cargo-test:
+      env:
+        PKG_CONFIG_PATH: /tmp/tauri-pc
+        LIBRARY_PATH: /tmp/tauri-libs:/usr/lib/x86_64-linux-gnu
+      run: export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" && cargo test --workspace --all-targets
+    cargo-doctest:
+      env:
+        PKG_CONFIG_PATH: /tmp/tauri-pc
+        LIBRARY_PATH: /tmp/tauri-libs:/usr/lib/x86_64-linux-gnu
+      run: export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" && cargo test --workspace --doc
+    docs-coverage:
+      env:
+        PKG_CONFIG_PATH: /tmp/tauri-pc
+        LIBRARY_PATH: /tmp/tauri-libs:/usr/lib/x86_64-linux-gnu
+      run: export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" && cargo doc --workspace --no-deps
+    cargo-deny:
+      run: export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" && cargo deny check
+    frontend-build:
+      root: apps/desktop
+      run: bun install --frozen-lockfile && bun run build
+    frontend-test:
+      root: apps/desktop
+      run: bun run test

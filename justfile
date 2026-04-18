@@ -50,6 +50,11 @@ deny:
 typos:
     typos
 
+# Thin gate — per-commit surface (matches lefthook pre-commit).
+ci-fast: fmt-check typos lint-frontend
+
+# Thick gate — pre-push + manual surface. Equivalent to old `ci`;
+# kept for back-compat so `just ci` still runs the full pipeline.
 ci: fmt-check clippy test doctest docs-coverage deny typos build-frontend test-frontend lint-frontend
 
 verify:
@@ -60,8 +65,4 @@ verify:
     fi
 
 install-hooks:
-    cp scripts/pre-commit .git/hooks/pre-commit
-    chmod +x .git/hooks/pre-commit
-
-test-hook:
-    bash scripts/test-precommit-hook.sh
+    bunx lefthook install
