@@ -14,6 +14,32 @@ land changes consistent with the existing workflow.
   AI-driven. Human steering happens at checkpoints; see `CLAUDE.md` for rules.
 - Releases are semver tags (`v0.N.x`) cut by `release-plz`.
 
+### First-time setup
+
+Install git hooks after a fresh clone so pre-commit (format + spellcheck)
+and pre-push (tests + build + lint) fire automatically:
+
+```bash
+just install-hooks    # runs `bunx lefthook install`
+```
+
+**Prereqs:** `bun` (hooks invoke `bunx lefthook`). Install from
+<https://bun.sh> or via your package manager. `cargo install lefthook` does
+NOT work — the crate isn't on crates.io.
+
+**Escape hatches** (use sparingly; CI is the authoritative gate):
+
+- `LEFTHOOK=0 git commit …` — skip all hooks on commit.
+- `LEFTHOOK=0 git push …` — skip all hooks on push.
+- `LEFTHOOK_EXCLUDE=clippy,cargo-test git push …` — skip specific commands.
+
+Prefer these over `--no-verify` (which is forbidden by project rule —
+`LEFTHOOK=0` is auditable; `--no-verify` silently bypasses everything).
+
+For manual full-pipeline runs: `just ci` (equivalent to the pre-push
+surface + frontend lint). For the thin pre-commit surface only:
+`just ci-fast`.
+
 ---
 
 ## Opening an issue

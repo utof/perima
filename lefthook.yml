@@ -28,9 +28,10 @@ pre-commit:
   parallel: true
   commands:
     rust-fmt:
-      # WHY glob: only runs when .rs files are staged — avoids a useless
-      # cargo fmt invocation on comment-only or docs-only commits.
-      glob: "*.rs"
+      # WHY glob: only runs when .rs or Cargo.toml files are staged —
+      # cargo fmt formats both; avoids a useless invocation on comment-
+      # only or docs-only commits.
+      glob: "*.{rs,toml}"
       run: export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" && cargo fmt --all -- --check
     typos:
       # WHY no glob: typos scans all text; it's fast enough to always run.
