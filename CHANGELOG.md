@@ -12,6 +12,31 @@ roadmap milestone triggers `1.0.0`.
 
 ## [Unreleased]
 
+## [0.6.4] — 2026-04-18
+
+### Fixed
+
+- **Deleted-tag token leak in FTS.** V007 aggregations filtered `ft.deleted_at IS NULL` but never `t.deleted_at IS NULL`; soft-deleting a tag left its name tokens matchable in search forever, even after `rebuild()`. V008 adds the missing filter to every aggregation site + a dedicated `search_after_tag_soft_delete_or_restore` trigger covering both transition directions.
+- **Representative-path overwrite on hash change.** V007's `search_after_location_hash_change` rewrote `search_content.filename`/`relative_path` with `NEW.*` values on every hash change, clobbering the first-seen representative's indexed path when a non-rep location's hash flipped to a hash that already had a representative. V008 splits the trigger into `_retire` (OLD hash; always) and `_seed` (NEW hash; only when `NEW.deleted_at IS NULL`); `_seed`'s refresh reads path from joined live state via the same first-seen-active subquery used everywhere else.
+- **Combined hash-change + soft-delete leaked tombstoned NEW hash.** The split `_seed` trigger now WHEN-gates on `NEW.deleted_at IS NULL`; a single UPDATE mutating both `blake3_hash` and `deleted_at` no longer inserts a live FTS doc for a tombstoned row.
+- **Location restore was a no-op.** V007 had no inverse for `search_after_location_soft_delete`; clearing `deleted_at` on a previously-retired row never recreated the FTS doc. New `search_after_location_restore` trigger refreshes from joined live state.
+- **Metadata soft-delete left tokens indexed.** V007's `search_after_metadata_update` blindly copied `NEW.mime_type` / `camera_model` / `captured_at` with no `deleted_at` guard. V008's body uses CASE on `NEW.deleted_at` — live metadata copies values, tombstoned metadata clears them. Single body handles both transition directions.
+- **Tombstoned-metadata INSERT seeded live tokens (CRDT-merge scenario).** Post-V008 reviewer caught that `search_after_metadata_insert` was still unguarded — a CRDT merge replicating a soft-deleted metadata row as an INSERT would seed tokens from a row the peer had already deleted. Trigger now WHEN-gates on `NEW.deleted_at IS NULL`.
+- **Fresh-location seed re-resurrected tombstoned tags / metadata.** Same reviewer pass: `search_after_file_locations_insert` joined `file_tags`/`file_metadata` without `t.deleted_at IS NULL` / `m.deleted_at IS NULL` filters. A new location inserted after prior-location retirement re-seeded `search_content` with tokens from soft-deleted tags and metadata. V008 adds the missing filters.
+- **Volume-filter SQL defeated its own index.** `list_file_locations` and `list_with_metadata` used `(?1 IS NULL OR fl.volume_id = ?1)`; EXPLAIN QUERY PLAN confirmed the OR-with-NULL predicate bypassed `idx_file_locations_volume_path` even when a concrete `volume_id` was supplied. Both now branch at the Rust layer into index-eligible SQL per `vol_filter.is_some()`.
+- **`rebuild()` dropped the same `t.deleted_at` / `m.deleted_at` filters.** Aligned with V008's trigger aggregations so incremental and bulk-rebuild paths converge on identical ground truth.
+
+### Added
+
+- **V008 migration: `search_triggers_soft_delete.sql`.** Drops + recreates 8 V007 triggers with correct filters, adds 3 new triggers (`search_after_tag_soft_delete_or_restore`, `search_after_location_restore`, split `_retire`/`_seed` for hash change), + partial covering index `idx_file_locations_rep_active(blake3_hash, first_seen, id) WHERE deleted_at IS NULL` for representative-selection subqueries.
+- **Ground-truth proptest** (`fts_matches_ground_truth_under_soft_delete_churn`). 9-op soft-delete universe (attach/detach tag, soft-delete/restore tag, set/soft-delete/restore metadata, soft-delete/restore location) × 256 cases. Invariant: `search_content` computed via per-field ground-truth subqueries — **independent of `rebuild()`'s SQL shape**, so a future bug re-entering both trigger and rebuild paths still fails here.
+- **Regression tests T43–T48** pinning every fixed bug. Red-before-fix, green-after — verified during systematic debugging phase.
+
+### Process
+
+- Three-LLM adversarial chain: codex (GPT-5.4) adversarial audit → Opus reviewer on V008 draft → Opus delta-reviewer on round-2 fixes. Chain caught 11/11 in-class findings; delta review returned clean. Methodology captured in `docs/verification-plan.md` for the remaining 5 scopes (fs, hash, desktop, frontend, tests, architecture).
+- Follow-up issues filed, not blockers: #56 (proptest op-universe — add RehashLocation + RenameLocation), #57 (EXPLAIN QUERY PLAN assertion test for partial-index adoption), #58 (SQL migration-file linter), #59 (view-based aggregation refactor — v0.7 candidate), #60 (rebuild() startup scalability), #61 (error taxonomy granularity).
+
 ## [0.6.3] — 2026-04-17
 
 ### Fixed
