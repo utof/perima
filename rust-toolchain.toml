@@ -1,0 +1,13 @@
+[toolchain]
+# WHY: enforce perima's declared MSRV. Without this pin, every `cargo`
+# invocation would resolve to whatever stable is installed locally or
+# to `dtolnay/rust-toolchain@stable` in CI — allowing code to silently
+# depend on a post-MSRV API and breaking builds on machines honoring
+# the declared MSRV. Pinning here makes `rust-version` in Cargo.toml
+# enforced rather than decorative.
+#
+# Channel matches `rust-version` in the workspace Cargo.toml. Bump in
+# lockstep with any dep-requirement upgrade (e.g., if `sysinfo` needs
+# 1.90, bump both to 1.90 in the same commit).
+channel = "1.88"
+components = ["rustfmt", "clippy"]

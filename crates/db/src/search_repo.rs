@@ -1637,7 +1637,7 @@ mod tests {
                     |r| r.get(0),
                 )
                 .expect("rep path");
-            let (mime, cam, cap): (String, String, String) = conn
+            let (mime, camera, captured): (String, String, String) = conn
                 .query_row(
                     "SELECT COALESCE(mime_type, ''),
                             COALESCE(camera_model, ''),
@@ -1670,8 +1670,8 @@ mod tests {
                 blake3_hash: h,
                 relative_path: path.clone(),
                 mime_type: mime,
-                camera_model: cam,
-                captured_at: cap,
+                camera_model: camera,
+                captured_at: captured,
                 tags: tag_names.join(" "),
             });
         }
