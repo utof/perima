@@ -29,7 +29,7 @@ pub(crate) enum TagAction {
         path: PathBuf,
         /// One or more tag names to attach.
         ///
-        /// WHY required + 1..: clap's default for Vec<T> is "zero or
+        /// WHY required + 1..: clap's default for `Vec<T>` is "zero or
         /// more positionals" — `perima tag add foo.jpg` would silently
         /// no-op. Force at least one tag argument so the error is a
         /// clear "missing required tag" message instead of success-

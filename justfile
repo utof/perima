@@ -27,7 +27,7 @@ mdbook-test:
     cargo test --workspace --doc -- --show-output
 
 docs-coverage:
-    cargo doc --workspace --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
 fmt-check:
     cargo fmt --all -- --check
