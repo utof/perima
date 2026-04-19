@@ -50,6 +50,10 @@ pub fn normalize(raw: &str) -> Result<String, CoreError> {
     Ok(normalized)
 }
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "tests: unwrap is the assertion — a panic is a failing test by design"
+)]
 #[cfg(test)]
 mod tests {
     use super::*;

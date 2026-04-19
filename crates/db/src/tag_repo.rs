@@ -381,6 +381,10 @@ impl TagRepository for SqliteTagRepository {
     }
 }
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "tests: unwrap is the assertion — a panic is a failing test by design"
+)]
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Barrier};
