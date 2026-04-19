@@ -4,7 +4,7 @@
 /// `tracing::error!` with thread info. Replaces the default
 /// "thread 'xxx' panicked at …" so background rayon threads don't
 /// die silently.
-pub fn install() {
+pub(crate) fn install() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let thread = std::thread::current();

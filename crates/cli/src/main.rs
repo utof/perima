@@ -6,12 +6,16 @@
     clippy::print_stderr,
     reason = "CLI's purpose is user-facing output to stdout/stderr. Migrate to `tracing` for structured logs in a future wave; user-facing output stays on println!/eprintln!."
 )]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "Binary crate: modules are pub(crate) to satisfy unreachable_pub; items inside are also pub(crate) for explicit scope signaling. redundant_pub_crate fires on pub(crate)-inside-pub(crate) but the intent is explicit, not accidental."
+)]
 
-mod cmd;
-mod config;
-mod logging;
-mod panic;
-mod signals;
+pub(crate) mod cmd;
+pub(crate) mod config;
+pub(crate) mod logging;
+pub(crate) mod panic;
+pub(crate) mod signals;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

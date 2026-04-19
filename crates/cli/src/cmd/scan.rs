@@ -24,7 +24,7 @@ use crate::signals::Cancellation;
 /// tests use to complete comfortably, short enough that Ctrl-C remains
 /// responsive (the drain also polls cancel). `--no-wait-metadata`
 /// bypasses this when the user wants fast scan exit.
-pub const METADATA_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const METADATA_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Arguments for the scan command.
 // WHY allow(struct_excessive_bools): each flag corresponds to a
@@ -34,7 +34,7 @@ pub const METADATA_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 // Per plan the flags stay individually named.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
-pub struct ScanArgs {
+pub(crate) struct ScanArgs {
     /// Root directory to walk.
     pub root: PathBuf,
     /// When true, hashes and prints but skips all DB writes.
@@ -61,7 +61,7 @@ pub struct ScanArgs {
 
 /// Scan statistics.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct ScanStats {
+pub(crate) struct ScanStats {
     /// Files newly indexed.
     pub new: u64,
     /// Files already present (unchanged or updated).
@@ -72,7 +72,7 @@ pub struct ScanStats {
 
 /// Exit code returned to `main`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExitCode {
+pub(crate) enum ExitCode {
     /// Completed normally.
     Success,
     /// Ctrl-C received; partial scan summarized.
@@ -84,7 +84,7 @@ pub enum ExitCode {
 ///
 /// WHY type alias: the full `Option<&dyn Fn(...)>` signature trips
 /// `clippy::type_complexity`; a named alias keeps the `run` signature readable.
-pub type OnPersistFn<'a> = Option<&'a dyn Fn(&MediaPath, VolumeId, DeviceId)>;
+pub(crate) type OnPersistFn<'a> = Option<&'a dyn Fn(&MediaPath, VolumeId, DeviceId)>;
 
 /// Execute `scan`.
 ///
@@ -132,7 +132,7 @@ pub type OnPersistFn<'a> = Option<&'a dyn Fn(&MediaPath, VolumeId, DeviceId)>;
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::future_not_send)]
 #[allow(clippy::cognitive_complexity)]
-pub async fn run<S, H, FR, VR>(
+pub(crate) async fn run<S, H, FR, VR>(
     scanner: &S,
     hasher: &H,
     mut file_repo: Option<&mut FR>,

@@ -14,7 +14,7 @@ use super::metadata::find_by_absolute_suffix;
 
 /// Arguments for the `perima tag` command.
 #[derive(clap::Args, Debug)]
-pub struct TagArgs {
+pub(crate) struct TagArgs {
     /// The tag sub-action to perform.
     #[command(subcommand)]
     pub action: TagAction,
@@ -22,7 +22,7 @@ pub struct TagArgs {
 
 /// Individual actions available under `perima tag`.
 #[derive(clap::Subcommand, Debug)]
-pub enum TagAction {
+pub(crate) enum TagAction {
     /// Attach one or more labels to a file.
     Add {
         /// Path to the file to tag.
@@ -58,7 +58,7 @@ pub enum TagAction {
 /// Returns [`CoreError::InvalidPath`] when the file does not exist or
 /// is not yet indexed (run `perima scan` first); propagates
 /// [`CoreError`] from tag normalization, DB access, and I/O.
-pub fn run<T, F>(
+pub(crate) fn run<T, F>(
     tag_repo: &T,
     file_repo: &F,
     device: DeviceId,

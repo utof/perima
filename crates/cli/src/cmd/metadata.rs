@@ -28,14 +28,14 @@ use tokio_util::sync::CancellationToken;
 /// WHY 3 s: typical image/video extraction completes in well under 500 ms;
 /// 3 s is >5× headroom for slow disks / large files. Longer waits make
 /// `perima metadata` feel unresponsive; shorter waits flake on CI.
-pub const POLL_TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) const POLL_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Per-iteration backoff while polling for the metadata row.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Arguments for the metadata command.
 #[derive(Debug, Clone)]
-pub struct MetadataArgs {
+pub(crate) struct MetadataArgs {
     /// Path to the file whose metadata should be re-extracted.
     pub path: PathBuf,
     /// When `true`, emit JSON instead of a human-readable table.
@@ -48,7 +48,11 @@ pub struct MetadataArgs {
 /// Returns [`CoreError::InvalidPath`] when the file does not exist or
 /// is not yet indexed (run `perima scan` first); propagates
 /// [`CoreError`] from volume detection, DB access, and the extractor.
-pub async fn run(data_dir: &Path, device: DeviceId, args: &MetadataArgs) -> Result<(), CoreError> {
+pub(crate) async fn run(
+    data_dir: &Path,
+    device: DeviceId,
+    args: &MetadataArgs,
+) -> Result<(), CoreError> {
     validate_file(&args.path)?;
     let absolute_path = dunce::canonicalize(&args.path).map_err(CoreError::Io)?;
 
@@ -184,7 +188,7 @@ fn validate_file(path: &Path) -> Result<(), CoreError> {
 /// without duplicating the suffix-match logic. The enclosing `cmd`
 /// module is private to the crate binary, so `pub` here is effectively
 /// crate-private.
-pub fn find_by_absolute_suffix<'a>(
+pub(crate) fn find_by_absolute_suffix<'a>(
     records: &'a [FileLocationRecord],
     absolute: &str,
 ) -> Option<&'a FileLocationRecord> {
