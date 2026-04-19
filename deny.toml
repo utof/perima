@@ -65,9 +65,7 @@ ignore = [
     { id = "RUSTSEC-2025-0081", reason = "unic-ucd-ident: tauri-utils transitive; no upgrade" },
     # additional unic advisories identified during initial deny.toml tuning
     { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version: tauri-utils transitive; no upgrade" },
-    { id = "RUSTSEC-2025-0099", reason = "unic-char-property: tauri-utils transitive; no upgrade" },
     { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident: tauri-utils transitive; no upgrade" },
-    { id = "RUSTSEC-2025-0101", reason = "tauri-utils transitive via urlpattern; no upgrade" },
     # paste macro — unmaintained; GTK bindings transitive.
     { id = "RUSTSEC-2024-0436", reason = "paste: GTK-rs transitive; no direct dep" },
     # proc-macro-error — unmaintained; GTK bindings transitive.
