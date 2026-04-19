@@ -12,6 +12,7 @@ targets = [
 [licenses]
 # Explicit allowlist. Add more as deps require.
 allow = [
+    "AGPL-3.0-or-later",  # perima's own license (applies to workspace crates)
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",  # used by target-lexicon (Tauri transitive)
     "MIT",
