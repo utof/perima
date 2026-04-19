@@ -1,6 +1,11 @@
 //! `perima` command-line entry point.
 
 #![forbid(unsafe_code)]
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "CLI's purpose is user-facing output to stdout/stderr. Migrate to `tracing` for structured logs in a future wave; user-facing output stays on println!/eprintln!."
+)]
 
 mod cmd;
 mod config;
