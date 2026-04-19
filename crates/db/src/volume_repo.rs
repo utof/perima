@@ -22,6 +22,13 @@ pub struct SqliteVolumeRepository {
     conn: Mutex<Connection>,
 }
 
+impl std::fmt::Debug for SqliteVolumeRepository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteVolumeRepository")
+            .finish_non_exhaustive()
+    }
+}
+
 impl SqliteVolumeRepository {
     /// Wrap an existing connection. Caller must have run migrations first.
     pub const fn new(conn: Connection) -> Self {

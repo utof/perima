@@ -46,6 +46,12 @@ pub struct ThumbnailGenerator {
     enabled: bool,
 }
 
+impl std::fmt::Debug for ThumbnailGenerator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ThumbnailGenerator").finish_non_exhaustive()
+    }
+}
+
 // WHY no runtime quality parameter: the pure-Rust `image` crate
 // encodes WebP losslessly in v0.25 and ignores a quality knob. The
 // plan's q=85 target documents intent for a future `libwebp` swap;

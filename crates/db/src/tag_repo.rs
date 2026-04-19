@@ -23,6 +23,13 @@ pub struct SqliteTagRepository {
     conn: Mutex<Connection>,
 }
 
+impl std::fmt::Debug for SqliteTagRepository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteTagRepository")
+            .finish_non_exhaustive()
+    }
+}
+
 impl SqliteTagRepository {
     /// Wrap an existing connection. Caller must have run migrations
     /// (at least through V005) before constructing this.

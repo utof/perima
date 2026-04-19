@@ -32,6 +32,13 @@ pub struct SqliteMetadataRepository {
     conn: Mutex<Connection>,
 }
 
+impl std::fmt::Debug for SqliteMetadataRepository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteMetadataRepository")
+            .finish_non_exhaustive()
+    }
+}
+
 impl SqliteMetadataRepository {
     /// Wrap an existing connection. The caller must have run
     /// migrations (at least V001 + V002) before constructing this.

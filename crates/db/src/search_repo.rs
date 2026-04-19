@@ -17,6 +17,13 @@ pub struct SqliteSearchRepository {
     conn: Mutex<Connection>,
 }
 
+impl std::fmt::Debug for SqliteSearchRepository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteSearchRepository")
+            .finish_non_exhaustive()
+    }
+}
+
 impl SqliteSearchRepository {
     /// Wrap an existing connection. Caller must have run migrations
     /// through V007 before constructing this.
