@@ -8,14 +8,14 @@
 )]
 #![allow(
     clippy::redundant_pub_crate,
-    reason = "Binary crate: modules are pub(crate) to satisfy unreachable_pub; items inside are also pub(crate) for explicit scope signaling. redundant_pub_crate fires on pub(crate)-inside-pub(crate) but the intent is explicit, not accidental."
+    reason = "Binary crate. clippy::nursery::redundant_pub_crate fires on pub(crate) items inside private `mod` blocks because pub(crate) is technically redundant there (the private mod already restricts visibility). We keep items pub(crate) anyway for explicit scope signalling and suppress the nursery lint crate-wide."
 )]
 
-pub(crate) mod cmd;
-pub(crate) mod config;
-pub(crate) mod logging;
-pub(crate) mod panic;
-pub(crate) mod signals;
+mod cmd;
+mod config;
+mod logging;
+mod panic;
+mod signals;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
