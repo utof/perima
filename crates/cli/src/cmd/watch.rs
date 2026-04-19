@@ -199,7 +199,7 @@ pub async fn run(
     let vol_conn = open_and_migrate(&db_path)?;
     let file_conn = open_and_migrate(&db_path)?;
 
-    let mut vol_repo = SqliteVolumeRepository::new(vol_conn);
+    let vol_repo = SqliteVolumeRepository::new(vol_conn);
     let volume_id = vol_repo.find_or_create(&detected.identifiers, device_id)?;
     vol_repo.record_mount(volume_id, device_id, &detected.mount_point)?;
     drop(vol_repo);

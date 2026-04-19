@@ -66,7 +66,7 @@ pub async fn run(data_dir: &Path, device: DeviceId, args: &MetadataArgs) -> Resu
     // under WAL mode a fresh open is ~microseconds. Sharing a single
     // connection across repos would require wrapping it in another layer
     // of `Mutex`, which none of the repos' `new(...)` constructors accept.
-    let mut vol_repo = SqliteVolumeRepository::new(open_and_migrate(&db_path)?);
+    let vol_repo = SqliteVolumeRepository::new(open_and_migrate(&db_path)?);
     let volume_id = vol_repo.find_or_create(&detected.identifiers, device)?;
     drop(vol_repo);
 

@@ -12,7 +12,7 @@ pub trait VolumeRepository: Send + Sync {
     /// # Errors
     /// `CoreError::Internal` on adapter failure.
     fn find_or_create(
-        &mut self,
+        &self,
         ident: &VolumeIdentifiers,
         device: DeviceId,
     ) -> Result<VolumeId, CoreError>;
@@ -22,7 +22,7 @@ pub trait VolumeRepository: Send + Sync {
     /// # Errors
     /// `CoreError::Internal` on adapter failure.
     fn record_mount(
-        &mut self,
+        &self,
         volume: VolumeId,
         machine: DeviceId,
         mount: &Path,

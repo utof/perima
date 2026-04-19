@@ -12,11 +12,7 @@ pub trait FileRepository: Send + Sync {
     /// # Errors
     /// Adapter-level errors are surfaced as `CoreError::Internal`
     /// unless they map to a typed variant.
-    fn upsert_file(
-        &mut self,
-        file: &HashedFile,
-        device: DeviceId,
-    ) -> Result<UpsertOutcome, CoreError>;
+    fn upsert_file(&self, file: &HashedFile, device: DeviceId) -> Result<UpsertOutcome, CoreError>;
 
     /// Upsert a `file_locations` row for `(volume, relative_path)`.
     ///
@@ -24,7 +20,7 @@ pub trait FileRepository: Send + Sync {
     /// Returns `CoreError::Duplicate` if the app-level uniqueness
     /// check rejects the row.
     fn upsert_location(
-        &mut self,
+        &self,
         hash: &BlakeHash,
         volume: VolumeId,
         path: &MediaPath,

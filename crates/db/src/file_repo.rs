@@ -263,11 +263,7 @@ impl SqliteFileRepository {
 }
 
 impl FileRepository for SqliteFileRepository {
-    fn upsert_file(
-        &mut self,
-        file: &HashedFile,
-        device: DeviceId,
-    ) -> Result<UpsertOutcome, CoreError> {
+    fn upsert_file(&self, file: &HashedFile, device: DeviceId) -> Result<UpsertOutcome, CoreError> {
         // WHY: PoisonError can only occur if a thread panicked while holding
         // the lock. In that case the DB state is unknown; propagate as Internal.
         let conn = self
@@ -321,7 +317,7 @@ impl FileRepository for SqliteFileRepository {
     }
 
     fn upsert_location(
-        &mut self,
+        &self,
         hash: &BlakeHash,
         volume: VolumeId,
         path: &MediaPath,
@@ -519,7 +515,7 @@ mod tests {
 
     #[test]
     fn upsert_file_inserts_new() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let f = sample_hashed_file(b"hello", "a.txt");
         let out = repo.upsert_file(&f, device()).expect("upsert");
         assert_eq!(out, UpsertOutcome::Inserted);
@@ -527,7 +523,7 @@ mod tests {
 
     #[test]
     fn upsert_file_unchanged_on_repeat() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let f = sample_hashed_file(b"hello", "a.txt");
         repo.upsert_file(&f, dev).expect("first");
@@ -537,7 +533,7 @@ mod tests {
 
     #[test]
     fn upsert_file_updated_on_size_change() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let f1 = sample_hashed_file(b"hello", "a.txt");
         repo.upsert_file(&f1, dev).expect("first");
@@ -550,7 +546,7 @@ mod tests {
 
     #[test]
     fn upsert_location_inserts_new() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let f = sample_hashed_file(b"hello", "a.txt");
         repo.upsert_file(&f, dev).expect("file");
@@ -562,7 +558,7 @@ mod tests {
 
     #[test]
     fn upsert_location_unchanged_on_repeat() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let f = sample_hashed_file(b"hello", "a.txt");
         repo.upsert_file(&f, dev).expect("file");
@@ -578,7 +574,7 @@ mod tests {
 
     #[test]
     fn upsert_location_updated_on_hash_change() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let f1 = sample_hashed_file(b"hello", "a.txt");
         let f2 = sample_hashed_file(b"world", "a.txt");
@@ -596,7 +592,7 @@ mod tests {
 
     #[test]
     fn list_file_locations_returns_all() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let vol = sentinel_volume();
         for (i, name) in ["a.txt", "b.txt", "c.txt"].iter().enumerate() {
@@ -614,7 +610,7 @@ mod tests {
 
     #[test]
     fn list_file_locations_respects_limit() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let vol = sentinel_volume();
         for i in 0..5 {
@@ -629,7 +625,7 @@ mod tests {
 
     #[test]
     fn list_file_locations_filters_by_volume() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let vol_a = VolumeId::new();
         let vol_b = VolumeId::new();
@@ -648,7 +644,7 @@ mod tests {
 
     #[test]
     fn migrate_sentinel_row_updates_volume_id() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let sentinel = sentinel_volume();
         let real_vol = VolumeId::new();
@@ -685,7 +681,7 @@ mod tests {
 
     #[test]
     fn migrate_sentinel_row_skips_non_sentinel() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let real_vol = VolumeId::new();
         let other_vol = VolumeId::new();
@@ -707,7 +703,7 @@ mod tests {
 
     #[test]
     fn update_status_to_missing() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let vol = VolumeId::new();
         let f = sample_hashed_file(b"missing_test", "img.jpg");
@@ -733,7 +729,7 @@ mod tests {
 
     #[test]
     fn update_status_to_stale() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let vol = VolumeId::new();
         let f = sample_hashed_file(b"stale_test", "doc.txt");
@@ -756,7 +752,7 @@ mod tests {
 
     #[test]
     fn update_location_path_renames() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let vol = VolumeId::new();
         let f = sample_hashed_file(b"rename_test", "old_name.jpg");
@@ -791,7 +787,7 @@ mod tests {
         // filesystem already has a file at new_path). Observable:
         // list_file_locations shows exactly the destination row, with the
         // destination's original hash untouched.
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let vol = VolumeId::new();
 
@@ -836,7 +832,7 @@ mod tests {
         // 1b edit. A plain rename (no active row at new_path) must update
         // the row in place and keep exactly one active row with the new
         // path and active status.
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let vol = VolumeId::new();
         let f = sample_hashed_file(b"normal_rename", "a.jpg");
@@ -879,7 +875,7 @@ mod tests {
         // Seed the files row so both threads can link a location to it.
         {
             let conn = open_and_migrate(&db_path).expect("seed open");
-            let mut seed = SqliteFileRepository::new(conn);
+            let seed = SqliteFileRepository::new(conn);
             let f = sample_hashed_file(b"shared", "race.jpg");
             seed.upsert_file(&f, dev).expect("seed file");
         }
@@ -894,7 +890,7 @@ mod tests {
             let path = f.discovered.relative_path.clone();
             handles.push(thread::spawn(move || {
                 let conn = open_and_migrate(&db_path).expect("open");
-                let mut repo = SqliteFileRepository::new(conn);
+                let repo = SqliteFileRepository::new(conn);
                 barrier.wait();
                 repo.upsert_location(&hash, vol, &path, dev)
                     .expect("upsert_location")
