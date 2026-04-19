@@ -414,7 +414,7 @@ where
 /// location record. Returns the location outcome so the caller can
 /// classify the result as new/existing.
 fn persist_file<R: FileRepository + ?Sized>(
-    repo: &mut R,
+    repo: &R,
     d: &DiscoveredFile,
     h: &BlakeHash,
     device: DeviceId,

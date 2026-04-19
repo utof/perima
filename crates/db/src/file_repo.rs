@@ -538,7 +538,7 @@ mod tests {
         let f1 = sample_hashed_file(b"hello", "a.txt");
         repo.upsert_file(&f1, dev).expect("first");
         // Same hash, different size (contrived but tests the branch).
-        let mut f2 = f1.clone();
+        let mut f2 = f1;
         f2.discovered.size = FileSize(999);
         let out = repo.upsert_file(&f2, dev).expect("second");
         assert_eq!(out, UpsertOutcome::Updated);
