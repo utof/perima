@@ -348,8 +348,8 @@ pub async fn run_scan_inner_with_metadata(
     let vol_conn = open_and_migrate(&db_path)?;
     let sentinel_conn = open_and_migrate(&db_path)?;
 
-    let mut file_repo = SqliteFileRepository::new(file_conn);
-    let mut vol_repo = SqliteVolumeRepository::new(vol_conn);
+    let file_repo = SqliteFileRepository::new(file_conn);
+    let vol_repo = SqliteVolumeRepository::new(vol_conn);
     let sentinel_repo = SqliteFileRepository::new(sentinel_conn);
 
     let on_persist = |path: &perima_core::MediaPath, volume: VolumeId, dev: DeviceId| {
@@ -369,8 +369,8 @@ pub async fn run_scan_inner_with_metadata(
     run_scan_live(
         &scanner,
         &hasher,
-        &mut file_repo,
-        &mut vol_repo,
+        &file_repo,
+        &vol_repo,
         Some(&on_persist),
         device_id,
         &canonical_root,
@@ -546,15 +546,12 @@ pub async fn start_watch(
     let vol_conn = open_and_migrate(&db_path).map_err(|e| e.to_string())?;
     let file_conn = open_and_migrate(&db_path).map_err(|e| e.to_string())?;
 
-    let mut vol_repo = SqliteVolumeRepository::new(vol_conn);
-    let volume_id = perima_core::VolumeRepository::find_or_create(
-        &mut vol_repo,
-        &detected.identifiers,
-        device_id,
-    )
-    .map_err(|e| e.to_string())?;
+    let vol_repo = SqliteVolumeRepository::new(vol_conn);
+    let volume_id =
+        perima_core::VolumeRepository::find_or_create(&vol_repo, &detected.identifiers, device_id)
+            .map_err(|e| e.to_string())?;
     perima_core::VolumeRepository::record_mount(
-        &mut vol_repo,
+        &vol_repo,
         volume_id,
         device_id,
         &detected.mount_point,
@@ -920,8 +917,8 @@ where
 async fn run_scan_live<S, H, FR, VR>(
     scanner: &S,
     hasher: &H,
-    file_repo: &mut FR,
-    volume_repo: &mut VR,
+    file_repo: &FR,
+    volume_repo: &VR,
     on_persist: OnPersistFn<'_>,
     device_id: DeviceId,
     canonical_root: &Path,
@@ -1004,16 +1001,14 @@ where
                     if matches!(
                         outcome,
                         perima_core::UpsertOutcome::Inserted | perima_core::UpsertOutcome::Updated
-                    ) {
-                        if let Some(q) = queue.as_ref() {
-                            if let Err(e) = q.enqueue(h, d.absolute_path.clone(), &queue_cancel) {
-                                tracing::warn!(
-                                    error = %e,
-                                    path = %d.absolute_path.display(),
-                                    "metadata enqueue failed; continuing scan",
-                                );
-                            }
-                        }
+                    ) && let Some(q) = queue.as_ref()
+                        && let Err(e) = q.enqueue(h, d.absolute_path.clone(), &queue_cancel)
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            path = %d.absolute_path.display(),
+                            "metadata enqueue failed; continuing scan",
+                        );
                     }
                     manifest_files.push(perima_core::HashedFile {
                         discovered: d,
@@ -1068,7 +1063,7 @@ where
 }
 
 fn persist_file<R: perima_core::FileRepository + ?Sized>(
-    repo: &mut R,
+    repo: &R,
     d: &perima_core::DiscoveredFile,
     h: &perima_core::BlakeHash,
     device: DeviceId,
