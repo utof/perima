@@ -29,6 +29,13 @@ jobs:
 
       - uses: taiki-e/install-action@just
 
+      # WHY: `just ci` runs `cargo deny check` and `typos`. Both are
+      # external binaries — neither ships with the Rust toolchain. Using
+      # taiki-e/install-action fetches prebuilt binaries (seconds) rather
+      # than `cargo install` (minutes), which matters on the 3-OS matrix.
+      - uses: taiki-e/install-action@cargo-deny
+      - uses: taiki-e/install-action@typos
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
