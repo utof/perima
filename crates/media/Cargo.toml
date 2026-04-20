@@ -9,6 +9,9 @@ publish = false  # WHY: intra-workspace only; not published to crates.io
 
 [dependencies]
 perima-core = { path = "../core" }
+# WHY crate-local (not workspace): L7 will separately update workspace deps;
+# keeping this local avoids any race between the two tasks.
+fast_image_resize = { version = "6", features = ["image"] }
 image.workspace        = true
 nom-exif.workspace     = true
 # WHY chrono: nom-exif's as_time_components() returns (NaiveDateTime, Option<FixedOffset>);
