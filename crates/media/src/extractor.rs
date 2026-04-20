@@ -74,12 +74,12 @@ impl MetadataExtractor for ImageExtractor {
 
 /// Read EXIF `DateTimeOriginal`, `Make`, and `Model` from an image.
 ///
-/// Uses `nom-exif`'s unified `MediaParser` / `MediaSource` API which
-/// returns strings bare (no quote-wrapping) and datetime values as typed
-/// `EntryValue::Time` (timezone-aware, RFC 3339) or
-/// `EntryValue::NaiveDateTime` (no timezone, formatted as
-/// `"YYYY-MM-DD HH:MM:SS"`). We normalise both to ISO 8601 with a `T`
-/// separator before returning.
+/// Uses `nom-exif`'s typed accessors: `as_str()` returns bare strings
+/// (no display quoting). `as_time_components()` returns
+/// `(NaiveDateTime, Option<FixedOffset>)`; we format naive →
+/// `"YYYY-MM-DDTHH:MM:SS"`, offset-aware → RFC 3339 with offset suffix
+/// via `chrono::DateTime::to_rfc3339`, bypassing the `Display` impl of
+/// the `#[non_exhaustive]` `EntryValue` enum.
 ///
 /// Returns `(None, None, None)` if the file has no EXIF segment, the
 /// segment is malformed, or the individual fields are absent. A missing
@@ -120,15 +120,18 @@ fn read_exif(path: &Path) -> (Option<String>, Option<String>, Option<String>) {
     };
     let exif: nom_exif::Exif = iter.into();
 
+    // WHY trim_end_matches: EXIF ASCII tags are often NUL-terminated or
+    // space-padded (e.g. "NIKON CORPORATION   \0"). nom-exif's as_str()
+    // does not strip these; we normalise before storing.
     let camera_make = exif
         .get(nom_exif::ExifTag::Make)
         .and_then(|v| v.as_str())
-        .map(str::to_owned);
+        .map(|s| s.trim_end_matches(['\0', ' ']).to_owned());
 
     let camera_model = exif
         .get(nom_exif::ExifTag::Model)
         .and_then(|v| v.as_str())
-        .map(str::to_owned);
+        .map(|s| s.trim_end_matches(['\0', ' ']).to_owned());
 
     // WHY reshape: callers consume ISO 8601 throughout the DB
     // (`first_seen`, `last_seen`). Converting at extraction time keeps
@@ -146,6 +149,9 @@ fn read_exif(path: &Path) -> (Option<String>, Option<String>, Option<String>) {
             offset.map_or_else(
                 || naive.format("%Y-%m-%dT%H:%M:%S").to_string(),
                 |tz| {
+                    // WHY .single(): defensive — FixedOffset cannot produce
+                    // LocalResult::None/Ambiguous, but the typed shape is
+                    // forward-compatible if nom-exif ever exposes Tz-aware values.
                     naive.and_local_timezone(tz).single().map_or_else(
                         || naive.format("%Y-%m-%dT%H:%M:%S").to_string(),
                         |dt| dt.to_rfc3339(),

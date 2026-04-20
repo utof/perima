@@ -180,6 +180,158 @@ fn build_tiff_exif(datetime_original: &str, make: &str, model: &str) -> Vec<u8> 
     buf
 }
 
+/// Build a minimal JPEG containing SOI + APP0(JFIF) + APP1(EXIF) + EOI with
+/// both `DateTimeOriginal` (0x9003) and `OffsetTimeOriginal` (0x9011) set in
+/// the `ExifSubIFD`.
+///
+/// WHY separate helper (not a flag on `make_jpeg_with_exif`): keeping the
+/// two helpers independent avoids a boolean parameter that would change the
+/// byte layout mid-function and make the offset arithmetic harder to follow.
+fn make_jpeg_with_exif_offset(
+    datetime_original: &str,
+    offset: &str,
+    make: &str,
+    model: &str,
+    path: &Path,
+) -> PathBuf {
+    let tiff_bytes = build_tiff_exif_with_offset(datetime_original, offset, make, model);
+
+    let app1_payload_len = 2 + 6 + tiff_bytes.len();
+    let app1_len =
+        u16::try_from(app1_payload_len).expect("APP1 payload too large for a single segment");
+
+    let file = File::create(path).expect("create jpeg");
+    let mut w = BufWriter::new(file);
+    w.write_all(&[0xFF, 0xD8]).expect("SOI");
+    w.write_all(&[0xFF, 0xE0, 0x00, 0x10])
+        .expect("APP0 marker+len");
+    w.write_all(b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00")
+        .expect("JFIF payload");
+    w.write_all(&[0xFF, 0xE1]).expect("APP1 marker");
+    w.write_all(&app1_len.to_be_bytes()).expect("APP1 length");
+    w.write_all(b"Exif\0\0").expect("Exif identifier");
+    w.write_all(&tiff_bytes).expect("TIFF body");
+    w.write_all(&[0xFF, 0xD9]).expect("EOI");
+    w.flush().expect("flush jpeg");
+    path.to_path_buf()
+}
+
+/// Build a minimal little-endian TIFF block with two `ExifSubIFD` entries:
+/// `DateTimeOriginal` (0x9003) and `OffsetTimeOriginal` (0x9011).
+///
+/// Layout (offsets relative to start of TIFF block):
+/// ```text
+///  0x00  TIFF header (8 bytes): "II" + 0x002A + IFD0_offset=8
+///  0x08  IFD0 (42 bytes): count=3, [Make, Model, ExifIFDPointer], next=0
+///  0x32  ExifSubIFD (30 bytes): count=2, [DateTimeOriginal, OffsetTimeOriginal], next=0
+///  0x50  String area: Make\0, Model\0, DateTimeOriginal\0, OffsetTimeOriginal\0
+/// ```
+fn build_tiff_exif_with_offset(
+    datetime_original: &str,
+    offset: &str,
+    make: &str,
+    model: &str,
+) -> Vec<u8> {
+    const TAG_MAKE: u16 = 0x010F;
+    const TAG_MODEL: u16 = 0x0110;
+    const TAG_EXIF_IFD_POINTER: u16 = 0x8769;
+    const TAG_DATETIME_ORIGINAL: u16 = 0x9003;
+    const TAG_OFFSET_TIME_ORIGINAL: u16 = 0x9011;
+    const TYPE_ASCII: u16 = 2;
+    const TYPE_LONG: u16 = 4;
+
+    // IFD0: 2 + 3*12 + 4 = 42 → [8, 50)
+    // ExifSubIFD: 2 + 2*12 + 4 = 30 → [50, 80)
+    // String area from 80.
+    const IFD0_OFFSET: u32 = 8;
+    const IFD0_ENTRY_COUNT: u16 = 3;
+    const EXIF_SUBIFD_OFFSET: u32 = IFD0_OFFSET + 2 + (IFD0_ENTRY_COUNT as u32 * 12) + 4; // 50
+    const EXIF_SUBIFD_ENTRY_COUNT: u16 = 2;
+    const STRING_AREA: u32 = EXIF_SUBIFD_OFFSET + 2 + (EXIF_SUBIFD_ENTRY_COUNT as u32 * 12) + 4; // 80
+
+    let make_bytes: Vec<u8> = {
+        let mut v = make.as_bytes().to_vec();
+        v.push(0);
+        v
+    };
+    let model_bytes: Vec<u8> = {
+        let mut v = model.as_bytes().to_vec();
+        v.push(0);
+        v
+    };
+    let dt_bytes: Vec<u8> = {
+        let mut v = datetime_original.as_bytes().to_vec();
+        v.push(0);
+        v
+    };
+    // EXIF spec: OffsetTimeOriginal is ASCII, count includes the NUL.
+    let offset_bytes: Vec<u8> = {
+        let mut v = offset.as_bytes().to_vec();
+        v.push(0);
+        v
+    };
+
+    let make_len = u32::try_from(make_bytes.len()).expect("make too long");
+    let model_len = u32::try_from(model_bytes.len()).expect("model too long");
+    let dt_len = u32::try_from(dt_bytes.len()).expect("datetime too long");
+    let offset_len = u32::try_from(offset_bytes.len()).expect("offset too long");
+
+    let make_offset = STRING_AREA;
+    let model_offset = make_offset + make_len;
+    let dt_offset = model_offset + model_len;
+    let offset_str_offset = dt_offset + dt_len;
+
+    let mut buf = Vec::new();
+
+    // TIFF header.
+    buf.extend_from_slice(b"II");
+    buf.extend_from_slice(&42_u16.to_le_bytes());
+    buf.extend_from_slice(&IFD0_OFFSET.to_le_bytes());
+
+    // IFD0.
+    buf.extend_from_slice(&IFD0_ENTRY_COUNT.to_le_bytes());
+    // Make (0x010F)
+    buf.extend_from_slice(&TAG_MAKE.to_le_bytes());
+    buf.extend_from_slice(&TYPE_ASCII.to_le_bytes());
+    buf.extend_from_slice(&make_len.to_le_bytes());
+    buf.extend_from_slice(&make_offset.to_le_bytes());
+    // Model (0x0110)
+    buf.extend_from_slice(&TAG_MODEL.to_le_bytes());
+    buf.extend_from_slice(&TYPE_ASCII.to_le_bytes());
+    buf.extend_from_slice(&model_len.to_le_bytes());
+    buf.extend_from_slice(&model_offset.to_le_bytes());
+    // ExifIFDPointer (0x8769)
+    buf.extend_from_slice(&TAG_EXIF_IFD_POINTER.to_le_bytes());
+    buf.extend_from_slice(&TYPE_LONG.to_le_bytes());
+    buf.extend_from_slice(&1_u32.to_le_bytes());
+    buf.extend_from_slice(&EXIF_SUBIFD_OFFSET.to_le_bytes());
+    // IFD0 next-IFD pointer.
+    buf.extend_from_slice(&0_u32.to_le_bytes());
+
+    // ExifSubIFD (entries must be sorted ascending by tag).
+    buf.extend_from_slice(&EXIF_SUBIFD_ENTRY_COUNT.to_le_bytes());
+    // DateTimeOriginal (0x9003)
+    buf.extend_from_slice(&TAG_DATETIME_ORIGINAL.to_le_bytes());
+    buf.extend_from_slice(&TYPE_ASCII.to_le_bytes());
+    buf.extend_from_slice(&dt_len.to_le_bytes());
+    buf.extend_from_slice(&dt_offset.to_le_bytes());
+    // OffsetTimeOriginal (0x9011)
+    buf.extend_from_slice(&TAG_OFFSET_TIME_ORIGINAL.to_le_bytes());
+    buf.extend_from_slice(&TYPE_ASCII.to_le_bytes());
+    buf.extend_from_slice(&offset_len.to_le_bytes());
+    buf.extend_from_slice(&offset_str_offset.to_le_bytes());
+    // ExifSubIFD next-IFD pointer.
+    buf.extend_from_slice(&0_u32.to_le_bytes());
+
+    // String area.
+    buf.extend_from_slice(&make_bytes);
+    buf.extend_from_slice(&model_bytes);
+    buf.extend_from_slice(&dt_bytes);
+    buf.extend_from_slice(&offset_bytes);
+
+    buf
+}
+
 /// Synthesise a minimal valid MP4 with one ~1 second AVC video track.
 ///
 /// WHY programmatic: checking binary fixtures into git bloats the repo
@@ -288,6 +440,68 @@ fn image_extractor_jpeg_exif() {
     assert_eq!(meta.camera_make.as_deref(), Some("Canon"));
     assert_eq!(meta.camera_model.as_deref(), Some("EOS R5"));
     assert_eq!(meta.mime_type.as_deref(), Some("image/jpeg"));
+}
+
+#[test]
+fn image_extractor_jpeg_exif_with_offset() {
+    // WHY: exercises the FixedOffset branch of as_time_components() in
+    // read_exif. The OffsetTimeOriginal tag (0x9011, "+08:00") causes
+    // nom-exif to populate the Option<FixedOffset> field, which should
+    // produce an RFC 3339 string with the offset suffix.
+    let td = tempdir().expect("tempdir");
+    let path = td.path().join("exif_offset.jpg");
+    make_jpeg_with_exif_offset("2024:06:01 12:34:56", "+08:00", "Canon", "EOS R5", &path);
+
+    let bytes = std::fs::read(&path).expect("read jpeg");
+    assert_eq!(&bytes[0..2], &[0xFF, 0xD8], "must start with JPEG SOI");
+
+    let extractor = ImageExtractor::new();
+    let meta = extractor
+        .extract(dummy_hash(), &path, "image/jpeg")
+        .expect("extract jpeg with offset");
+    assert_eq!(
+        meta.captured_at.as_deref(),
+        Some("2024-06-01T12:34:56+08:00"),
+        "tz-aware EXIF must produce RFC 3339 with offset suffix",
+    );
+    assert_eq!(meta.camera_make.as_deref(), Some("Canon"));
+    assert_eq!(meta.camera_model.as_deref(), Some("EOS R5"));
+}
+
+#[test]
+fn image_extractor_jpeg_without_exif_returns_default() {
+    // WHY: exercises the has_exif() short-circuit path. A JPEG with only
+    // SOI + APP0(JFIF) + EOI has no APP1 segment, so nom-exif should
+    // report has_exif() == false and read_exif returns (None, None, None).
+    let td = tempdir().expect("tempdir");
+    let path = td.path().join("no_exif.jpg");
+
+    // Build a minimal JPEG: SOI + APP0(JFIF) + EOI — no APP1.
+    {
+        let file = File::create(&path).expect("create jpeg");
+        let mut w = BufWriter::new(file);
+        w.write_all(&[0xFF, 0xD8]).expect("SOI");
+        w.write_all(&[0xFF, 0xE0, 0x00, 0x10])
+            .expect("APP0 marker+len");
+        w.write_all(b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00")
+            .expect("JFIF payload");
+        w.write_all(&[0xFF, 0xD9]).expect("EOI");
+        w.flush().expect("flush");
+    }
+
+    let extractor = ImageExtractor::new();
+    let meta = extractor
+        .extract(dummy_hash(), &path, "image/jpeg")
+        .expect("extract jpeg without exif");
+    assert_eq!(
+        meta.captured_at, None,
+        "no-EXIF JPEG must have captured_at = None",
+    );
+    assert_eq!(meta.camera_make, None, "no-EXIF JPEG must have make = None");
+    assert_eq!(
+        meta.camera_model, None,
+        "no-EXIF JPEG must have model = None",
+    );
 }
 
 // ---------------------------------------------------------------------

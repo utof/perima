@@ -11,6 +11,10 @@ publish = false  # WHY: intra-workspace only; not published to crates.io
 perima-core = { path = "../core" }
 image.workspace        = true
 nom-exif.workspace     = true
+# WHY chrono: nom-exif's as_time_components() returns (NaiveDateTime, Option<FixedOffset>);
+# we need NaiveDateTime::format for the naive path and DateTime::to_rfc3339 for the
+# offset-aware path. No `use chrono::…` appears in media source files because the
+# inferred types flow from nom-exif's return values — the dep is real, just implicit.
 chrono.workspace       = true
 mp4parse.workspace     = true
 mime_guess.workspace   = true
