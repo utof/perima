@@ -20,6 +20,7 @@ perima-db    = { path = "../db" }
 perima-fs    = { path = "../fs" }
 perima-hash  = { path = "../hash" }
 perima-media.workspace = true
+miette.workspace            = true
 tauri.workspace             = true
 tauri-specta.workspace      = true
 specta.workspace            = true
