@@ -1,8 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access */
-// WHY: @babel/core ships no TypeScript declarations and @types/babel__core is not
-// in devDependencies. This test is a pure compile-pipeline canary (not shipped
-// code) so suppressing unsafe-* here is the right tradeoff vs adding a
-// separate @types package for a single test file.
 import { describe, expect, it } from "vitest";
 import * as babel from "@babel/core";
 // WHY: @babel/plugin-syntax-jsx is needed so preset-typescript (which handles
@@ -42,7 +37,12 @@ describe("react-compiler transform", () => {
         babelPluginSyntaxJsx,
         [
           "babel-plugin-react-compiler",
-          { target: "19", compilationMode: "annotation" },
+          {
+            // WHY: keep in sync with vite.config.ts's reactCompilerPreset target option;
+            //      a silent drift would assert the wrong runtime import path.
+            target: "19",
+            compilationMode: "annotation",
+          },
         ],
       ],
       babelrc: false,

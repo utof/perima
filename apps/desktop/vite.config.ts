@@ -18,6 +18,9 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig({
   plugins: [
     react(),
+    // WHY: panicThreshold defaults to `none` — Compiler silently skips bailout
+    //      components rather than failing the build; acceptable for a greenfield
+    //      frontend where the component surface is fully under our control.
     babel({ presets: [reactCompilerPreset({ target: "19" })] }),
     tailwindcss(),
   ],
@@ -34,6 +37,8 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["src/__tests__/setup.ts"],
     globals: true,
+    // WHY: tsc composite mode emits to dist-types; exclude it so vitest doesn't
+    //      double-run the compiled JS alongside the original TSX.
     exclude: ["dist-types/**", "node_modules/**"],
     include: ["src/**/*.{test,spec}.{ts,tsx}"],
   },
