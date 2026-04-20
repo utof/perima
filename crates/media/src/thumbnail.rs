@@ -207,22 +207,29 @@ impl ThumbnailGenerator {
             .map_err(|e| CoreError::Internal(format!("fast_image_resize: {e}")))?;
 
         // Wrap dst back into DynamicImage matching the source pixel type.
+        // WHY into_vec(): consumes `dst` and returns the already-allocated Vec<u8>
+        // without copying (BufferContainer::Owned path in fast_image_resize 6.x).
+        let buf = dst.into_vec();
         let resized = match pixel_type {
             fast_image_resize::PixelType::U8x3 => image::DynamicImage::ImageRgb8(
-                image::RgbImage::from_raw(dst_w, dst_h, dst.buffer().to_vec()).ok_or_else(
-                    || CoreError::Internal("RgbImage::from_raw returned None".into()),
-                )?,
+                image::RgbImage::from_raw(dst_w, dst_h, buf).ok_or_else(|| {
+                    CoreError::Internal("RgbImage::from_raw returned None".into())
+                })?,
             ),
             fast_image_resize::PixelType::U8x4 => image::DynamicImage::ImageRgba8(
-                image::RgbaImage::from_raw(dst_w, dst_h, dst.buffer().to_vec()).ok_or_else(
-                    || CoreError::Internal("RgbaImage::from_raw returned None".into()),
-                )?,
+                image::RgbaImage::from_raw(dst_w, dst_h, buf).ok_or_else(|| {
+                    CoreError::Internal("RgbaImage::from_raw returned None".into())
+                })?,
             ),
             fast_image_resize::PixelType::U8 => image::DynamicImage::ImageLuma8(
-                image::GrayImage::from_raw(dst_w, dst_h, dst.buffer().to_vec()).ok_or_else(
-                    || CoreError::Internal("GrayImage::from_raw returned None".into()),
-                )?,
+                image::GrayImage::from_raw(dst_w, dst_h, buf).ok_or_else(|| {
+                    CoreError::Internal("GrayImage::from_raw returned None".into())
+                })?,
             ),
+            // WHY defense-in-depth: coerce_for_resize guarantees U8/U8x3/U8x4
+            // above, so this arm is statically unreachable. The Err path exists
+            // to avoid a panic if a future fast_image_resize version adds new
+            // PixelType variants that bypass the coerce guarantee.
             other => {
                 return Err(CoreError::Internal(format!(
                     "fast_image_resize: thumbnail path saw unexpected pixel type {other:?}"
@@ -306,10 +313,11 @@ impl ThumbnailGenerator {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use std::path::Path;
 
-    use image::{ImageBuffer, Rgb};
+    use image::{DynamicImage, ImageBuffer, Rgb};
     use tempfile::TempDir;
 
     use super::*;
@@ -490,13 +498,8 @@ mod tests {
             elapsed / 50
         );
     }
-}
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod pixel_type_tests {
-    use super::*;
-    use image::DynamicImage;
+    // --- pixel-type preservation tests (merged from former mod pixel_type_tests) ---
 
     #[test]
     fn resize_preserves_rgb_source_as_rgb() {
@@ -554,5 +557,82 @@ mod pixel_type_tests {
             "16-bit source must coerce to 8-bit variant; got {:?}",
             resized.color()
         );
+    }
+
+    // --- new regression tests (fixes 4, 5, 6) ---
+
+    #[test]
+    fn resize_preserves_luma8_source_as_luma8() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tgen = ThumbnailGenerator::with_max_size(tmp.path().to_path_buf(), 64);
+
+        let luma = image::GrayImage::from_pixel(200, 100, image::Luma([128_u8]));
+        let src = DynamicImage::ImageLuma8(luma);
+
+        let resized = tgen.resize_image(src).expect("resize_image");
+
+        assert!(
+            matches!(resized, DynamicImage::ImageLuma8(_)),
+            "Luma8 source must stay Luma8 after resize; got {:?}",
+            resized.color()
+        );
+    }
+
+    #[test]
+    fn resize_coerces_lumaa8_to_rgba8_preserving_alpha() {
+        // coerce_for_resize promotes LumaA8 (grayscale + alpha) to RGBA8
+        // because fast_image_resize has no PixelType::U8x2 in our match.
+        // This test verifies alpha is preserved through the promotion.
+        let tmp = tempfile::tempdir().unwrap();
+        let tgen = ThumbnailGenerator::with_max_size(tmp.path().to_path_buf(), 64);
+
+        // Use a LumaA8 with non-opaque alpha so the test meaningfully
+        // verifies alpha survives.
+        let lumaa = image::ImageBuffer::<image::LumaA<u8>, _>::from_pixel(
+            200,
+            100,
+            image::LumaA([128, 180]),
+        );
+        let src = DynamicImage::ImageLumaA8(lumaa);
+
+        let resized = tgen.resize_image(src).expect("resize_image");
+
+        assert!(
+            matches!(resized, DynamicImage::ImageRgba8(_)),
+            "LumaA8 source must coerce to RGBA8 after resize; got {:?}",
+            resized.color()
+        );
+    }
+
+    #[test]
+    fn generate_handles_16bit_png_via_full_pipeline() {
+        // Regression: 16-bit PNG decodes to DynamicImage::ImageRgb16 (or Rgba16),
+        // which coerce_for_resize normalizes to RGBA8. Without the coerce path
+        // the pixel_type() call would fail. Verify the full generate() pipeline
+        // produces a thumbnail file for this exotic input.
+        let tmp = tempfile::tempdir().unwrap();
+        let src_path = tmp.path().join("16bit.png");
+
+        // Build a 16-bit RGB PNG and save it.
+        let rgb16 = image::ImageBuffer::<image::Rgb<u16>, _>::from_pixel(
+            300,
+            200,
+            image::Rgb([30000_u16, 20000, 10000]),
+        );
+        image::DynamicImage::ImageRgb16(rgb16)
+            .save(&src_path)
+            .expect("save 16-bit PNG");
+
+        let tgen = ThumbnailGenerator::with_max_size(tmp.path().to_path_buf(), 64);
+
+        // Fabricate a hash for the content-addressed thumbnail path.
+        let hash_bytes = *blake3::hash(b"16bit-png-test-fixture").as_bytes();
+        let hash = perima_core::BlakeHash::from_bytes(hash_bytes);
+
+        let out = tgen
+            .generate(&hash, &src_path)
+            .expect("generate")
+            .expect("Some path");
+        assert!(out.exists(), "Thumbnail file should exist at {out:?}");
     }
 }
