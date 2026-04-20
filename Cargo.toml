@@ -81,7 +81,7 @@ rayon        = "1"
 ctrlc        = { version = "3", features = ["termination"] }
 chrono       = { version = "0.4", features = ["serde"] }
 image        = "0.25"
-kamadak-exif = "0.5"
+nom-exif     = "2.7"
 mp4parse     = "0.17"
 mime_guess   = "2"
 

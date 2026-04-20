@@ -10,7 +10,7 @@ publish = false  # WHY: intra-workspace only; not published to crates.io
 [dependencies]
 perima-core = { path = "../core" }
 image.workspace        = true
-kamadak-exif.workspace = true
+nom-exif.workspace     = true
 mp4parse.workspace     = true
 mime_guess.workspace   = true
 tokio.workspace        = true

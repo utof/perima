@@ -1,20 +1,19 @@
 //! Metadata extractors for images and MP4/MOV video.
 //!
 //! `ImageExtractor` reads PNG/JPEG dimensions via the `image` crate and
-//! EXIF tags via `kamadak-exif`. `VideoExtractor` parses `moov`-box data
+//! EXIF tags via `nom-exif`. `VideoExtractor` parses `moov`-box data
 //! via Mozilla's `mp4parse` reader. `CompositeExtractor` dispatches to
 //! the first registered extractor whose [`MetadataExtractor::accepts`]
 //! returns `true` for the requested MIME.
 
 use std::fs::File;
-use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 
 use perima_core::{BlakeHash, CoreError, MediaMetadata, MetadataExtractor};
 
 /// Image metadata extractor backed by `image` (dimensions) and
-/// `kamadak-exif` (capture timestamp + camera).
+/// `nom-exif` (capture timestamp + camera).
 ///
 /// Handles every `image/*` MIME the `image` crate can decode.
 #[derive(Clone, Copy, Debug, Default)]
@@ -75,90 +74,83 @@ impl MetadataExtractor for ImageExtractor {
 
 /// Read EXIF `DateTimeOriginal`, `Make`, and `Model` from an image.
 ///
+/// Uses `nom-exif`'s unified `MediaParser` / `MediaSource` API which
+/// returns strings bare (no quote-wrapping) and datetime values as typed
+/// `EntryValue::Time` (timezone-aware, RFC 3339) or
+/// `EntryValue::NaiveDateTime` (no timezone, formatted as
+/// `"YYYY-MM-DD HH:MM:SS"`). We normalise both to ISO 8601 with a `T`
+/// separator before returning.
+///
 /// Returns `(None, None, None)` if the file has no EXIF segment, the
 /// segment is malformed, or the individual fields are absent. A missing
 /// EXIF block is expected for PNGs and many camera-exported JPEGs —
 /// treating it as an error would be noisy. Any I/O or parser error is
 /// traced at `debug` level.
 fn read_exif(path: &Path) -> (Option<String>, Option<String>, Option<String>) {
-    let Ok(file) = File::open(path) else {
-        return (None, None, None);
-    };
-    let mut reader = BufReader::new(file);
-    let exif = match exif::Reader::new().read_from_container(&mut reader) {
-        Ok(e) => e,
+    let ms = match nom_exif::MediaSource::file_path(path) {
+        Ok(ms) => ms,
         Err(err) => {
             tracing::debug!(
                 path = %path.display(),
                 error = %err,
-                "EXIF parse failed or absent",
+                "nom-exif: could not open file as MediaSource",
             );
             return (None, None, None);
         }
     };
 
-    let captured_at = exif
-        .get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY)
-        .and_then(|f| {
-            let raw = f.display_value().to_string();
-            // `DateTimeOriginal` is "YYYY:MM:DD HH:MM:SS" per EXIF spec.
-            // WHY reshape: callers consume ISO 8601 throughout the DB
-            // (`first_seen`, `last_seen`). Converting at extraction time
-            // keeps storage canonical even though the timezone is
-            // unknown (EXIF omits zone; we annotate as naive-UTC).
-            exif_datetime_to_iso8601(&raw)
-        });
+    // Early-return when the container carries no EXIF block (e.g. raw
+    // PNG, MP4 without embedded EXIF). This avoids the parse attempt
+    // and the noisy "no Exif data" error it would produce.
+    if !ms.has_exif() {
+        return (None, None, None);
+    }
+
+    let mut parser = nom_exif::MediaParser::new();
+    let iter: nom_exif::ExifIter = match parser.parse(ms) {
+        Ok(iter) => iter,
+        Err(err) => {
+            tracing::debug!(
+                path = %path.display(),
+                error = %err,
+                "nom-exif: EXIF parse failed",
+            );
+            return (None, None, None);
+        }
+    };
+    let exif: nom_exif::Exif = iter.into();
 
     let camera_make = exif
-        .get_field(exif::Tag::Make, exif::In::PRIMARY)
-        .map(|f| strip_quotes(&f.display_value().to_string()));
+        .get(nom_exif::ExifTag::Make)
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
 
     let camera_model = exif
-        .get_field(exif::Tag::Model, exif::In::PRIMARY)
-        .map(|f| strip_quotes(&f.display_value().to_string()));
+        .get(nom_exif::ExifTag::Model)
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+
+    // WHY reshape: callers consume ISO 8601 throughout the DB
+    // (`first_seen`, `last_seen`). Converting at extraction time keeps
+    // storage canonical. nom-exif emits either:
+    //   - `EntryValue::Time`          → RFC 3339  ("2024-06-01T12:34:56+08:00")
+    //   - `EntryValue::NaiveDateTime` → space-sep ("2024-06-01 12:34:56")
+    // Both `to_string()` forms already use `YYYY-MM-DD`; we only need
+    // to replace the space separator with `T` in the naive case.
+    let captured_at = exif.get(nom_exif::ExifTag::DateTimeOriginal).map(|v| {
+        let s = v.to_string();
+        // Naive datetimes have a space at index 10; RFC 3339 already has `T`.
+        // WHY `replacen` not `replace`: only the date/time separator should
+        // be substituted; time components use `:` not ` `, so only one
+        // substitution ever fires, but `replacen(1)` is explicit.
+        if s.as_bytes().get(10).copied() == Some(b' ') {
+            s.replacen(' ', "T", 1)
+        } else {
+            s
+        }
+    });
 
     (captured_at, camera_make, camera_model)
-}
-
-/// `kamadak-exif`'s `display_value()` wraps ASCII strings in double
-/// quotes (e.g. `"Canon"`). Strip those so downstream consumers see
-/// bare values.
-fn strip_quotes(s: &str) -> String {
-    s.trim_matches('"').to_owned()
-}
-
-/// Convert an EXIF `DateTimeOriginal` rendering to ISO 8601.
-///
-/// EXIF on the wire uses `"YYYY:MM:DD HH:MM:SS"` (all colons); however
-/// `kamadak-exif::Field::display_value()` normalises the date-part
-/// separators to hyphens, yielding `"YYYY-MM-DD HH:MM:SS"`. We accept
-/// either form by reading the first 19 chars positionally: only the
-/// space at index 10 is inspected to decide the input shape is
-/// plausible. Output is always `"YYYY-MM-DDTHH:MM:SS"`.
-///
-/// WHY accept both: reusing one function for future raw-tag reads (that
-/// keep the EXIF-colon form) without forcing the caller to choose.
-///
-/// Returns `None` if the input is shorter than 19 chars or missing the
-/// date/time separator at position 10.
-fn exif_datetime_to_iso8601(raw: &str) -> Option<String> {
-    let raw = raw.trim().trim_matches('"').trim();
-    if raw.len() < 19 {
-        return None;
-    }
-    let bytes = raw.as_bytes();
-    if bytes[10] != b' ' {
-        return None;
-    }
-    let mut out = String::with_capacity(19);
-    for (i, c) in raw.chars().take(19).enumerate() {
-        match i {
-            4 | 7 => out.push('-'),
-            10 => out.push('T'),
-            _ => out.push(c),
-        }
-    }
-    Some(out)
 }
 
 /// Video metadata extractor backed by `mp4parse`.
@@ -383,35 +375,5 @@ impl MetadataExtractor for CompositeExtractor {
             thumbnail_path: None,
             thumbnail_status: None,
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn exif_datetime_converts_colon_form_to_iso8601() {
-        let got = exif_datetime_to_iso8601("2024:06:01 12:34:56").expect("parse");
-        assert_eq!(got, "2024-06-01T12:34:56");
-    }
-
-    #[test]
-    fn exif_datetime_converts_hyphen_form_to_iso8601() {
-        // `kamadak-exif::Field::display_value()` normalises the date
-        // portion to hyphens; the output must still be ISO 8601.
-        let got = exif_datetime_to_iso8601("2024-06-01 12:34:56").expect("parse");
-        assert_eq!(got, "2024-06-01T12:34:56");
-    }
-
-    #[test]
-    fn exif_datetime_rejects_short_input() {
-        assert!(exif_datetime_to_iso8601("2024").is_none());
-    }
-
-    #[test]
-    fn strip_quotes_handles_bare_string() {
-        assert_eq!(strip_quotes("Canon"), "Canon");
-        assert_eq!(strip_quotes("\"Canon\""), "Canon");
     }
 }

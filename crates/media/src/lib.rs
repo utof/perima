@@ -6,7 +6,7 @@
 //! scanner.
 //!
 //! The extractors are confined here so the rest of the workspace stays
-//! free of `image`, `kamadak-exif`, `mp4parse`, and `mime_guess`
+//! free of `image`, `nom-exif`, `mp4parse`, and `mime_guess`
 //! dependencies.
 
 #![forbid(unsafe_code)]
