@@ -48,6 +48,12 @@ pub struct AppState {
     pub search_repo: Arc<SqliteSearchRepository>,
 }
 
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState").finish_non_exhaustive()
+    }
+}
+
 impl AppState {
     /// Construct a new `AppState` from a resolved config, metadata repo, and
     /// tag repo.
@@ -89,6 +95,12 @@ pub struct WatcherState {
     pub(crate) inner: Mutex<Option<perima_fs::DebouncedWatcher>>,
     /// Cancellation token for the background event loop, or `None` when idle.
     pub(crate) cancel: Mutex<Option<CancellationToken>>,
+}
+
+impl std::fmt::Debug for WatcherState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WatcherState").finish_non_exhaustive()
+    }
 }
 
 impl WatcherState {

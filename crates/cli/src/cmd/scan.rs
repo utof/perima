@@ -24,7 +24,7 @@ use crate::signals::Cancellation;
 /// tests use to complete comfortably, short enough that Ctrl-C remains
 /// responsive (the drain also polls cancel). `--no-wait-metadata`
 /// bypasses this when the user wants fast scan exit.
-pub const METADATA_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const METADATA_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Arguments for the scan command.
 // WHY allow(struct_excessive_bools): each flag corresponds to a
@@ -34,7 +34,7 @@ pub const METADATA_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 // Per plan the flags stay individually named.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
-pub struct ScanArgs {
+pub(crate) struct ScanArgs {
     /// Root directory to walk.
     pub root: PathBuf,
     /// When true, hashes and prints but skips all DB writes.
@@ -61,7 +61,7 @@ pub struct ScanArgs {
 
 /// Scan statistics.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct ScanStats {
+pub(crate) struct ScanStats {
     /// Files newly indexed.
     pub new: u64,
     /// Files already present (unchanged or updated).
@@ -72,7 +72,7 @@ pub struct ScanStats {
 
 /// Exit code returned to `main`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExitCode {
+pub(crate) enum ExitCode {
     /// Completed normally.
     Success,
     /// Ctrl-C received; partial scan summarized.
@@ -84,7 +84,7 @@ pub enum ExitCode {
 ///
 /// WHY type alias: the full `Option<&dyn Fn(...)>` signature trips
 /// `clippy::type_complexity`; a named alias keeps the `run` signature readable.
-pub type OnPersistFn<'a> = Option<&'a dyn Fn(&MediaPath, VolumeId, DeviceId)>;
+pub(crate) type OnPersistFn<'a> = Option<&'a dyn Fn(&MediaPath, VolumeId, DeviceId)>;
 
 /// Execute `scan`.
 ///
@@ -132,7 +132,7 @@ pub type OnPersistFn<'a> = Option<&'a dyn Fn(&MediaPath, VolumeId, DeviceId)>;
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::future_not_send)]
 #[allow(clippy::cognitive_complexity)]
-pub async fn run<S, H, FR, VR>(
+pub(crate) async fn run<S, H, FR, VR>(
     scanner: &S,
     hasher: &H,
     mut file_repo: Option<&mut FR>,
@@ -284,23 +284,21 @@ where
                             // would do identical work. If the user wants
                             // a forced re-extract they can call
                             // `perima metadata <path>`.
-                            if matches!(outcome, UpsertOutcome::Inserted | UpsertOutcome::Updated) {
-                                if let Some(q) = queue.as_ref() {
-                                    if let Err(e) =
-                                        q.enqueue(h, d.absolute_path.clone(), &cancel.token())
-                                    {
-                                        // WHY log + continue: the plan is
-                                        // explicit that a metadata-queue
-                                        // failure must not abort the scan.
-                                        // The user can always re-run or
-                                        // `perima metadata` for stragglers.
-                                        tracing::warn!(
-                                            error = %e,
-                                            path = %d.absolute_path.display(),
-                                            "metadata enqueue failed; continuing scan",
-                                        );
-                                    }
-                                }
+                            if matches!(outcome, UpsertOutcome::Inserted | UpsertOutcome::Updated)
+                                && let Some(q) = queue.as_ref()
+                                && let Err(e) =
+                                    q.enqueue(h, d.absolute_path.clone(), &cancel.token())
+                            {
+                                // WHY log + continue: the plan is
+                                // explicit that a metadata-queue
+                                // failure must not abort the scan.
+                                // The user can always re-run or
+                                // `perima metadata` for stragglers.
+                                tracing::warn!(
+                                    error = %e,
+                                    path = %d.absolute_path.display(),
+                                    "metadata enqueue failed; continuing scan",
+                                );
                             }
                             manifest_files.push(HashedFile {
                                 discovered: d,
@@ -414,7 +412,7 @@ where
 /// location record. Returns the location outcome so the caller can
 /// classify the result as new/existing.
 fn persist_file<R: FileRepository + ?Sized>(
-    repo: &mut R,
+    repo: &R,
     d: &DiscoveredFile,
     h: &BlakeHash,
     device: DeviceId,

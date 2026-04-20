@@ -12,7 +12,7 @@ use perima_core::{CoreError, DeviceId, ids};
 // regardless of the field name choice here.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Debug)]
-pub struct Config {
+pub(crate) struct Config {
     /// Where the main database will live (1b uses this).
     // WHY allow dead_code: `data_dir`, `config_dir`, and `device_id`
     // are forwarded to the DB layer in phase 1b; declaring them here
@@ -36,7 +36,7 @@ impl Config {
     /// # Errors
     /// Returns `CoreError::Internal` if platform directories cannot
     /// be resolved, or `CoreError::Io` on filesystem failures.
-    pub fn resolve(cli_data_dir: Option<PathBuf>) -> Result<Self, CoreError> {
+    pub(crate) fn resolve(cli_data_dir: Option<PathBuf>) -> Result<Self, CoreError> {
         let dirs = directories::ProjectDirs::from("dev", "perima", "perima")
             .ok_or_else(|| CoreError::Internal("cannot resolve project dirs".into()))?;
 

@@ -338,9 +338,9 @@ mod tests {
     #[test]
     fn media_path_nfc_equivalence_fixed() {
         // "café" — precomposed (NFC) vs decomposed (NFD).
-        let nfc = "caf\u{00E9}";
-        let nfd = "cafe\u{0301}";
-        assert_eq!(MediaPath::new(nfc), MediaPath::new(nfd));
+        let precomposed = "caf\u{00E9}";
+        let decomposed = "cafe\u{0301}";
+        assert_eq!(MediaPath::new(precomposed), MediaPath::new(decomposed));
     }
 
     #[test]

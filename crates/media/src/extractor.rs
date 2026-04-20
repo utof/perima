@@ -255,12 +255,12 @@ fn video_tracks_summary(
         if matches!(track.track_type, mp4parse::TrackType::Video) {
             duration_ms = track_duration_ms(track, ctx.timescale);
 
-            if let Some(stsd) = track.stsd.as_ref() {
-                if let Some(mp4parse::SampleEntry::Video(v)) = stsd.descriptions.first() {
-                    width = Some(u32::from(v.width));
-                    height = Some(u32::from(v.height));
-                    codec = Some(format_codec(v.codec_type));
-                }
+            if let Some(stsd) = track.stsd.as_ref()
+                && let Some(mp4parse::SampleEntry::Video(v)) = stsd.descriptions.first()
+            {
+                width = Some(u32::from(v.width));
+                height = Some(u32::from(v.height));
+                codec = Some(format_codec(v.codec_type));
             }
             break;
         }
@@ -318,6 +318,12 @@ fn format_codec(codec: mp4parse::CodecType) -> String {
 /// video extractor that can actually extract duration.
 pub struct CompositeExtractor {
     extractors: Vec<Arc<dyn MetadataExtractor>>,
+}
+
+impl std::fmt::Debug for CompositeExtractor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompositeExtractor").finish_non_exhaustive()
+    }
 }
 
 impl CompositeExtractor {

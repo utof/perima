@@ -14,7 +14,7 @@ use super::format::format_size;
 ///
 /// # Errors
 /// Propagates `CoreError` from the repository.
-pub fn run<VR: VolumeRepository>(repo: &VR, machine: DeviceId) -> Result<(), CoreError> {
+pub(crate) fn run<VR: VolumeRepository>(repo: &VR, machine: DeviceId) -> Result<(), CoreError> {
     let records = repo.list(machine)?;
 
     let stdout = std::io::stdout();

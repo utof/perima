@@ -10,14 +10,14 @@ use tokio_util::sync::CancellationToken;
 /// `CancellationToken` is the idiomatic tokio-util primitive for this;
 /// it is cheaply cloneable and integrates with tokio's `select!` and
 /// `CancellationToken::cancelled_owned()` futures.
-pub struct Cancellation {
+pub(crate) struct Cancellation {
     token: CancellationToken,
 }
 
 impl Cancellation {
     /// Has a cancellation signal been received?
     #[must_use]
-    pub fn cancelled(&self) -> bool {
+    pub(crate) fn cancelled(&self) -> bool {
         self.token.is_cancelled()
     }
 
@@ -28,7 +28,7 @@ impl Cancellation {
     /// inner handle, so `clone()` is O(1) and the clone shares state with the
     /// original. Callers that only need a boolean should prefer `cancelled()`.
     #[must_use]
-    pub fn token(&self) -> CancellationToken {
+    pub(crate) fn token(&self) -> CancellationToken {
         self.token.clone()
     }
 }
@@ -44,7 +44,7 @@ impl Cancellation {
 /// # Errors
 /// Returns `CoreError::Internal` if another handler is already registered
 /// (only one `ctrlc` handler per process).
-pub fn install() -> Result<Cancellation, CoreError> {
+pub(crate) fn install() -> Result<Cancellation, CoreError> {
     let token = CancellationToken::new();
     let cloned = token.clone();
     ctrlc::set_handler(move || {

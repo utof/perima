@@ -1,6 +1,15 @@
 //! `perima` command-line entry point.
 
 #![forbid(unsafe_code)]
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "CLI's purpose is user-facing output to stdout/stderr. Migrate to `tracing` for structured logs in a future wave; user-facing output stays on println!/eprintln!."
+)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "Binary crate. clippy::nursery::redundant_pub_crate fires on pub(crate) items inside private `mod` blocks because pub(crate) is technically redundant there (the private mod already restricts visibility). We keep items pub(crate) anyway for explicit scope signalling and suppress the nursery lint crate-wide."
+)]
 
 mod cmd;
 mod config;

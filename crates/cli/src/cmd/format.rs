@@ -6,7 +6,7 @@
 /// byte sizes inherently sacrifices precision for readability. A 1-decimal-
 /// place GB figure that is off by a few bytes is correct enough for the UI.
 #[allow(clippy::cast_precision_loss)]
-pub fn format_size(bytes: u64) -> String {
+pub(crate) fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
     const GB: u64 = 1024 * MB;

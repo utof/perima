@@ -10,7 +10,7 @@ use perima_core::{
 
 /// Arguments for the ls command.
 #[derive(Debug, Clone)]
-pub struct LsArgs {
+pub(crate) struct LsArgs {
     /// Filter to a specific volume.
     pub volume: Option<VolumeId>,
     /// Maximum number of rows to return.
@@ -40,7 +40,7 @@ pub struct LsArgs {
 ///
 /// # Errors
 /// Propagates `CoreError` from the repository.
-pub fn run<R, M, T>(
+pub(crate) fn run<R, M, T>(
     repo: &R,
     metadata_repo: &M,
     tag_repo: &T,

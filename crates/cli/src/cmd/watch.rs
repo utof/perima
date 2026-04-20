@@ -30,14 +30,14 @@ use crate::signals::Cancellation;
 /// which requires the `tracing` crate. `crates/core` deliberately has zero
 /// framework dependencies, so the composite lives in the CLI shell where
 /// `tracing` is already a direct dependency.
-pub struct CompositeEventBus {
+pub(crate) struct CompositeEventBus {
     handlers: Vec<Arc<dyn EventBus>>,
 }
 
 impl CompositeEventBus {
     /// Construct from a list of handlers.
     #[must_use]
-    pub fn new(handlers: Vec<Arc<dyn EventBus>>) -> Self {
+    pub(crate) fn new(handlers: Vec<Arc<dyn EventBus>>) -> Self {
         Self { handlers }
     }
 }
@@ -181,7 +181,7 @@ fn canonicalize(root: &Path) -> Result<PathBuf, CoreError> {
 /// # Errors
 /// Returns [`CoreError::InvalidPath`] if `root` is not an existing directory;
 /// propagates [`CoreError`] from volume detection, DB access, or watcher init.
-pub async fn run(
+pub(crate) async fn run(
     data_dir: &Path,
     device_id: DeviceId,
     root: &Path,
@@ -199,7 +199,7 @@ pub async fn run(
     let vol_conn = open_and_migrate(&db_path)?;
     let file_conn = open_and_migrate(&db_path)?;
 
-    let mut vol_repo = SqliteVolumeRepository::new(vol_conn);
+    let vol_repo = SqliteVolumeRepository::new(vol_conn);
     let volume_id = vol_repo.find_or_create(&detected.identifiers, device_id)?;
     vol_repo.record_mount(volume_id, device_id, &detected.mount_point)?;
     drop(vol_repo);

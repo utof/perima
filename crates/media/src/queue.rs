@@ -53,6 +53,12 @@ pub struct MetadataQueue {
     worker: Option<JoinHandle<()>>,
 }
 
+impl std::fmt::Debug for MetadataQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetadataQueue").finish_non_exhaustive()
+    }
+}
+
 impl MetadataQueue {
     /// Spawn the background worker and return a queue handle for
     /// producers.

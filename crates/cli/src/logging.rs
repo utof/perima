@@ -11,7 +11,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 /// # Errors
 /// Returns `CoreError::Internal` if the global subscriber is already
 /// set (tests should tolerate this).
-pub fn init(verbosity_bump: u8) -> Result<(), CoreError> {
+pub(crate) fn init(verbosity_bump: u8) -> Result<(), CoreError> {
     let base = std::env::var("PERIMA_LOG").unwrap_or_else(|_| "info".into());
     let bump_level = match verbosity_bump {
         0 => None,

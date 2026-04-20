@@ -1,0 +1,15 @@
+[toolchain]
+# WHY channel = "stable": matches CI's `dtolnay/rust-toolchain@stable`
+# so local and CI resolve to the same rustc. A fixed MSRV pin (e.g.
+# `channel = "1.88"`) sounded appealing for reproducibility, but
+# `specta = "=2.0.0-rc.24"` (pinned transitively by tauri-specta) uses
+# `debug_closure_helpers` and const `TypeId::of` — both stabilized
+# after 1.88 — so the pre-push hook fails under a 1.88 pin when it
+# builds the desktop crate.
+#
+# The declared `rust-version` in Cargo.toml is the aspirational MSRV
+# floor for non-desktop crates; actual enforcement of a specific
+# version is deferred to a CI matrix job (see GH issue tracking
+# CI reproducibility).
+channel = "stable"
+components = ["rustfmt", "clippy"]

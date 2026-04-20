@@ -22,6 +22,13 @@ pub struct SqliteVolumeRepository {
     conn: Mutex<Connection>,
 }
 
+impl std::fmt::Debug for SqliteVolumeRepository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteVolumeRepository")
+            .finish_non_exhaustive()
+    }
+}
+
 impl SqliteVolumeRepository {
     /// Wrap an existing connection. Caller must have run migrations first.
     pub const fn new(conn: Connection) -> Self {
@@ -43,7 +50,7 @@ fn lock(conn: &Mutex<Connection>) -> Result<std::sync::MutexGuard<'_, Connection
 
 impl VolumeRepository for SqliteVolumeRepository {
     fn find_or_create(
-        &mut self,
+        &self,
         ident: &VolumeIdentifiers,
         device: DeviceId,
     ) -> Result<VolumeId, CoreError> {
@@ -174,7 +181,7 @@ impl VolumeRepository for SqliteVolumeRepository {
     }
 
     fn record_mount(
-        &mut self,
+        &self,
         volume: VolumeId,
         machine: DeviceId,
         mount: &std::path::Path,
@@ -353,7 +360,7 @@ mod tests {
 
     #[test]
     fn find_or_create_inserts_new() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let ident = label_cap_ident("MY_DRIVE", 1_000_000);
         let vol_id = repo
             .find_or_create(&ident, device())
@@ -364,7 +371,7 @@ mod tests {
 
     #[test]
     fn find_or_create_matches_on_label_capacity() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let ident = label_cap_ident("BACKUP_SSD", 2_000_000_000);
         let first = repo.find_or_create(&ident, dev).expect("first");
@@ -377,7 +384,7 @@ mod tests {
 
     #[test]
     fn find_or_create_guid_trumps_label() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
 
         // Insert volume A with GUID "aaa…" + label "A".
@@ -412,7 +419,7 @@ mod tests {
 
     #[test]
     fn record_mount_inserts_new() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let ident = label_cap_ident("MOUNT_TEST", 100_000);
         let vol_id = repo.find_or_create(&ident, dev).expect("create");
@@ -429,7 +436,7 @@ mod tests {
 
     #[test]
     fn record_mount_unchanged_on_repeat() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let ident = label_cap_ident("MOUNT_REPEAT", 200_000);
         let vol_id = repo.find_or_create(&ident, dev).expect("create");
@@ -471,7 +478,7 @@ mod tests {
             let barrier = Arc::clone(&barrier);
             handles.push(thread::spawn(move || -> VolumeId {
                 let conn = open_and_migrate(&db_path).expect("open");
-                let mut repo = SqliteVolumeRepository::new(conn);
+                let repo = SqliteVolumeRepository::new(conn);
                 let ident = label_cap_ident("RACE_VOL", 42_000);
                 barrier.wait();
                 repo.find_or_create(&ident, dev).expect("find_or_create")
@@ -509,7 +516,7 @@ mod tests {
         // soft-delete the prior row rather than leaving two active mount
         // rows for one device. `list` reads only active mounts, so the
         // observable contract is: after remount only the new path surfaces.
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let ident = label_cap_ident("SUPERSEDE", 100_000);
         let vol_id = repo.find_or_create(&ident, dev).expect("create");
@@ -535,7 +542,7 @@ mod tests {
         // churn the row and update updated_at. Explicit test to pin the
         // "idempotent" behaviour beyond `record_mount_unchanged_on_repeat`
         // which only asserts the list count.
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let ident = label_cap_ident("IDEMPOTENT", 50_000);
         let vol_id = repo.find_or_create(&ident, dev).expect("create");
@@ -565,7 +572,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         use std::path::PathBuf;
 
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let ident = label_cap_ident("NONUTF8", 100_000);
         let vol_id = repo.find_or_create(&ident, dev).expect("create");
@@ -584,7 +591,7 @@ mod tests {
 
     #[test]
     fn list_returns_volumes_with_mounts() {
-        let (_td, mut repo) = test_db();
+        let (_td, repo) = test_db();
         let dev = device();
         let ident = label_cap_ident("LIST_TEST", 999_000);
         let vol_id = repo.find_or_create(&ident, dev).expect("create");

@@ -32,6 +32,13 @@ pub struct SqliteMetadataRepository {
     conn: Mutex<Connection>,
 }
 
+impl std::fmt::Debug for SqliteMetadataRepository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteMetadataRepository")
+            .finish_non_exhaustive()
+    }
+}
+
 impl SqliteMetadataRepository {
     /// Wrap an existing connection. The caller must have run
     /// migrations (at least V001 + V002) before constructing this.
@@ -782,7 +789,7 @@ mod tests {
 
         {
             let conn = open_and_migrate(&db_path).expect("open");
-            let mut file_repo = SqliteFileRepository::new(conn);
+            let file_repo = SqliteFileRepository::new(conn);
             file_repo.upsert_file(&f, dev).expect("upsert file");
             file_repo
                 .upsert_location(&f.hash, vol, &f.discovered.relative_path, dev)
@@ -819,7 +826,7 @@ mod tests {
 
         {
             let conn = open_and_migrate(&db_path).expect("open");
-            let mut file_repo = SqliteFileRepository::new(conn);
+            let file_repo = SqliteFileRepository::new(conn);
             file_repo.upsert_file(&f, dev).expect("upsert file");
             file_repo
                 .upsert_location(&f.hash, vol, &f.discovered.relative_path, dev)

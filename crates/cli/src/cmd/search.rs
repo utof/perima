@@ -4,7 +4,7 @@ use perima_core::{CoreError, SearchRepository};
 
 /// Arguments for the `perima search` command.
 #[derive(clap::Args, Debug)]
-pub struct SearchArgs {
+pub(crate) struct SearchArgs {
     /// `FTS5` match expression (e.g. `"vacation"`, `"image/jpeg"`, `"Canon*"`).
     ///
     /// Required unless `--rebuild` is specified.
@@ -33,7 +33,7 @@ pub struct SearchArgs {
 /// # Errors
 /// Returns [`CoreError::Internal`] on DB/`FTS5` errors.
 /// Returns [`CoreError::Unsupported`] when no query is supplied without `--rebuild`.
-pub fn run<S>(repo: &S, args: &SearchArgs) -> Result<(), CoreError>
+pub(crate) fn run<S>(repo: &S, args: &SearchArgs) -> Result<(), CoreError>
 where
     S: SearchRepository + ?Sized,
 {
