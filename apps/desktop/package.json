@@ -11,6 +11,9 @@
     "preview": "vite preview",
     "tauri": "tauri"
   },
+  "engines": {
+    "node": ">=20.19 <21 || >=22.12"
+  },
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2",
@@ -28,7 +31,7 @@
     "@types/react-dom": "^19",
     "@typescript-eslint/eslint-plugin": "^8.58.2",
     "@typescript-eslint/parser": "^8.58.2",
-    "@vitejs/plugin-react": "^4",
+    "@vitejs/plugin-react": "^6",
     "eslint": "^9",
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^7.1.1",
@@ -37,7 +40,7 @@
     "jsdom": "^26",
     "tailwindcss": "^4",
     "typescript": "^5",
-    "vite": "^6",
-    "vitest": "^3"
+    "vite": "^8",
+    "vitest": "^3.2"
   }
 }
