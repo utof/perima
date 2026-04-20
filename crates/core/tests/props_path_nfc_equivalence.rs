@@ -6,12 +6,15 @@
 //!
 //! # Mechanism (reviewer-verified)
 //!
-//! Both APFS and HFS+ are normalization-insensitive at the dirent-
-//! lookup layer:
-//! - HFS+ stores NFD; any NFC or NFD lookup resolves to the NFD entry.
-//! - APFS stores caller-form-preserving; lookup uses a hash of the
-//!   canonically-normalized filename (Apple APFS FAQ). Any NFC or NFD
-//!   lookup of a given file resolves to the single stored dirent.
+//! On default macOS APFS and HFS+ volumes the VFS layer is
+//! normalization-insensitive:
+//! - HFS+ stores NFD; any NFC or NFD lookup resolves to the stored
+//!   NFD entry.
+//! - APFS preserves whatever bytes the caller wrote at creation; the
+//!   macOS VFS layer handles NFC/NFD equivalence at lookup time, so
+//!   both NFC and NFD spellings of a given file resolve to the one
+//!   stored dirent. (Case-sensitive APFS variants can change this —
+//!   out of scope for perima's tooling.)
 //!
 //! `realpath(3)` — which `std::fs::canonicalize` calls — returns the
 //! stored dirent name (whichever form the file was written under). So
@@ -26,6 +29,13 @@
 //! but the behavior is hand-wavy across NT versions + drivers. We
 //! skip Windows rather than assert a weaker claim that might mislead
 //! a debugger.
+//!
+//! Off-macOS this file contains only a trivial byte-identity test
+//! (`media_path_byte_identity_off_macos` below) — the real NFC/NFD
+//! coverage runs only under macOS CI. The off-macOS branch exists
+//! to keep the test file non-empty on Linux + Windows; it asserts
+//! properties already covered by `props_path_idempotence.rs` and
+//! the inline tests in `crates/core/src/types.rs`.
 
 #[cfg(target_os = "macos")]
 #[test]

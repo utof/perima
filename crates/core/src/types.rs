@@ -121,14 +121,17 @@ pub struct FileSize(pub u64);
 /// will compare unequal by byte.
 ///
 /// WHY the NFC guarantee was removed (see lib-audit L5): macOS NFD
-/// vs NFC equivalence is better handled at the filesystem layer via
-/// `fs::canonicalize`, which round-trips the OS's own normalization
-/// in a single syscall. Production `MediaPaths` are constructed
-/// downstream of a canonicalized walk (see
+/// vs NFC equivalence is better handled at the filesystem layer by
+/// round-tripping the OS's own normalization via a canonicalize call
+/// (in perima, `dunce::canonicalize` which delegates to
+/// `std::fs::canonicalize` on non-Windows and strips `\\?\` prefixes
+/// on Windows). Production `MediaPaths` are constructed downstream
+/// of a canonicalized walk (see
 /// `crates/cli/src/cmd/scan.rs::canonicalize_for_walk` and peers),
 /// so they receive platform-consistent bytes. Callers constructing
-/// `MediaPaths` from user-typed strings (which is rare; `MediaPath` is
-/// a machine-derived type) accept the byte-exact-match contract.
+/// `MediaPaths` from user-typed strings (rare in production; this
+/// type is typically machine-derived from canonicalized walk output)
+/// accept the byte-exact-match contract.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct MediaPath(String);
 
@@ -195,9 +198,11 @@ pub struct DiscoveredFile {
     /// Absolute path as observed during the walk.
     pub absolute_path: PathBuf,
     /// Path relative to the volume root. Lexical normalization only
-    /// (forward-slash, no leading slash). See `MediaPath`'s struct-level
-    /// doc for the invariant shift (NFC normalization moved to the
-    /// filesystem layer post-L5).
+    /// (forward-slash, no leading slash). NFC normalization is a
+    /// filesystem-layer concern handled upstream by the canonicalized
+    /// walk; see `MediaPath`'s struct-level doc and
+    /// `crates/core/tests/props_path_nfc_equivalence.rs` for the
+    /// mechanism.
     pub relative_path: MediaPath,
     /// File size in bytes at walk time.
     pub size: FileSize,
