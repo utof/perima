@@ -54,7 +54,8 @@ pub(crate) async fn run(
     args: &MetadataArgs,
 ) -> Result<(), CoreError> {
     validate_file(&args.path)?;
-    let absolute_path = dunce::canonicalize(&args.path).map_err(CoreError::Io)?;
+    let absolute_path =
+        perima_fs::platform_path::canonicalize(&args.path).map_err(CoreError::Io)?;
 
     // Resolve volume from the containing directory. WHY parent(): volume
     // detection inspects the mount point; a file path's parent is the

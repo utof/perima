@@ -6,7 +6,7 @@
 //! - `tag ls [--json]` — list all active tags with attachment counts
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use perima_core::{BlakeHash, CoreError, DeviceId, FileRepository, TagRepository, normalize_tag};
 
@@ -80,7 +80,7 @@ where
 /// WHY separate helper: both `run_add` and `run_rm` need the same
 /// canonicalization + suffix-match logic. Extracting it avoids
 /// duplicating the error messages and the `list_file_locations` call.
-fn resolve_hash<F>(file_repo: &F, path: &PathBuf) -> Result<BlakeHash, CoreError>
+fn resolve_hash<F>(file_repo: &F, path: &Path) -> Result<BlakeHash, CoreError>
 where
     F: FileRepository + ?Sized,
 {
@@ -97,7 +97,7 @@ where
         )));
     }
 
-    let absolute = dunce::canonicalize(path).map_err(CoreError::Io)?;
+    let absolute = perima_fs::platform_path::canonicalize(path).map_err(CoreError::Io)?;
     let absolute_str = absolute
         .to_str()
         .ok_or_else(|| CoreError::InvalidPath(format!("non-UTF8 path: {}", absolute.display())))?;
@@ -122,7 +122,7 @@ fn run_add<T, F>(
     tag_repo: &T,
     file_repo: &F,
     device: DeviceId,
-    path: &PathBuf,
+    path: &Path,
     tags: &[String],
 ) -> Result<(), CoreError>
 where
@@ -154,7 +154,7 @@ fn run_rm<T, F>(
     tag_repo: &T,
     file_repo: &F,
     device: DeviceId,
-    path: &PathBuf,
+    path: &Path,
     tag_raw: &str,
 ) -> Result<(), CoreError>
 where
