@@ -132,23 +132,27 @@ fn read_exif(path: &Path) -> (Option<String>, Option<String>, Option<String>) {
 
     // WHY reshape: callers consume ISO 8601 throughout the DB
     // (`first_seen`, `last_seen`). Converting at extraction time keeps
-    // storage canonical. nom-exif emits either:
-    //   - `EntryValue::Time`          → RFC 3339  ("2024-06-01T12:34:56+08:00")
-    //   - `EntryValue::NaiveDateTime` → space-sep ("2024-06-01 12:34:56")
-    // Both `to_string()` forms already use `YYYY-MM-DD`; we only need
-    // to replace the space separator with `T` in the naive case.
-    let captured_at = exif.get(nom_exif::ExifTag::DateTimeOriginal).map(|v| {
-        let s = v.to_string();
-        // Naive datetimes have a space at index 10; RFC 3339 already has `T`.
-        // WHY `replacen` not `replace`: only the date/time separator should
-        // be substituted; time components use `:` not ` `, so only one
-        // substitution ever fires, but `replacen(1)` is explicit.
-        if s.as_bytes().get(10).copied() == Some(b' ') {
-            s.replacen(' ', "T", 1)
-        } else {
-            s
-        }
-    });
+    // storage canonical.
+    // WHY as_time_components: the typed accessor is stable across any future
+    // Display-impl changes in nom-exif's #[non_exhaustive] EntryValue enum
+    // and carries the FixedOffset when present, letting us emit a proper
+    // RFC 3339 string with offset suffix for timezone-aware EXIF values.
+    // Using byte-index-10 into a to_string() output would be fragile and
+    // discards the offset information entirely.
+    let captured_at = exif
+        .get(nom_exif::ExifTag::DateTimeOriginal)
+        .and_then(nom_exif::EntryValue::as_time_components)
+        .map(|(naive, offset)| {
+            offset.map_or_else(
+                || naive.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                |tz| {
+                    naive.and_local_timezone(tz).single().map_or_else(
+                        || naive.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                        |dt| dt.to_rfc3339(),
+                    )
+                },
+            )
+        });
 
     (captured_at, camera_make, camera_model)
 }

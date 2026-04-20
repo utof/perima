@@ -3302,6 +3302,7 @@ name = "perima-media"
 version = "0.6.4"
 dependencies = [
  "blake3",
+ "chrono",
  "image",
  "mime_guess",
  "mp4",

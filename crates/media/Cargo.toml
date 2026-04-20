@@ -11,6 +11,7 @@ publish = false  # WHY: intra-workspace only; not published to crates.io
 perima-core = { path = "../core" }
 image.workspace        = true
 nom-exif.workspace     = true
+chrono.workspace       = true
 mp4parse.workspace     = true
 mime_guess.workspace   = true
 tokio.workspace        = true
