@@ -326,7 +326,10 @@ pub async fn run_scan_inner_with_metadata(
     metadata_repo: Option<Arc<dyn MetadataRepository>>,
 ) -> Result<ScanResult, perima_core::CoreError> {
     validate_root(root)?;
-    let canonical_root = dunce::canonicalize(root).map_err(perima_core::CoreError::Io)?;
+    // WHY: routes through perima_fs::platform_path::canonicalize — the single
+    // source of truth for the #[cfg(windows)] dunce / std fallback.
+    let canonical_root =
+        perima_fs::platform_path::canonicalize(root).map_err(perima_core::CoreError::Io)?;
     let scanner = WalkdirScanner::new();
     let hasher = Blake3Service::new();
 
@@ -535,7 +538,8 @@ pub async fn start_watch(
 ) -> Result<(), String> {
     let root = PathBuf::from(&path);
     validate_root(&root).map_err(|e| e.to_string())?;
-    let canonical_root = dunce::canonicalize(&root).map_err(|e| format!("canonicalize: {e}"))?;
+    let canonical_root =
+        perima_fs::platform_path::canonicalize(&root).map_err(|e| format!("canonicalize: {e}"))?;
 
     let detected = perima_fs::detect_volume(&canonical_root).map_err(|e| e.to_string())?;
     let db_path = state.data_dir.join("perima.db");
