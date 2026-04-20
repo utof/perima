@@ -30,7 +30,7 @@ pub struct DetectedVolume {
 /// - `CoreError::Io` if `path` cannot be canonicalized (e.g. does not exist).
 /// - `CoreError::Internal` if no mounted disk covers the path.
 pub fn detect_volume(path: &Path) -> Result<DetectedVolume, CoreError> {
-    let canonical = dunce::canonicalize(path)?;
+    let canonical = crate::platform_path::canonicalize(path).map_err(CoreError::Io)?;
     let disks = Disks::new_with_refreshed_list();
 
     // WHY: longest-prefix wins so that nested mounts (e.g. /mnt/data and

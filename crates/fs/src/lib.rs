@@ -4,6 +4,7 @@
 
 pub mod errors;
 pub mod paths;
+pub mod platform_path;
 pub mod volumes;
 pub mod walker;
 pub mod watcher;

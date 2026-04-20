@@ -65,10 +65,11 @@ impl DebouncedWatcher {
         // reaches the bus.  Canonicalizing both the registered paths and
         // volume_root ensures they match whatever the OS reports in events.
         // dunce::canonicalize avoids UNC prefixes on Windows.
-        let canonical_root = dunce::canonicalize(volume_root).map_err(CoreError::Io)?;
+        let canonical_root =
+            crate::platform_path::canonicalize(volume_root).map_err(CoreError::Io)?;
         let canonical_paths: Vec<PathBuf> = paths
             .iter()
-            .map(|p| dunce::canonicalize(p).map_err(CoreError::Io))
+            .map(|p| crate::platform_path::canonicalize(p).map_err(CoreError::Io))
             .collect::<Result<_, _>>()?;
 
         // WHY std mpsc: notify-debouncer-full uses std::sync::mpsc for its

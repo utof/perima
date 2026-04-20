@@ -64,8 +64,11 @@ notify       = "8.2"
 notify-debouncer-full = "0.7"
 sysinfo      = "0.38"
 directories  = "6"
+# unicode-normalization: KEPT only for tag NFC normalization in crates/core/src/tag.rs.
+# DO NOT use in path code — path equivalence is handled via fs::canonicalize round-trip
+# (see crates/core/tests/props_path_nfc_equivalence.rs). Strategy review tracked in
+# GH issue #<filled by Task 8>.
 unicode-normalization = "0.1"
-path-slash   = "0.2"
 dunce        = "1"
 file-id      = "0.2"
 tauri             = { version = "2", features = ["protocol-asset"] }
