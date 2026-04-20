@@ -12,6 +12,12 @@ use crate::errors::Error;
 /// `absolute` must be under `volume_root`; callers should pre-
 /// canonicalize both sides to avoid symlink surprises.
 ///
+/// Only `Path::Component::Normal` segments are preserved; `..`
+/// (`ParentDir`) and `.` (`CurDir`) are silently dropped during the
+/// components-iterator join. Callers must pre-resolve such components
+/// if semantic preservation is required — all current callers feed
+/// canonicalized OS paths where `..`/`.` cannot survive.
+///
 /// # Errors
 /// Returns `Error::NotUnderVolume` if `absolute` is not prefixed by
 /// `volume_root`.

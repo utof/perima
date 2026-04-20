@@ -64,7 +64,8 @@ impl DebouncedWatcher {
         // strip_prefix in relativize() fails for every event and nothing
         // reaches the bus.  Canonicalizing both the registered paths and
         // volume_root ensures they match whatever the OS reports in events.
-        // dunce::canonicalize avoids UNC prefixes on Windows.
+        // crate::platform_path::canonicalize wraps dunce on Windows (avoids
+        // UNC prefix pollution) and std::fs::canonicalize elsewhere.
         let canonical_root =
             crate::platform_path::canonicalize(volume_root).map_err(CoreError::Io)?;
         let canonical_paths: Vec<PathBuf> = paths
