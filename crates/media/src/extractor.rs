@@ -255,12 +255,12 @@ fn video_tracks_summary(
         if matches!(track.track_type, mp4parse::TrackType::Video) {
             duration_ms = track_duration_ms(track, ctx.timescale);
 
-            if let Some(stsd) = track.stsd.as_ref() {
-                if let Some(mp4parse::SampleEntry::Video(v)) = stsd.descriptions.first() {
-                    width = Some(u32::from(v.width));
-                    height = Some(u32::from(v.height));
-                    codec = Some(format_codec(v.codec_type));
-                }
+            if let Some(stsd) = track.stsd.as_ref()
+                && let Some(mp4parse::SampleEntry::Video(v)) = stsd.descriptions.first()
+            {
+                width = Some(u32::from(v.width));
+                height = Some(u32::from(v.height));
+                codec = Some(format_codec(v.codec_type));
             }
             break;
         }

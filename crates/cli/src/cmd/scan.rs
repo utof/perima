@@ -284,23 +284,21 @@ where
                             // would do identical work. If the user wants
                             // a forced re-extract they can call
                             // `perima metadata <path>`.
-                            if matches!(outcome, UpsertOutcome::Inserted | UpsertOutcome::Updated) {
-                                if let Some(q) = queue.as_ref() {
-                                    if let Err(e) =
-                                        q.enqueue(h, d.absolute_path.clone(), &cancel.token())
-                                    {
-                                        // WHY log + continue: the plan is
-                                        // explicit that a metadata-queue
-                                        // failure must not abort the scan.
-                                        // The user can always re-run or
-                                        // `perima metadata` for stragglers.
-                                        tracing::warn!(
-                                            error = %e,
-                                            path = %d.absolute_path.display(),
-                                            "metadata enqueue failed; continuing scan",
-                                        );
-                                    }
-                                }
+                            if matches!(outcome, UpsertOutcome::Inserted | UpsertOutcome::Updated)
+                                && let Some(q) = queue.as_ref()
+                                && let Err(e) =
+                                    q.enqueue(h, d.absolute_path.clone(), &cancel.token())
+                            {
+                                // WHY log + continue: the plan is
+                                // explicit that a metadata-queue
+                                // failure must not abort the scan.
+                                // The user can always re-run or
+                                // `perima metadata` for stragglers.
+                                tracing::warn!(
+                                    error = %e,
+                                    path = %d.absolute_path.display(),
+                                    "metadata enqueue failed; continuing scan",
+                                );
                             }
                             manifest_files.push(HashedFile {
                                 discovered: d,

@@ -137,10 +137,10 @@ fn run_event_loop(
                     if cancel.is_cancelled() {
                         return;
                     }
-                    if let Some(event) = map_event(&de.event, volume_root, volume_id) {
-                        if let Err(e) = bus.emit(&event) {
-                            tracing::warn!(error = %e, "EventBus::emit failed");
-                        }
+                    if let Some(event) = map_event(&de.event, volume_root, volume_id)
+                        && let Err(e) = bus.emit(&event)
+                    {
+                        tracing::warn!(error = %e, "EventBus::emit failed");
                     }
                 }
             }
