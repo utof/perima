@@ -42,6 +42,10 @@ print_stdout = "warn"
 print_stderr = "warn"
 
 [workspace.dependencies]
+# WHY workspace-path dep for perima-app: release-plz + downstream shells
+# (cli, desktop) need it reachable via `workspace = true` so bumps
+# propagate correctly via the workspace graph.
+perima-app   = { path = "crates/app",   version = "0.6.4" }
 # WHY workspace-path dep for perima-media: release-plz + other crates
 # (perima CLI) need it reachable via `workspace = true` so bumps
 # propagate correctly via the workspace graph.

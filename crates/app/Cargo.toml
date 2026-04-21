@@ -1,0 +1,26 @@
+[package]
+name = "perima-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false  # WHY: intra-workspace only; not published to crates.io
+
+[dependencies]
+perima-core  = { path = "../core" }
+perima-fs    = { path = "../fs" }
+perima-hash  = { path = "../hash" }
+perima-media = { workspace = true }
+tokio.workspace    = true
+thiserror.workspace = true
+tracing.workspace  = true
+# Note: tokio-util NOT included; add only if a UseCase actually needs CancellationToken.
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true
+insta.workspace    = true
+
+[lints]
+workspace = true
