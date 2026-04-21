@@ -264,7 +264,7 @@ fn build_container(
     // WHY log handler always first: every command benefits from tracing
     // event emissions; `extra_handlers` (injected by the watch dispatcher)
     // are appended after so the log entry always fires before DB writes.
-    let log_handler: Arc<dyn EventBus> = Arc::new(crate::cmd::watch::LogEventHandler);
+    let log_handler: Arc<dyn EventBus> = Arc::new(perima_app::LogEventHandler);
     let mut handlers: Vec<Arc<dyn EventBus>> = vec![log_handler];
     handlers.extend(extra_handlers);
     Ok(AppContainer::new(deps, handlers))

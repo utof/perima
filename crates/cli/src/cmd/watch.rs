@@ -112,24 +112,6 @@ pub(crate) fn make_db_event_handler(
 }
 
 // ---------------------------------------------------------------------------
-// LogEventHandler
-// ---------------------------------------------------------------------------
-
-/// Logs every filesystem event at INFO level.
-///
-/// WHY `pub(crate)`: Task 10 will hoist this into `perima_app::telemetry`
-/// alongside the `tracing-subscriber` bootstrap. Until then, `main.rs`
-/// references it during `AppContainer` construction — hence crate-visible.
-pub(crate) struct LogEventHandler;
-
-impl EventBus for LogEventHandler {
-    fn emit(&self, event: &FileEvent) -> Result<(), CoreError> {
-        tracing::info!(?event, "file event");
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Validate helpers (mirrors scan.rs)
 // ---------------------------------------------------------------------------
 

@@ -30,6 +30,7 @@ pub mod metadata;
 pub mod scan;
 pub mod search;
 pub mod tag;
+pub mod telemetry;
 pub mod volume;
 
 pub use container::{AppContainer, AppDeps, CompositeEventBus};
@@ -40,4 +41,5 @@ pub use scan::{
 };
 pub use search::{SearchCommand, SearchOutput, SearchUseCase};
 pub use tag::{FileWithTags, TagCommand, TagFilter, TagOutput, TagUseCase};
+pub use telemetry::LogEventHandler;
 pub use volume::{VolumeCommand, VolumeOutput, VolumeUseCase};

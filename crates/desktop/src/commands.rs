@@ -49,15 +49,17 @@ const METADATA_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 // ---------------------------------------------------------------------------
 // Event handlers
 //
-// WHY kept in commands.rs (not hoisted to `perima_app`): Task 10 of the
-// Batch B plan moves `LogEventHandler` + `DbEventHandler` into
-// `perima_app::telemetry`. Until then, this module keeps them `pub` so
-// `lib.rs::build_container` can wire them into the container's single
-// `CompositeEventBus` at setup time (the Task-7 hoist of the bus itself
-// already landed). The shell-local `CompositeEventBus` struct that lived
-// here pre-Task-9 is deleted — spec §4 acceptance demands exactly one
-// `CompositeEventBus::new` call in the codebase and that site is now
-// `crates/app/src/container.rs::AppContainer::new`.
+// WHY `DbEventHandler` stays shell-local: it touches
+// `SqliteFileRepository` (a `crates/db` concrete adapter) via
+// `Arc<SqliteFileRepository>`. Hoisting it into `perima-app` would
+// force the app crate to depend on a concrete adapter, violating the
+// ports-and-adapters boundary. `LogEventHandler` — previously the
+// duplicate sibling in this section — was hoisted to
+// `perima_app::telemetry` in Task 10 because it has zero adapter
+// coupling. The shell-local `CompositeEventBus` struct that lived
+// here pre-Task-9 is also deleted — spec §4 acceptance demands
+// exactly one `CompositeEventBus::new` call in the codebase and that
+// site is now `crates/app/src/container.rs::AppContainer::new`.
 // ---------------------------------------------------------------------------
 
 /// Updates the database in response to filesystem events.
@@ -129,16 +131,6 @@ impl EventBus for DbEventHandler {
                 Ok(())
             }
         }
-    }
-}
-
-/// Logs every filesystem event at INFO level.
-pub struct LogEventHandler;
-
-impl EventBus for LogEventHandler {
-    fn emit(&self, event: &FileEvent) -> Result<(), CoreError> {
-        tracing::info!(?event, "file event");
-        Ok(())
     }
 }
 

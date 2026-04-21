@@ -23,7 +23,7 @@ pub mod state;
 use std::path::Path;
 use std::sync::Arc;
 
-use perima_app::{AppContainer, AppDeps};
+use perima_app::{AppContainer, AppDeps, LogEventHandler};
 use perima_core::{
     EventBus, FileRepository, HashService, MetadataRepository, Scanner, SearchRepository,
     TagRepository, VolumeRepository,
@@ -38,7 +38,7 @@ use perima_media::ThumbnailGenerator;
 use tauri::Manager;
 use tauri_specta::{Builder, collect_commands};
 
-use crate::commands::{DbEventHandler, LogEventHandler};
+use crate::commands::DbEventHandler;
 use crate::events::TauriEventEmitter;
 
 /// Boxed error type used by [`run`].
