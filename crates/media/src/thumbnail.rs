@@ -18,8 +18,9 @@
 
 use std::path::{Path, PathBuf};
 
+use fast_image_resize::images::Image;
+use fast_image_resize::{IntoImageView, Resizer};
 use image::ImageReader;
-use image::imageops::FilterType;
 use perima_core::{BlakeHash, CoreError};
 
 /// Generate WebP thumbnails for image sources.
@@ -65,6 +66,42 @@ impl std::fmt::Debug for ThumbnailGenerator {
 /// room for 1.25× `HiDPI` displays without blowing up storage (100 K
 /// images × ~20 KB each ≈ 2 GB, acceptable per plan risks section).
 pub const DEFAULT_MAX_SIZE: u32 = 256;
+
+/// Compute fit-in-box dimensions preserving aspect ratio.
+///
+/// WHY: `image::DynamicImage::resize` does this internally; `fast_image_resize`
+/// expects explicit target dimensions.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    // WHY: ratio is in (0.0, 1.0] (box ≤ src), and src_w / src_h are u32, so
+    // src * ratio is ≥ 0 and ≤ src_w/src_h < u32::MAX. Truncation after
+    // .round() is deliberate and safe here.
+)]
+fn compute_fit(src_w: u32, src_h: u32, box_w: u32, box_h: u32) -> (u32, u32) {
+    let ratio = (f64::from(box_w) / f64::from(src_w)).min(f64::from(box_h) / f64::from(src_h));
+    let dst_w = ((f64::from(src_w) * ratio).round() as u32).max(1);
+    let dst_h = ((f64::from(src_h) * ratio).round() as u32).max(1);
+    (dst_w, dst_h)
+}
+
+/// Normalize input to a pixel type our resize match can handle.
+///
+/// WHY: `fast_image_resize` + image-feature exposes `pixel_type()` which returns
+/// None for some `DynamicImage` variants (16-bit PNG, HDR f32, grayscale+alpha).
+/// Rather than regressing thumbnail support for exotic inputs, coerce them to
+/// 8-bit of the closest channel-count match. Common cases (Rgb8/Rgba8/Luma8)
+/// pass through unchanged — the "RGB→RGBA promotion" regression is guarded.
+fn coerce_for_resize(img: image::DynamicImage) -> image::DynamicImage {
+    use image::DynamicImage::{ImageLuma8, ImageRgb8, ImageRgba8};
+    match &img {
+        ImageLuma8(_) | ImageRgb8(_) | ImageRgba8(_) => img,
+        // LumaA8, 16-bit, HDR, and any future variant: coerce to 8-bit RGBA.
+        // LumaA8 has no 1:1 fast_image_resize PixelType — promote to RGBA to
+        // preserve alpha. All other exotic variants similarly downgrade to RGBA.
+        _ => ImageRgba8(img.to_rgba8()),
+    }
+}
 
 impl ThumbnailGenerator {
     /// Construct a generator rooted at `data_dir` with
@@ -134,6 +171,75 @@ impl ThumbnailGenerator {
             .join(format!("{hex}.webp"))
     }
 
+    /// Resize `img` to fit within `max_size × max_size` using
+    /// SIMD-accelerated Lanczos3 via `fast_image_resize`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::Internal` if `fast_image_resize` cannot handle
+    /// the pixel type after coercion (should be unreachable in practice).
+    fn resize_image(&self, img: image::DynamicImage) -> Result<image::DynamicImage, CoreError> {
+        // WHY fast_image_resize: 3-10× faster than image::imageops::resize
+        // (SIMD Lanczos3: SSE4.1/AVX2/NEON/WASM). Audit §Q5. Default algorithm
+        // for Resizer::new() is Lanczos3 for convolution-capable pixel types,
+        // so no ResizeOptions needed.
+
+        // Normalize exotic variants (16-bit, HDR, LumaA) to 8-bit before resize.
+        // Common RGB/RGBA/Luma8 pass through unchanged.
+        let img = coerce_for_resize(img);
+
+        let (dst_w, dst_h) = compute_fit(img.width(), img.height(), self.max_size, self.max_size);
+
+        // `img` is DynamicImage; with `features = ["image"]` it implements IntoImageView
+        // so we read pixels directly, no buffer copy. After coerce_for_resize, pixel_type()
+        // is guaranteed Some(U8 / U8x3 / U8x4).
+        let pixel_type = img.pixel_type().ok_or_else(|| {
+            CoreError::Internal(format!(
+                "fast_image_resize: coerce_for_resize returned unsupported variant ({:?})",
+                img.color()
+            ))
+        })?;
+
+        let mut dst = Image::new(dst_w, dst_h, pixel_type);
+
+        Resizer::new()
+            .resize(&img, &mut dst, None)
+            .map_err(|e| CoreError::Internal(format!("fast_image_resize: {e}")))?;
+
+        // Wrap dst back into DynamicImage matching the source pixel type.
+        // WHY into_vec(): consumes `dst` and returns the already-allocated Vec<u8>
+        // without copying (BufferContainer::Owned path in fast_image_resize 6.x).
+        let buf = dst.into_vec();
+        let resized = match pixel_type {
+            fast_image_resize::PixelType::U8x3 => image::DynamicImage::ImageRgb8(
+                image::RgbImage::from_raw(dst_w, dst_h, buf).ok_or_else(|| {
+                    CoreError::Internal("RgbImage::from_raw returned None".into())
+                })?,
+            ),
+            fast_image_resize::PixelType::U8x4 => image::DynamicImage::ImageRgba8(
+                image::RgbaImage::from_raw(dst_w, dst_h, buf).ok_or_else(|| {
+                    CoreError::Internal("RgbaImage::from_raw returned None".into())
+                })?,
+            ),
+            fast_image_resize::PixelType::U8 => image::DynamicImage::ImageLuma8(
+                image::GrayImage::from_raw(dst_w, dst_h, buf).ok_or_else(|| {
+                    CoreError::Internal("GrayImage::from_raw returned None".into())
+                })?,
+            ),
+            // WHY defense-in-depth: coerce_for_resize guarantees U8/U8x3/U8x4
+            // above, so this arm is statically unreachable. The Err path exists
+            // to avoid a panic if a future fast_image_resize version adds new
+            // PixelType variants that bypass the coerce guarantee.
+            other => {
+                return Err(CoreError::Internal(format!(
+                    "fast_image_resize: thumbnail path saw unexpected pixel type {other:?}"
+                )));
+            }
+        };
+
+        Ok(resized)
+    }
+
     /// Decode `source`, resize to fit `max_size` while preserving
     /// aspect, encode as WebP, and atomically write to the target
     /// computed by [`path_for`](Self::path_for).
@@ -178,10 +284,7 @@ impl ThumbnailGenerator {
             .decode()
             .map_err(|e| CoreError::Internal(format!("decode {}: {e}", source.display())))?;
 
-        // WHY `resize` (not `resize_exact`): preserves aspect ratio,
-        // clamping the longer side to `max_size`. A 1000×500 input
-        // becomes 256×128 with `max_size = 256`.
-        let resized = img.resize(self.max_size, self.max_size, FilterType::Lanczos3);
+        let resized = self.resize_image(img)?;
 
         // WHY atomic write: without `.tmp` + `rename` a crash mid-
         // encode leaves a half-written `.webp` that passes the
@@ -210,10 +313,11 @@ impl ThumbnailGenerator {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use std::path::Path;
 
-    use image::{ImageBuffer, Rgb};
+    use image::{DynamicImage, ImageBuffer, Rgb};
     use tempfile::TempDir;
 
     use super::*;
@@ -369,5 +473,166 @@ mod tests {
         );
         // No directories created under an ephemeral `PathBuf::new()`
         // root (the disabled generator never touches the filesystem).
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run: cargo test -p perima-media --release resize_only_bench -- --ignored --nocapture"]
+    #[allow(clippy::unwrap_used, clippy::print_stderr)]
+    fn resize_only_bench() {
+        use std::time::Instant;
+        let tmp = tempfile::tempdir().unwrap();
+        let tgen = ThumbnailGenerator::with_max_size(tmp.path().to_path_buf(), 512);
+
+        // 4928×3279 (24MP) matches fast_image_resize's upstream benchmark.
+        // Smaller sources hide the SIMD win behind loop overhead.
+        let rgb = image::RgbImage::from_pixel(4928, 3279, image::Rgb([128, 64, 32]));
+        let src_dyn = image::DynamicImage::ImageRgb8(rgb);
+
+        let start = Instant::now();
+        for _ in 0..50 {
+            let _ = tgen.resize_image(src_dyn.clone()).expect("resize_image");
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "resize_only_bench: 50 iters 4928x3279 → 512x(aspect) in {elapsed:?} ({:?} / iter)",
+            elapsed / 50
+        );
+    }
+
+    // --- pixel-type preservation tests (merged from former mod pixel_type_tests) ---
+
+    #[test]
+    fn resize_preserves_rgb_source_as_rgb() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tgen = ThumbnailGenerator::with_max_size(tmp.path().to_path_buf(), 64);
+
+        let rgb = image::RgbImage::from_pixel(200, 100, image::Rgb([200, 100, 50]));
+        let src = DynamicImage::ImageRgb8(rgb);
+
+        let resized = tgen.resize_image(src).expect("resize_image");
+
+        assert!(
+            matches!(resized, DynamicImage::ImageRgb8(_)),
+            "RGB source must stay RGB after resize; got {:?}",
+            resized.color()
+        );
+    }
+
+    #[test]
+    fn resize_preserves_rgba_source_as_rgba() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tgen = ThumbnailGenerator::with_max_size(tmp.path().to_path_buf(), 64);
+
+        let rgba = image::RgbaImage::from_pixel(200, 100, image::Rgba([200, 100, 50, 180]));
+        let src = DynamicImage::ImageRgba8(rgba);
+
+        let resized = tgen.resize_image(src).expect("resize_image");
+
+        assert!(
+            matches!(resized, DynamicImage::ImageRgba8(_)),
+            "RGBA source must stay RGBA after resize; got {:?}",
+            resized.color()
+        );
+    }
+
+    #[test]
+    fn resize_coerces_16bit_rgb_to_8bit_rgba() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tgen = ThumbnailGenerator::with_max_size(tmp.path().to_path_buf(), 64);
+
+        let rgb16 = image::ImageBuffer::<image::Rgb<u16>, _>::from_pixel(
+            200,
+            100,
+            image::Rgb([30000_u16, 20000, 10000]),
+        );
+        let src = DynamicImage::ImageRgb16(rgb16);
+
+        let resized = tgen.resize_image(src).expect("resize_image");
+
+        assert!(
+            matches!(
+                resized,
+                DynamicImage::ImageRgba8(_) | DynamicImage::ImageRgb8(_)
+            ),
+            "16-bit source must coerce to 8-bit variant; got {:?}",
+            resized.color()
+        );
+    }
+
+    // --- new regression tests (fixes 4, 5, 6) ---
+
+    #[test]
+    fn resize_preserves_luma8_source_as_luma8() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tgen = ThumbnailGenerator::with_max_size(tmp.path().to_path_buf(), 64);
+
+        let luma = image::GrayImage::from_pixel(200, 100, image::Luma([128_u8]));
+        let src = DynamicImage::ImageLuma8(luma);
+
+        let resized = tgen.resize_image(src).expect("resize_image");
+
+        assert!(
+            matches!(resized, DynamicImage::ImageLuma8(_)),
+            "Luma8 source must stay Luma8 after resize; got {:?}",
+            resized.color()
+        );
+    }
+
+    #[test]
+    fn resize_coerces_lumaa8_to_rgba8_preserving_alpha() {
+        // coerce_for_resize promotes LumaA8 (grayscale + alpha) to RGBA8
+        // because fast_image_resize has no PixelType::U8x2 in our match.
+        // This test verifies alpha is preserved through the promotion.
+        let tmp = tempfile::tempdir().unwrap();
+        let tgen = ThumbnailGenerator::with_max_size(tmp.path().to_path_buf(), 64);
+
+        // Use a LumaA8 with non-opaque alpha so the test meaningfully
+        // verifies alpha survives.
+        let lumaa = image::ImageBuffer::<image::LumaA<u8>, _>::from_pixel(
+            200,
+            100,
+            image::LumaA([128, 180]),
+        );
+        let src = DynamicImage::ImageLumaA8(lumaa);
+
+        let resized = tgen.resize_image(src).expect("resize_image");
+
+        assert!(
+            matches!(resized, DynamicImage::ImageRgba8(_)),
+            "LumaA8 source must coerce to RGBA8 after resize; got {:?}",
+            resized.color()
+        );
+    }
+
+    #[test]
+    fn generate_handles_16bit_png_via_full_pipeline() {
+        // Regression: 16-bit PNG decodes to DynamicImage::ImageRgb16 (or Rgba16),
+        // which coerce_for_resize normalizes to RGBA8. Without the coerce path
+        // the pixel_type() call would fail. Verify the full generate() pipeline
+        // produces a thumbnail file for this exotic input.
+        let tmp = tempfile::tempdir().unwrap();
+        let src_path = tmp.path().join("16bit.png");
+
+        // Build a 16-bit RGB PNG and save it.
+        let rgb16 = image::ImageBuffer::<image::Rgb<u16>, _>::from_pixel(
+            300,
+            200,
+            image::Rgb([30000_u16, 20000, 10000]),
+        );
+        image::DynamicImage::ImageRgb16(rgb16)
+            .save(&src_path)
+            .expect("save 16-bit PNG");
+
+        let tgen = ThumbnailGenerator::with_max_size(tmp.path().to_path_buf(), 64);
+
+        // Fabricate a hash for the content-addressed thumbnail path.
+        let hash_bytes = *blake3::hash(b"16bit-png-test-fixture").as_bytes();
+        let hash = perima_core::BlakeHash::from_bytes(hash_bytes);
+
+        let out = tgen
+            .generate(&hash, &src_path)
+            .expect("generate")
+            .expect("Some path");
+        assert!(out.exists(), "Thumbnail file should exist at {out:?}");
     }
 }

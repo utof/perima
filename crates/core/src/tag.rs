@@ -1,6 +1,11 @@
 //! Tag value type + name normalization.
 
 use serde::{Deserialize, Serialize};
+// WHY: `unicode-normalization` is KEPT in the workspace solely for
+// this tag-name NFC normalization. Path code (MediaPath) no longer
+// uses it post-L5 (see GH issue #113). See GH issue
+// #112 for the long-term tag normalization question (is NFC
+// load-bearing, or handled by SQLite collation?).
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 

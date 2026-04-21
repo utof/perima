@@ -443,6 +443,7 @@ fn validate_root(root: &Path) -> Result<(), CoreError> {
 }
 
 fn canonicalize_for_walk(root: &Path) -> Result<PathBuf, CoreError> {
-    // dunce::canonicalize avoids UNC prefixes on Windows.
-    dunce::canonicalize(root).map_err(CoreError::Io)
+    // WHY: routes through perima_fs::platform_path::canonicalize — the single
+    // source of truth for the #[cfg(windows)] dunce / std fallback.
+    perima_fs::platform_path::canonicalize(root).map_err(CoreError::Io)
 }

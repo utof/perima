@@ -9,8 +9,16 @@ publish = false  # WHY: intra-workspace only; not published to crates.io
 
 [dependencies]
 perima-core = { path = "../core" }
+# WHY crate-local (not workspace): L7 will separately update workspace deps;
+# keeping this local avoids any race between the two tasks.
+fast_image_resize = { version = "6", features = ["image"] }
 image.workspace        = true
-kamadak-exif.workspace = true
+nom-exif.workspace     = true
+# WHY chrono: nom-exif's as_time_components() returns (NaiveDateTime, Option<FixedOffset>);
+# we need NaiveDateTime::format for the naive path and DateTime::to_rfc3339 for the
+# offset-aware path. No `use chrono::…` appears in media source files because the
+# inferred types flow from nom-exif's return values — the dep is real, just implicit.
+chrono.workspace       = true
 mp4parse.workspace     = true
 mime_guess.workspace   = true
 tokio.workspace        = true

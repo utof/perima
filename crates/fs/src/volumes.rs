@@ -21,7 +21,8 @@ pub struct DetectedVolume {
 
 /// Detect the volume that contains `path` using a longest mount-prefix match.
 ///
-/// Canonicalizes `path` via `dunce::canonicalize`, then enumerates all
+/// Canonicalizes `path` via [`crate::platform_path::canonicalize`]
+/// (dunce on Windows, `std::fs::canonicalize` elsewhere), then enumerates all
 /// disks with [`sysinfo::Disks::new_with_refreshed_list`] and finds the
 /// disk whose mount point is the longest prefix of the canonicalized path.
 ///
@@ -30,7 +31,7 @@ pub struct DetectedVolume {
 /// - `CoreError::Io` if `path` cannot be canonicalized (e.g. does not exist).
 /// - `CoreError::Internal` if no mounted disk covers the path.
 pub fn detect_volume(path: &Path) -> Result<DetectedVolume, CoreError> {
-    let canonical = dunce::canonicalize(path)?;
+    let canonical = crate::platform_path::canonicalize(path)?;
     let disks = Disks::new_with_refreshed_list();
 
     // WHY: longest-prefix wins so that nested mounts (e.g. /mnt/data and

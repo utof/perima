@@ -103,7 +103,7 @@ export default [
       // WHY: react-hooks v7 adds many new experimental rules. The classic two
       // (rules-of-hooks, exhaustive-deps) are the critical ones; downgrade the
       // rest to warn until we've audited the codebase against v7's semantics.
-      // Follow-up: https://github.com/utof/perima (file issue for each warn below)
+      // Follow-up: see GH issue #116 for the audit plan.
       "react-hooks/static-components": "warn",
       "react-hooks/use-memo": "warn",
       "react-hooks/void-use-memo": "warn",

@@ -112,27 +112,37 @@ const fn parse_nibble(b: u8) -> Option<u8> {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct FileSize(pub u64);
 
-/// Path relative to a volume root. NFC-normalized, forward-slash,
-/// no leading slash. The constructor is *idempotent* AND makes
-/// canonically-equivalent inputs compare equal (NFC = NFD).
+/// Path relative to a volume root. Forward-slash, no leading slash.
 ///
-/// WHY: the combination of (NFC normalization + forward-slash
-/// conversion + leading-slash strip) in one pass is what makes
-/// the constructor simultaneously idempotent AND case-canonical
-/// under Unicode equivalence. Splitting these into separate
-/// passes would preserve idempotence but break equivalence
-/// (NFC-then-slash-fix would still differ from slash-fix-then-NFC
-/// on edge cases involving combining marks inside path segments).
+/// The constructor is *idempotent* over lexical form (double-slash and
+/// leading-slash inputs produce the same bytes on re-construction).
+/// It does NOT attempt Unicode canonical-equivalence; two `MediaPaths`
+/// constructed from NFC and NFD spellings of the same visual filename
+/// will compare unequal by byte.
+///
+/// WHY the NFC guarantee was removed (see lib-audit L5): macOS NFD
+/// vs NFC equivalence is better handled at the filesystem layer by
+/// round-tripping the OS's own normalization via a canonicalize call
+/// (in perima, `dunce::canonicalize` which delegates to
+/// `std::fs::canonicalize` on non-Windows and strips `\\?\` prefixes
+/// on Windows). Production `MediaPaths` are constructed downstream
+/// of a canonicalized walk (see
+/// `crates/cli/src/cmd/scan.rs::canonicalize_for_walk` and peers),
+/// so they receive platform-consistent bytes. Callers constructing
+/// `MediaPaths` from user-typed strings (rare in production; this
+/// type is typically machine-derived from canonicalized walk output)
+/// accept the byte-exact-match contract.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct MediaPath(String);
 
 impl MediaPath {
     /// Construct a normalized `MediaPath` from a raw string.
+    ///
+    /// Converts `\\` to `/` and strips leading `/`. Does NOT perform
+    /// Unicode normalization — see struct-level doc.
     #[must_use]
     pub fn new(raw: &str) -> Self {
-        use unicode_normalization::UnicodeNormalization;
-        let nfc: String = raw.nfc().collect();
-        let slashed = nfc.replace('\\', "/");
+        let slashed = raw.replace('\\', "/");
         let trimmed = slashed.trim_start_matches('/').to_owned();
         Self(trimmed)
     }
@@ -187,7 +197,12 @@ impl Default for DeviceId {
 pub struct DiscoveredFile {
     /// Absolute path as observed during the walk.
     pub absolute_path: PathBuf,
-    /// Path relative to the volume root, NFC-normalized.
+    /// Path relative to the volume root. Lexical normalization only
+    /// (forward-slash, no leading slash). NFC normalization is a
+    /// filesystem-layer concern handled upstream by the canonicalized
+    /// walk; see `MediaPath`'s struct-level doc and
+    /// `crates/core/tests/props_path_nfc_equivalence.rs` for the
+    /// mechanism.
     pub relative_path: MediaPath,
     /// File size in bytes at walk time.
     pub size: FileSize,
@@ -336,11 +351,16 @@ mod tests {
     }
 
     #[test]
-    fn media_path_nfc_equivalence_fixed() {
-        // "café" — precomposed (NFC) vs decomposed (NFD).
-        let precomposed = "caf\u{00E9}";
-        let decomposed = "cafe\u{0301}";
-        assert_eq!(MediaPath::new(precomposed), MediaPath::new(decomposed));
+    fn media_path_no_longer_nfc_collapses() {
+        // Post-L5: MediaPath::new is lexical-only. NFC and NFD spellings
+        // of "café" produce byte-distinct MediaPaths. Equivalence across
+        // Unicode forms is a filesystem-layer concern (fs::canonicalize),
+        // not a MediaPath::new concern.
+        let precomposed = "caf\u{00E9}"; // NFC, 5 bytes
+        let decomposed = "cafe\u{0301}"; // NFD, 6 bytes
+        assert_ne!(MediaPath::new(precomposed), MediaPath::new(decomposed));
+        // But identical spellings still collapse.
+        assert_eq!(MediaPath::new(precomposed), MediaPath::new(precomposed));
     }
 
     #[test]
