@@ -25,12 +25,14 @@
 
 #![forbid(unsafe_code)]
 
+pub mod container;
 pub mod metadata;
 pub mod scan;
 pub mod search;
 pub mod tag;
 pub mod volume;
 
+pub use container::{AppContainer, AppDeps, CompositeEventBus};
 pub use metadata::{MetadataCommand, MetadataOutput, MetadataUseCase};
 pub use scan::{
     FullScan, METADATA_DRAIN_TIMEOUT, OnPersist, ScanCommand, ScanReport, ScanReportEntry,
