@@ -13,14 +13,26 @@ perima-fs    = { path = "../fs" }
 perima-hash  = { path = "../hash" }
 perima-media = { workspace = true }
 tokio.workspace    = true
+tokio-util.workspace = true
 thiserror.workspace = true
 tracing.workspace  = true
-# Note: tokio-util NOT included; add only if a UseCase actually needs CancellationToken.
+# WHY rayon: ScanUseCase parallelizes BLAKE3 hashing across CPUs via
+# `par_iter`. Matches the pattern in `crates/cli/src/cmd/scan.rs`
+# pre-extraction; Batch B preserves the exact orchestration shape.
+rayon.workspace    = true
+# WHY uuid: VolumeId fallback in dry-run path uses `Uuid::nil()`.
+uuid.workspace     = true
 
 [dev-dependencies]
 tempfile.workspace = true
 proptest.workspace = true
 insta.workspace    = true
+# WHY perima-db + rusqlite in dev-deps: integration-flavored unit tests
+# construct real SQLite-backed adapters (matching crates/db::file_repo
+# tests) rather than invent new mock ports. DB is NOT a runtime dep of
+# crates/app — shells inject `Arc<dyn Port>` adapters.
+perima-db = { path = "../db" }
+rusqlite.workspace = true
 
 [lints]
 workspace = true

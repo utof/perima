@@ -25,5 +25,9 @@
 
 #![forbid(unsafe_code)]
 
-// Modules land incrementally (Tasks 2-7 + 10); re-exports added at
-// the bottom of this file by each task as its module appears.
+pub mod scan;
+
+pub use scan::{
+    FullScan, METADATA_DRAIN_TIMEOUT, OnPersist, ScanCommand, ScanReport, ScanReportEntry,
+    ScanUseCase,
+};

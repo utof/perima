@@ -3287,6 +3287,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "perima-app"
+version = "0.6.4"
+dependencies = [
+ "insta",
+ "perima-core",
+ "perima-db",
+ "perima-fs",
+ "perima-hash",
+ "perima-media",
+ "proptest",
+ "rayon",
+ "rusqlite",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "perima-core"
 version = "0.6.4"
 dependencies = [
