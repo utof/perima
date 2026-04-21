@@ -26,8 +26,10 @@
 #![forbid(unsafe_code)]
 
 pub mod scan;
+pub mod search;
 
 pub use scan::{
     FullScan, METADATA_DRAIN_TIMEOUT, OnPersist, ScanCommand, ScanReport, ScanReportEntry,
     ScanUseCase,
 };
+pub use search::{SearchCommand, SearchOutput, SearchUseCase};
