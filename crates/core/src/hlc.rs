@@ -9,15 +9,15 @@
 //!
 //! A packed HLC is a non-negative `i64`:
 //!
-//! - bits 0..=47  — millisecond timestamp (48-bit mask; 47 bits of
-//!   positive ms = ~4460 years from Unix epoch)
-//! - bits 48..=62 — same-ms monotonic counter (15 bits, max 32767)
-//! - bit  63      — always 0 (i64 sign bit; enforces non-negative)
+//! - bits 0..=15  — same-ms monotonic counter (full u16, max 65535)
+//! - bits 16..=62 — millisecond timestamp (47 bits = ~4460 years from the Unix epoch)
+//! - bit  63      — always 0 (i64 sign bit; enforced by [`HLC_MAX_MS`])
 //!
-//! This layout encodes `Ord` over `(ms, counter)` directly as `Ord`
-//! over the packed `i64`. The counter is stored as `u16` but capped
-//! at `HLC_MAX_COUNTER = 2^15 - 1` so shifting it into bits 48-62
-//! never touches bit 63.
+//! This layout puts `ms` in the HIGH bits and `counter` in the LOW
+//! bits, so `Ord` over the packed `i64` matches `Ord` over
+//! `(ms, counter)` — the same order that `Hlc` derives via
+//! `#[derive(Ord)]` with `ms` as the first field. This Ord match is
+//! load-bearing for SQL `ORDER BY hlc`.
 //!
 //! # Monotonicity
 //!
@@ -30,25 +30,29 @@
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Hybrid Logical Clock value. Monotonically non-decreasing per
-/// process via [`Hlc::now`].
+/// Hybrid Logical Clock value.
+///
+/// Monotonically non-decreasing per process via [`Hlc::now`].
+/// `#[derive(Ord)]` yields the intended `(ms, counter)` lexicographic
+/// order — the same order the packed i64 form exposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Hlc {
-    /// Milliseconds since the Unix epoch (48 low bits of packed form;
-    /// capped at `HLC_MAX_MS`).
+    /// Milliseconds since the Unix epoch (bits 16-62 of packed form;
+    /// capped at [`HLC_MAX_MS`]).
     pub ms: u64,
-    /// Same-ms tiebreak counter (bits 48-62 of packed form; capped at
-    /// `HLC_MAX_COUNTER`).
+    /// Same-ms tiebreak counter (bits 0-15 of packed form; full u16
+    /// range).
     pub counter: u16,
 }
 
 /// Maximum `ms` representable in the packed form (2^47 - 1 ≈ 4460
-/// years from Unix epoch).
+/// years from Unix epoch). Capped at 47 bits so that the packed `i64`
+/// sign bit (bit 63) stays 0.
 pub const HLC_MAX_MS: u64 = (1u64 << 47) - 1;
 
-/// Maximum `counter` representable in the packed form (2^15 - 1).
-/// Capped at 15 bits so that packing never sets the i64 sign bit.
-pub const HLC_MAX_COUNTER: u16 = (1u16 << 15) - 1;
+/// Maximum `counter` representable in the packed form ([`u16::MAX`]).
+/// Counter lives in the low 16 bits; no sign-bit concern.
+pub const HLC_MAX_COUNTER: u16 = u16::MAX;
 
 /// Shared mutable state for [`Hlc::now`]. Per-process; across
 /// processes the counter resets but `ms` typically advances between
@@ -68,6 +72,7 @@ impl Hlc {
     /// monotonicity. Unreachable in practice (~year 6429 from epoch)
     /// but documented here. Multi-device sync in v2 will persist
     /// `last_hlc` in `device_config` and detect this explicitly.
+    ///
     /// # Panics
     ///
     /// Panics if the internal HLC mutex is poisoned (only possible if a
@@ -87,7 +92,7 @@ impl Hlc {
                 ms: wall_ms,
                 counter: 0,
             };
-        } else if state.counter >= HLC_MAX_COUNTER {
+        } else if state.counter == HLC_MAX_COUNTER {
             // Counter saturated within one ms — advance ms to
             // preserve total order. At HLC_MAX_MS this saturates
             // (documented above).
@@ -102,14 +107,14 @@ impl Hlc {
     }
 
     /// Pack into a non-negative `i64` suitable for `SQLite` `INTEGER`
-    /// (stored as a raw integer column). Sign bit is always 0 because
-    /// `ms` is masked to 48 bits and `counter` is masked to 15 bits
-    /// via [`HLC_MAX_COUNTER`] before shifting into bits 48-62.
+    /// storage. Bit 63 stays 0 because [`HLC_MAX_MS`] caps `ms` at
+    /// 47 bits; `ms` occupies bits 16-62 and `counter` bits 0-15.
+    /// `Ord` over the packed `i64` matches `Ord` over `(ms, counter)`.
     #[must_use]
-    #[allow(clippy::cast_possible_wrap)] // WHY: ms_bits masked to 48 bits + counter_bits capped to 15 bits in 48-62; bit 63 always 0, so i64 is non-negative.
-    pub fn pack(&self) -> i64 {
-        let ms_bits = self.ms & ((1u64 << 48) - 1);
-        let counter_bits = u64::from(self.counter & HLC_MAX_COUNTER) << 48;
+    #[allow(clippy::cast_possible_wrap)] // WHY: ms capped at HLC_MAX_MS keeps bit 63 = 0 after the <<16; always non-negative i64.
+    pub const fn pack(&self) -> i64 {
+        let ms_bits = (self.ms & HLC_MAX_MS) << 16;
+        let counter_bits = self.counter as u64;
         (ms_bits | counter_bits) as i64
     }
 
@@ -118,10 +123,10 @@ impl Hlc {
     /// are always non-negative).
     #[must_use]
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // WHY: packed values from pack() are always non-negative i64 with known bit layout.
-    pub fn unpack(packed: i64) -> Self {
+    pub const fn unpack(packed: i64) -> Self {
         let bits = packed as u64;
-        let ms = bits & ((1u64 << 48) - 1);
-        let counter = ((bits >> 48) & u64::from(HLC_MAX_COUNTER)) as u16;
+        let counter = (bits & 0xFFFF) as u16;
+        let ms = (bits >> 16) & HLC_MAX_MS;
         Self { ms, counter }
     }
 }
@@ -157,6 +162,58 @@ mod tests {
             assert!(
                 h.pack() >= 0,
                 "pack produced negative i64 for ({ms}, {counter})"
+            );
+        }
+    }
+
+    #[test]
+    fn packed_ord_matches_derived_ord() {
+        // The packed i64 form MUST preserve `(ms, counter)` ordering
+        // so SQL `ORDER BY hlc` returns rows in HLC order.
+        let cases = [
+            (
+                Hlc {
+                    ms: 100,
+                    counter: 0,
+                },
+                Hlc { ms: 50, counter: 1 },
+            ),
+            (Hlc { ms: 0, counter: 1 }, Hlc { ms: 0, counter: 0 }),
+            (
+                Hlc { ms: 1, counter: 0 },
+                Hlc {
+                    ms: 0,
+                    counter: HLC_MAX_COUNTER,
+                },
+            ),
+            (
+                Hlc {
+                    ms: HLC_MAX_MS,
+                    counter: 0,
+                },
+                Hlc {
+                    ms: HLC_MAX_MS - 1,
+                    counter: HLC_MAX_COUNTER,
+                },
+            ),
+            (
+                Hlc {
+                    ms: 42,
+                    counter: 42,
+                },
+                Hlc {
+                    ms: 42,
+                    counter: 42,
+                },
+            ),
+        ];
+        for (a, b) in cases {
+            assert_eq!(
+                a.cmp(&b),
+                a.pack().cmp(&b.pack()),
+                "packed Ord mismatches derived Ord for {a:?} vs {b:?} (packed {} vs {})",
+                a.pack(),
+                b.pack()
             );
         }
     }
