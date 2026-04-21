@@ -208,13 +208,22 @@ async fn main() -> ExitCode {
 
 /// Build an [`AppContainer`] for a given database path.
 ///
+/// `extra_handlers` lets callers inject additional [`EventBus`] implementations
+/// before the single [`perima_app::CompositeEventBus`] is constructed inside
+/// [`AppContainer::new`]. The `watch` dispatcher uses this to inject its
+/// `DbEventHandler` so that filesystem events can mutate location rows via the
+/// shared bus without constructing a second `CompositeEventBus` in the shell.
+///
 /// WHY one connection per repo (not one `Arc<Mutex<Connection>>` shared):
 /// each `Sqlite*Repository` owns its own `Mutex<Connection>` today (see
 /// `crates/db/src/*_repo.rs`). Under WAL mode opening multiple connections
 /// to the same file is cheap and avoids a second layer of `Mutex` that none
 /// of the repo constructors accept. Batch C (connection-actor) will
 /// consolidate this to a single writer + read pool.
-fn build_container(db_path: &Path) -> Result<Arc<AppContainer>, perima_core::CoreError> {
+fn build_container(
+    db_path: &Path,
+    extra_handlers: Vec<Arc<dyn EventBus>>,
+) -> Result<Arc<AppContainer>, perima_core::CoreError> {
     let files: Arc<dyn FileRepository> =
         Arc::new(SqliteFileRepository::new(open_and_migrate(db_path)?));
     let volumes: Arc<dyn VolumeRepository> =
@@ -252,14 +261,33 @@ fn build_container(db_path: &Path) -> Result<Arc<AppContainer>, perima_core::Cor
         thumbnailer,
     };
 
-    // WHY a log-only handler set at the CLI level: the `watch` command
-    // still constructs its own `DbEventHandler` + local `CompositeEventBus`
-    // (see `cmd/watch.rs` WHY-block for rationale). Other commands don't
-    // emit events yet (Batch E); passing a log handler here keeps the
-    // container honest and lets tracing show any event emissions if a
-    // future UseCase does emit.
+    // WHY log handler always first: every command benefits from tracing
+    // event emissions; `extra_handlers` (injected by the watch dispatcher)
+    // are appended after so the log entry always fires before DB writes.
     let log_handler: Arc<dyn EventBus> = Arc::new(crate::cmd::watch::LogEventHandler);
-    Ok(AppContainer::new(deps, vec![log_handler]))
+    let mut handlers: Vec<Arc<dyn EventBus>> = vec![log_handler];
+    handlers.extend(extra_handlers);
+    Ok(AppContainer::new(deps, handlers))
+}
+
+/// Build a `DbEventHandler` for the `watch` command, wrapped as `Arc<dyn EventBus>`.
+///
+/// WHY a dedicated helper: `dispatch_watch` must construct the handler
+/// before calling `build_container` so it can be passed as an `extra_handler`.
+/// Extracting it here keeps `dispatch_watch` focused on control-flow and makes
+/// the single-connection justification easy to find.
+fn build_watch_db_handler(
+    db_path: &Path,
+    device_id: perima_core::DeviceId,
+) -> Result<Arc<dyn EventBus>, perima_core::CoreError> {
+    // WHY a fresh connection: `watch` needs its own `SqliteFileRepository`
+    // to mutate location rows as filesystem events arrive. Under WAL mode
+    // opening an additional connection is cheap and safe.
+    let file_conn = open_and_migrate(db_path)?;
+    let file_repo = Arc::new(SqliteFileRepository::new(file_conn));
+    Ok(crate::cmd::watch::make_db_event_handler(
+        file_repo, device_id,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +324,7 @@ async fn dispatch_scan(
     // volume detection internally — no split path needed. Building the
     // container still requires migrations to have run, which is
     // harmless for a fresh dry-run against an empty data dir.
-    let container = match build_container(&db_path) {
+    let container = match build_container(&db_path, vec![]) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: {e}");
@@ -377,7 +405,7 @@ async fn dispatch_ls(
         }
     };
     let db_path = config.data_dir.join("perima.db");
-    let container = match build_container(&db_path) {
+    let container = match build_container(&db_path, vec![]) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database: {e}");
@@ -407,7 +435,7 @@ async fn dispatch_ls(
 /// Run the `tag` subcommand.
 async fn dispatch_tag(args: &cmd::tag::TagArgs, config: &Config) -> ExitCode {
     let db_path = config.data_dir.join("perima.db");
-    let container = match build_container(&db_path) {
+    let container = match build_container(&db_path, vec![]) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database: {e}");
@@ -426,7 +454,20 @@ async fn dispatch_tag(args: &cmd::tag::TagArgs, config: &Config) -> ExitCode {
 /// Run the `watch` subcommand.
 async fn dispatch_watch(root: PathBuf, config: &Config, cancel: &Cancellation) -> ExitCode {
     let db_path = config.data_dir.join("perima.db");
-    let container = match build_container(&db_path) {
+
+    // WHY build the DbEventHandler here and inject via extra_handlers:
+    // watch needs a DB handler so filesystem events mutate location rows.
+    // Constructing it here (before AppContainer::new) keeps CompositeEventBus
+    // construction in exactly one place — container.rs §4 acceptance criterion.
+    let db_handler = match build_watch_db_handler(&db_path, config.device_id) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("perima: database (watch handler): {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let container = match build_container(&db_path, vec![db_handler]) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database: {e}");
@@ -474,7 +515,7 @@ async fn dispatch_metadata(path: PathBuf, json: bool, config: &Config) -> ExitCo
 /// Run the `search` subcommand.
 async fn dispatch_search(args: &cmd::search::SearchArgs, config: &Config) -> ExitCode {
     let db_path = config.data_dir.join("perima.db");
-    let container = match build_container(&db_path) {
+    let container = match build_container(&db_path, vec![]) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database (search): {e}");
@@ -493,7 +534,7 @@ async fn dispatch_search(args: &cmd::search::SearchArgs, config: &Config) -> Exi
 /// Run the `volumes` subcommand.
 async fn dispatch_volumes(config: &Config) -> ExitCode {
     let db_path = config.data_dir.join("perima.db");
-    let container = match build_container(&db_path) {
+    let container = match build_container(&db_path, vec![]) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database: {e}");

@@ -7,19 +7,19 @@
 //! - [`FileEvent::Deleted`] → `status = missing`.
 //! - [`FileEvent::Renamed`] → rename the location row, reset to active.
 //!
-//! WHY still opens its own DB connections (vs. reading them from
-//! `AppContainer`): the watch command needs a `DbEventHandler` with a
-//! live `FileRepository` handle so inbound filesystem events can mutate
-//! location rows. `AppContainer` does not (yet) expose the repo ports
-//! directly — only the `UseCases`. A future batch will either hoist
-//! `DbEventHandler` into `perima_app` or surface the deps on the
-//! container; Task 8 keeps the shell minimal without revising Task 7.
+//! WHY `run` consumes `container.events` directly: `main.rs::dispatch_watch`
+//! constructs a [`DbEventHandler`] via [`make_db_event_handler`] and passes
+//! it as an `extra_handler` to `build_container` before `AppContainer::new`
+//! wraps all handlers in the single [`perima_app::CompositeEventBus`].
+//! `run` then receives `container.events` — the already-composed bus —
+//! and forwards it directly to `DebouncedWatcher`. No second bus
+//! construction happens in the shell layer (resolves spec §4 acceptance).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use perima_app::{AppContainer, CompositeEventBus};
+use perima_app::AppContainer;
 use perima_core::{CoreError, DeviceId, EventBus, FileEvent, LocationStatus, VolumeRepository};
 use perima_db::{SqliteFileRepository, SqliteVolumeRepository, open_and_migrate};
 use perima_fs::DebouncedWatcher;
@@ -97,6 +97,20 @@ impl EventBus for DbEventHandler {
     }
 }
 
+/// Construct a [`DbEventHandler`] wrapped as `Arc<dyn EventBus>`.
+///
+/// WHY `pub(crate)`: `main.rs::dispatch_watch` builds this handler
+/// before calling `build_container`, so it can pass it as an extra
+/// handler and `AppContainer`'s single [`perima_app::CompositeEventBus`]
+/// absorbs it. Only the watch dispatcher needs this — keeping it
+/// `pub(crate)` limits the API surface.
+pub(crate) fn make_db_event_handler(
+    repo: Arc<SqliteFileRepository>,
+    device: DeviceId,
+) -> Arc<dyn perima_core::EventBus> {
+    Arc::new(DbEventHandler { repo, device })
+}
+
 // ---------------------------------------------------------------------------
 // LogEventHandler
 // ---------------------------------------------------------------------------
@@ -147,25 +161,17 @@ fn canonicalize(root: &Path) -> Result<PathBuf, CoreError> {
 
 /// Run the `watch` subcommand.
 ///
-/// Opens the database, detects the volume for `root`, then starts a
-/// [`DebouncedWatcher`] that emits status updates for every filesystem event.
+/// Detects the volume for `root`, then starts a [`DebouncedWatcher`] that
+/// forwards every filesystem event to `container.events` — the shared
+/// [`perima_app::CompositeEventBus`] already wired with the `DbEventHandler`
+/// and `LogEventHandler` by `main.rs::dispatch_watch` before this call.
 /// Blocks until the cancellation token fires (Ctrl-C).
-///
-/// WHY builds its own `CompositeEventBus` (rather than reading
-/// `container.events`): watch needs to fan out to a `DbEventHandler` bound
-/// to a `FileRepository` that can mutate location rows in response to
-/// `Modified` / `Deleted` / `Renamed` events. `container.events` carries
-/// the shell's chosen listener set (log-only today; Task 10 hoists the
-/// log handler up) — the watcher needs the DB handler too, which
-/// `AppContainer` does not currently construct. Re-using
-/// [`perima_app::CompositeEventBus`] (#69 hoist) here is still a net
-/// reduction because the type lives in the app layer, not in this file.
 ///
 /// # Errors
 /// Returns [`CoreError::InvalidPath`] if `root` is not an existing directory;
 /// propagates [`CoreError`] from volume detection, DB access, or watcher init.
 pub(crate) async fn run(
-    _container: &AppContainer,
+    container: &AppContainer,
     data_dir: &Path,
     device_id: DeviceId,
     root: &Path,
@@ -177,26 +183,21 @@ pub(crate) async fn run(
     let detected = perima_fs::detect_volume(&canonical_root)?;
     let db_path = data_dir.join("perima.db");
 
-    // WHY two connections: SqliteVolumeRepository and SqliteFileRepository each
-    // take an owned Connection. Under WAL mode a second open is instant and
-    // allows both repos to operate without a shared connection mutex.
+    // WHY open only a volume connection here: the file repo connection for
+    // event handling was already opened by main.rs::build_watch_db_handler
+    // and injected into container.events via extra_handlers. We still need
+    // a volume repo to resolve or create the volume record at startup.
     let vol_conn = open_and_migrate(&db_path)?;
-    let file_conn = open_and_migrate(&db_path)?;
 
     let vol_repo = SqliteVolumeRepository::new(vol_conn);
     let volume_id = vol_repo.find_or_create(&detected.identifiers, device_id)?;
     vol_repo.record_mount(volume_id, device_id, &detected.mount_point)?;
     drop(vol_repo);
 
-    let file_repo = Arc::new(SqliteFileRepository::new(file_conn));
-
-    let db_handler: Arc<dyn EventBus> = Arc::new(DbEventHandler {
-        repo: Arc::clone(&file_repo),
-        device: device_id,
-    });
-    let log_handler: Arc<dyn EventBus> = Arc::new(LogEventHandler);
-
-    let composite = CompositeEventBus::new(vec![db_handler, log_handler]);
+    // WHY Arc::clone: DebouncedWatcher requires an owned Arc<dyn EventBus>.
+    // container.events is already the composed fan-out bus (DbEventHandler +
+    // LogEventHandler), so we clone the Arc without constructing a new bus.
+    let bus = Arc::clone(&container.events);
 
     // WHY 1 s production debounce: short enough for responsive feedback, long
     // enough to coalesce rapid saves (e.g. editors that write-then-chmod).
@@ -204,7 +205,7 @@ pub(crate) async fn run(
         std::slice::from_ref(&canonical_root),
         &canonical_root,
         volume_id,
-        Arc::new(composite),
+        bus,
         cancel.token(),
         Duration::from_secs(1),
     )?;
