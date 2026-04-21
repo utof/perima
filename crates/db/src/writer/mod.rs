@@ -45,6 +45,8 @@ use rusqlite::Connection;
 use crate::cmd::WriteCmd;
 use crate::connection::open_and_migrate;
 
+mod volume;
+
 /// Handle returned by [`SqliteWriter::start`].
 ///
 /// Clone [`Self::sender`] to inject into repo-adapter constructors.
@@ -218,7 +220,7 @@ fn dispatch(conn: &mut Connection, cmd: WriteCmd, bus: &Arc<dyn EventBus>) {
     //
     // Tasks 2-6 populate each sub-enum's handler following this shape.
     match cmd {
-        WriteCmd::Volume(c) => handle_volume(conn, c, bus),
+        WriteCmd::Volume(c) => volume::handle(conn, c, bus),
         WriteCmd::Tag(c) => handle_tag(conn, c, bus),
         WriteCmd::Metadata(c) => handle_metadata(conn, c, bus),
         WriteCmd::File(c) => handle_file(conn, c, bus),
@@ -228,17 +230,8 @@ fn dispatch(conn: &mut Connection, cmd: WriteCmd, bus: &Arc<dyn EventBus>) {
 
 // WHY allow needless_pass_by_value: `cmd` is moved into `match cmd {}`,
 // which is the canonical exhaustive-match on an uninhabited enum. Clippy
-// can't tell the empty match consumes `cmd`; Tasks 2-6 populate the
+// can't tell the empty match consumes `cmd`; Tasks 3-6 populate the
 // sub-enums and the move becomes load-bearing.
-#[allow(clippy::needless_pass_by_value)]
-fn handle_volume(
-    _conn: &mut Connection,
-    cmd: crate::cmd::VolumeWriteCmd,
-    _bus: &Arc<dyn EventBus>,
-) {
-    match cmd {}
-}
-
 #[allow(clippy::needless_pass_by_value)]
 fn handle_tag(_conn: &mut Connection, cmd: crate::cmd::TagWriteCmd, _bus: &Arc<dyn EventBus>) {
     match cmd {}

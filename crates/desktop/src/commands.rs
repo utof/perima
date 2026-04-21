@@ -25,7 +25,9 @@ use perima_core::{
     CoreError, DeviceId, EventBus, FileEvent, LocationStatus, MetadataExtractor,
     MetadataRepository, SearchRepository, TagRepository, VolumeId,
 };
-use perima_db::{SqliteFileRepository, SqliteVolumeRepository, open_and_migrate};
+use perima_db::{
+    ReadPool, SqliteFileRepository, SqliteVolumeRepository, SqliteWriter, open_and_migrate,
+};
 use perima_fs::{DebouncedWatcher, WalkdirScanner};
 use perima_hash::Blake3Service;
 use perima_media::{
@@ -375,15 +377,27 @@ pub async fn run_scan_inner_with_metadata(
     }
 
     let db_path = data_dir.join("perima.db");
-    // WHY three opens: SqliteFileRepository, SqliteVolumeRepository, and the
-    // sentinel repo each take an owned Connection. WAL mode makes the extra
-    // opens instant once migrations have run on the first connection.
+    // WHY a self-contained writer+pool here (test-only seam): this
+    // helper exists purely for `crates/desktop/tests/commands_test.rs`
+    // to exercise scan logic without constructing `tauri::State`. Its
+    // production peer (the `#[tauri::command] scan` handler) delegates
+    // to `AppContainer.volume` via `state.container`. The writer
+    // handle is dropped at end of scope — its `Sender` is held via
+    // `vol_repo` for the duration of this function call.
+    struct NoopBus;
+    impl EventBus for NoopBus {
+        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+    let writer = SqliteWriter::start(&db_path, Arc::new(NoopBus))?;
+    let reads = ReadPool::open(&db_path)?;
+
     let file_conn = open_and_migrate(&db_path)?;
-    let vol_conn = open_and_migrate(&db_path)?;
     let sentinel_conn = open_and_migrate(&db_path)?;
 
     let file_repo = SqliteFileRepository::new(file_conn);
-    let vol_repo = SqliteVolumeRepository::new(vol_conn);
+    let vol_repo = SqliteVolumeRepository::new(writer.sender(), reads);
     let sentinel_repo = SqliteFileRepository::new(sentinel_conn);
 
     let on_persist = |path: &perima_core::MediaPath, volume: VolumeId, dev: DeviceId| {
@@ -400,7 +414,7 @@ pub async fn run_scan_inner_with_metadata(
     let thumbnailer: Arc<ThumbnailGenerator> =
         Arc::new(ThumbnailGenerator::new(data_dir.to_path_buf()));
 
-    run_scan_live(
+    let result = run_scan_live(
         &scanner,
         &hasher,
         &file_repo,
@@ -412,7 +426,18 @@ pub async fn run_scan_inner_with_metadata(
         metadata_repo,
         thumbnailer,
     )
-    .await
+    .await;
+
+    // WHY explicit join: flush any pending writer commands AND reap the
+    // writer thread before this function returns. Without the drop
+    // ordering here, `writer` and `vol_repo` drop in definition order —
+    // `writer` first (reverse of declaration) — leaving the vol_repo
+    // sender orphaned momentarily. Explicit drop → join pattern makes
+    // the teardown deterministic for the test seam.
+    drop(vol_repo);
+    writer.join();
+
+    result
 }
 
 /// List indexed file locations, optionally filtered by volume.
@@ -593,10 +618,23 @@ pub fn list_volumes_inner(
     data_dir: &Path,
     device_id: DeviceId,
 ) -> Result<Vec<VolumeEntry>, perima_core::CoreError> {
+    // WHY a self-contained writer+pool here (test-only seam): same
+    // rationale as `run_scan_inner_with_metadata`. Production
+    // `#[tauri::command] list_volumes` delegates to
+    // `state.container.volume.execute(List)`.
+    struct NoopBus;
+    impl EventBus for NoopBus {
+        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
     let db_path = data_dir.join("perima.db");
-    let conn = open_and_migrate(&db_path)?;
-    let repo = SqliteVolumeRepository::new(conn);
+    let writer = SqliteWriter::start(&db_path, Arc::new(NoopBus))?;
+    let reads = ReadPool::open(&db_path)?;
+    let repo = SqliteVolumeRepository::new(writer.sender(), reads);
     let records = perima_core::VolumeRepository::list(&repo, device_id)?;
+    drop(repo);
+    writer.join();
     Ok(records.into_iter().map(VolumeEntry::from).collect())
 }
 
@@ -633,21 +671,19 @@ pub async fn start_watch(
 
     // Resolve or create the volume record for this mount.
     //
-    // WHY delegate to the VolumeUseCase for `record_mount` but open a
-    // short-lived connection for `find_or_create`: the UseCase surface
-    // does not yet expose `find_or_create` (scan-startup concern). Under
-    // WAL mode a one-off open here is instant. When Batch C lands, the
-    // writer actor consolidates every SQL entry point.
+    // WHY delegate to `state.container.volumes` for both `find_or_create`
+    // and `record_mount` post-Batch-C Task 2: the writer actor owns the
+    // sole writable connection. `find_or_create` still has no UseCase
+    // surface (scan/watch startup concern); the container exposes the
+    // raw `Arc<dyn VolumeRepository>` field for this purpose.
     let detected = perima_fs::detect_volume(&canonical_root).map_err(|e| e.to_string())?;
-    let db_path = state.data_dir.join("perima.db");
     let device_id = state.device_id;
 
-    let vol_conn = open_and_migrate(&db_path).map_err(|e| e.to_string())?;
-    let vol_repo = SqliteVolumeRepository::new(vol_conn);
-    let volume_id =
-        perima_core::VolumeRepository::find_or_create(&vol_repo, &detected.identifiers, device_id)
-            .map_err(|e| e.to_string())?;
-    drop(vol_repo);
+    let volume_id = state
+        .container
+        .volumes
+        .find_or_create(&detected.identifiers, device_id)
+        .map_err(|e| e.to_string())?;
 
     // WHY delegate mount-recording to the VolumeUseCase: this is the
     // single call the UseCase's `RecordMount` variant was built for;

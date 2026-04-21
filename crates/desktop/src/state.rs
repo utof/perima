@@ -12,10 +12,11 @@ use tokio_util::sync::CancellationToken;
 /// State shared across all Tauri commands via `tauri::State<AppState>`.
 ///
 /// WHY `data_dir` + `device_id` without a general DB handle: commands
-/// that read through `FileRepository` / `VolumeRepository` open their
-/// own `rusqlite::Connection` per-call. That adapter predates `&self`
-/// traits and uses `&mut self`, which collides with `Arc`-sharing. WAL
-/// mode makes the second open a no-op so per-call-open is cheap.
+/// that read through `FileRepository` still open their own
+/// `rusqlite::Connection` per-call (Tasks 3-6 migrate them to the
+/// writer actor). `VolumeRepository` as of Batch C Task 2 goes through
+/// `container.volumes` — no per-call open. WAL mode makes the remaining
+/// second open cheap for tests and the not-yet-migrated repos.
 ///
 /// WHY `metadata_repo: Arc<SqliteMetadataRepository>` is a deliberate
 /// deviation from the per-call-open pattern: the `MetadataRepository`

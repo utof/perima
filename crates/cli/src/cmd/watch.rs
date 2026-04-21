@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use perima_app::AppContainer;
-use perima_core::{CoreError, DeviceId, EventBus, FileEvent, LocationStatus, VolumeRepository};
-use perima_db::{SqliteFileRepository, SqliteVolumeRepository, open_and_migrate};
+use perima_core::{CoreError, DeviceId, EventBus, FileEvent, LocationStatus};
+use perima_db::SqliteFileRepository;
 use perima_fs::DebouncedWatcher;
 
 use crate::signals::Cancellation;
@@ -163,18 +163,19 @@ pub(crate) async fn run(
     let canonical_root = canonicalize(root)?;
 
     let detected = perima_fs::detect_volume(&canonical_root)?;
-    let db_path = data_dir.join("perima.db");
+    let _ = data_dir; // WHY: kept for signature stability; no raw DB open remains post-Batch-C Task 2.
 
-    // WHY open only a volume connection here: the file repo connection for
-    // event handling was already opened by main.rs::build_watch_db_handler
-    // and injected into container.events via extra_handlers. We still need
-    // a volume repo to resolve or create the volume record at startup.
-    let vol_conn = open_and_migrate(&db_path)?;
-
-    let vol_repo = SqliteVolumeRepository::new(vol_conn);
-    let volume_id = vol_repo.find_or_create(&detected.identifiers, device_id)?;
-    vol_repo.record_mount(volume_id, device_id, &detected.mount_point)?;
-    drop(vol_repo);
+    // WHY delegate to `container.volumes` post-Batch-C Task 2: the
+    // writer-actor + read-pool adapter is already built inside the
+    // container. `find_or_create` has no UseCase surface (scan/watch
+    // startup concern); the `Arc<dyn VolumeRepository>` field on
+    // `AppContainer` is the supported shell entry point.
+    let volume_id = container
+        .volumes
+        .find_or_create(&detected.identifiers, device_id)?;
+    container
+        .volumes
+        .record_mount(volume_id, device_id, &detected.mount_point)?;
 
     // WHY Arc::clone: DebouncedWatcher requires an owned Arc<dyn EventBus>.
     // container.events is already the composed fan-out bus (DbEventHandler +

@@ -10,9 +10,11 @@
 //! `flume::Receiver::recv` is runtime-agnostic and works in sync OR
 //! async callers. A single `flume` dep also covers the command channel.
 
+use std::path::PathBuf;
+
 use flume::Sender;
 
-use perima_core::CoreError;
+use perima_core::{CoreError, DeviceId, VolumeId, VolumeIdentifiers};
 
 /// Reply channel alias for writer-to-caller responses.
 pub type ReplyTx<T> = Sender<Result<T, CoreError>>;
@@ -37,9 +39,37 @@ pub enum WriteCmd {
 }
 
 /// Volume-repo write commands. Populated by Task 2.
+///
+/// WHY `ReplyTx<T>` carries `Debug`: `flume::Sender` implements `Debug`
+/// (verified crate docs), and every payload type on the in-flight side
+/// (`VolumeIdentifiers`, `DeviceId`, `VolumeId`, `PathBuf`) is `Debug`.
+/// Keeping `#[derive(Debug)]` on this enum lets the writer loop's
+/// `tracing::debug!` prints render a full command view without a manual
+/// impl.
 #[derive(Debug)]
-#[non_exhaustive]
-pub enum VolumeWriteCmd {}
+pub enum VolumeWriteCmd {
+    /// Find an existing volume matching `identifiers` or insert a new
+    /// row. Updates `last_seen` + `updated_at` + `device_id` on match.
+    FindOrCreate {
+        /// Observed identifiers (GUID / `fs_uuid` / label+capacity).
+        identifiers: VolumeIdentifiers,
+        /// Device that observed the volume.
+        device: DeviceId,
+        /// Reply channel carrying the resolved [`VolumeId`].
+        reply: ReplyTx<VolumeId>,
+    },
+    /// Record (or refresh) the current mount path for `(volume, device)`.
+    RecordMount {
+        /// Volume being mounted.
+        volume: VolumeId,
+        /// Device that observed the mount.
+        device: DeviceId,
+        /// Absolute mount-point path on the device.
+        mount: PathBuf,
+        /// Reply channel acknowledging the write.
+        reply: ReplyTx<()>,
+    },
+}
 
 /// Tag-repo write commands. Populated by Task 3.
 #[derive(Debug)]

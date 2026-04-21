@@ -29,8 +29,9 @@ use perima_core::{
     TagRepository, VolumeRepository,
 };
 use perima_db::{
-    SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository,
-    SqliteVolumeRepository, open_and_migrate,
+    ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository,
+    SqliteTagRepository, SqliteVolumeRepository, SqliteWriter, SqliteWriterHandle,
+    open_and_migrate,
 };
 use perima_fs::WalkdirScanner;
 use perima_hash::Blake3Service;
@@ -169,13 +170,23 @@ pub fn run() -> Result<(), RunError> {
             });
             let log_handler: Arc<dyn EventBus> = Arc::new(LogEventHandler);
 
-            let container = build_container(
+            let (container, writer_handle) = build_container(
                 &db_path,
                 Arc::clone(&metadata_repo),
                 Arc::clone(&tag_repo),
                 Arc::clone(&search_repo),
                 vec![log_handler, db_handler, tauri_emitter],
             )?;
+
+            // WHY `manage(writer_handle)`: the writer thread stays
+            // alive as long as at least one `flume::Sender<WriteCmd>`
+            // clone exists. Every sender today lives inside
+            // `SqliteVolumeRepository` on the container, which lives
+            // inside `AppState` — all kept alive by `manage(state)`.
+            // Storing the handle itself lets a future `shutdown`
+            // command call `handle.join()` explicitly rather than
+            // relying on drop order at process exit.
+            app.manage(writer_handle);
 
             let app_state = state::AppState::new(
                 cfg.data_dir,
@@ -205,20 +216,32 @@ fn build_container(
     tag_repo: Arc<SqliteTagRepository>,
     search_repo: Arc<SqliteSearchRepository>,
     handlers: Vec<Arc<dyn EventBus>>,
-) -> Result<Arc<AppContainer>, perima_core::CoreError> {
-    // WHY open fresh connections for files / volumes: the existing
-    // `metadata_repo`, `tag_repo`, and `search_repo` Arcs wrap per-purpose
-    // `Mutex<Connection>` handles that we deliberately share with the
-    // legacy `AppState` fields. The `AppContainer` still needs its own
-    // `FileRepository` + `VolumeRepository` handles — both absent from
-    // the pre-Batch-B `AppState` surface. Under WAL mode two extra opens
-    // cost a directory-stat; the writer-actor in Batch C consolidates
-    // this to a single writer + read-pool and removes the multi-open
-    // pattern entirely.
+) -> Result<(Arc<AppContainer>, SqliteWriterHandle), perima_core::CoreError> {
+    // WHY hybrid state post-Batch-C Task 2: Volume migrated to writer+pool;
+    // File/Tag/Metadata/Search still take an owned `Connection`. Tasks 3-6
+    // migrate the remaining four repos.
+    //
+    // WHY a `NoopBus` to the writer (Task 2): the writer's after-COMMIT
+    // emission path is scaffolded but NO command emits events today —
+    // volume register + mount-recording are not on the `FileEvent` bus
+    // surface. Tasks 3-6 re-plumb this to the container's event bus
+    // once Batch E replaces `CompositeEventBus` with `async-broadcast`
+    // (the current single-construction-site invariant forbids a second
+    // composite here).
+    struct NoopBus;
+    impl EventBus for NoopBus {
+        fn emit(&self, _: &perima_core::FileEvent) -> Result<(), perima_core::CoreError> {
+            Ok(())
+        }
+    }
+    let writer_bus: Arc<dyn EventBus> = Arc::new(NoopBus);
+    let writer = SqliteWriter::start(db_path, writer_bus)?;
+    let reads = ReadPool::open(db_path)?;
+
     let files: Arc<dyn FileRepository> =
         Arc::new(SqliteFileRepository::new(open_and_migrate(db_path)?));
     let volumes: Arc<dyn VolumeRepository> =
-        Arc::new(SqliteVolumeRepository::new(open_and_migrate(db_path)?));
+        Arc::new(SqliteVolumeRepository::new(writer.sender(), reads));
     let tags: Arc<dyn TagRepository> = tag_repo;
     let metadata: Arc<dyn MetadataRepository> = metadata_repo;
     let search: Arc<dyn SearchRepository> = search_repo;
@@ -249,5 +272,5 @@ fn build_container(
         thumbnailer,
     };
 
-    Ok(AppContainer::new(deps, handlers))
+    Ok((AppContainer::new(deps, handlers), writer))
 }

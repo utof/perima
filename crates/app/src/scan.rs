@@ -589,7 +589,8 @@ mod tests {
 
     use perima_core::{FileEvent, FileLocationRecord, MediaMetadata};
     use perima_db::{
-        SqliteFileRepository, SqliteMetadataRepository, SqliteVolumeRepository, open_and_migrate,
+        ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteVolumeRepository,
+        SqliteWriter, SqliteWriterHandle, open_and_migrate,
     };
     use perima_fs::WalkdirScanner;
     use perima_hash::Blake3Service;
@@ -670,6 +671,10 @@ mod tests {
         fixture: TempDir,
         uc: ScanUseCase,
         recording_metadata: Arc<RecordingMetadata>,
+        // WHY hold the writer handle: the volume adapter is wired to
+        // this writer actor (post-Batch-C Task 2). Dropping the handle
+        // early would close the channel before the test completes.
+        _writer: SqliteWriterHandle,
     }
 
     fn harness() -> Harness {
@@ -678,15 +683,20 @@ mod tests {
         mk_fixture(fixture.path());
 
         let db_path = db_tmp.path().join("perima.db");
-        // WHY three opens: the rusqlite adapter wraps a single
-        // Connection per repo. Under WAL mode concurrent opens are
-        // cheap and share the underlying DB file.
+        // WHY mixed opens: post-Batch-C Task 2 the volume adapter uses
+        // writer+pool; File + Metadata still take an owned Connection
+        // until Tasks 4 + 5 migrate them. `SqliteWriter::start` runs
+        // migrations once on the writer's own Connection, so File +
+        // Metadata can open on a fully-migrated schema without
+        // duplicating migration work.
+        let writer = SqliteWriter::start(&db_path, Arc::new(NullBus)).unwrap();
+        let reads = ReadPool::open(&db_path).unwrap();
         let file_conn = open_and_migrate(&db_path).unwrap();
-        let vol_conn = open_and_migrate(&db_path).unwrap();
         let meta_conn = open_and_migrate(&db_path).unwrap();
 
         let files: Arc<dyn FileRepository> = Arc::new(SqliteFileRepository::new(file_conn));
-        let volumes: Arc<dyn VolumeRepository> = Arc::new(SqliteVolumeRepository::new(vol_conn));
+        let volumes: Arc<dyn VolumeRepository> =
+            Arc::new(SqliteVolumeRepository::new(writer.sender(), reads));
         // Use the real metadata repo for the DB so persistence tests
         // see a consistent view. A second recording mock is wired via
         // Arc dyn but held out-of-band for tests that want it.
@@ -714,6 +724,7 @@ mod tests {
             fixture,
             uc,
             recording_metadata: recording,
+            _writer: writer,
         }
     }
 

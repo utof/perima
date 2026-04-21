@@ -147,6 +147,19 @@ pub struct AppContainer {
     pub metadata: Arc<MetadataUseCase>,
     /// Shared event bus — same `Arc` used inside every `UseCase`.
     pub events: Arc<dyn EventBus>,
+    /// Direct handle to the volume repository port.
+    ///
+    /// WHY exposed (post-Batch-C Task 2): shell sites that need
+    /// `find_or_create` (scan / watch startup) operate outside the
+    /// [`VolumeUseCase`] surface — the `UseCase` deliberately only exposes
+    /// `List` + `RecordMount`. Before Batch C, those sites opened a
+    /// short-lived `SqliteVolumeRepository::new(conn)` with their own
+    /// `rusqlite::Connection`; with the writer actor in place there is
+    /// exactly one writer per process, so every shell site shares the
+    /// same adapter handle via this field. The `Arc<dyn VolumeRepository>`
+    /// type keeps the container decoupled from the concrete adapter
+    /// (same pattern as `AppDeps::volumes`).
+    pub volumes: Arc<dyn VolumeRepository>,
 }
 
 impl std::fmt::Debug for AppContainer {
@@ -208,6 +221,12 @@ impl AppContainer {
             Arc::clone(&events),
         ));
 
+        // WHY clone: the same `Arc<dyn VolumeRepository>` lives inside
+        // `VolumeUseCase` (above) AND on the container field so shell
+        // sites that need `find_or_create` can reach it without a
+        // second open. Arc::clone is refcount-only; no allocation.
+        let volumes = Arc::clone(&deps.volumes);
+
         Arc::new(Self {
             scan,
             search,
@@ -215,6 +234,7 @@ impl AppContainer {
             volume,
             metadata,
             events,
+            volumes,
         })
     }
 }
@@ -230,8 +250,9 @@ mod tests {
 
     use perima_core::{CoreError, FileEvent, MediaPath, VolumeId};
     use perima_db::{
-        SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository,
-        SqliteTagRepository, SqliteVolumeRepository, open_and_migrate,
+        ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository,
+        SqliteTagRepository, SqliteVolumeRepository, SqliteWriter, SqliteWriterHandle,
+        open_and_migrate,
     };
     use perima_fs::WalkdirScanner;
     use perima_hash::Blake3Service;
@@ -309,22 +330,43 @@ mod tests {
         assert!(bus.emit(&event()).is_ok());
     }
 
+    /// `NoopBus` used for the writer during test harness setup. The
+    /// volume adapter emits no events (Task 2 hybrid state), so this
+    /// handler never fires — but `SqliteWriter::start` requires an
+    /// `Arc<dyn EventBus>` parameter.
+    struct TestNoopBus;
+    impl EventBus for TestNoopBus {
+        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+
     /// Build `AppDeps` backed by real `SQLite` adapters on a fresh
     /// temp DB. Matches the `harness()` pattern in `scan.rs` tests.
-    fn deps_harness() -> (TempDir, AppDeps) {
+    ///
+    /// WHY the writer handle is returned: tests must keep it alive so
+    /// the writer thread outlives the container's repository handles
+    /// (post-Batch-C Task 2 the volume adapter holds a sender tied to
+    /// this writer).
+    fn deps_harness() -> (TempDir, AppDeps, SqliteWriterHandle) {
         let db_tmp = tempfile::tempdir().unwrap();
         let db_path = db_tmp.path().join("perima.db");
 
-        // WHY separate opens: rusqlite adapters wrap a single
-        // Connection per repo; WAL mode makes concurrent opens cheap.
+        // WHY mixed opens: Task 2 hybrid — Volume uses writer+pool;
+        // File/Tag/Metadata/Search still take an owned Connection
+        // until Tasks 3-6 migrate them. Migrations run once inside
+        // `SqliteWriter::start`, so later legacy opens skip the
+        // migration sniff.
+        let writer = SqliteWriter::start(&db_path, Arc::new(TestNoopBus)).unwrap();
+        let reads = ReadPool::open(&db_path).unwrap();
         let file_conn = open_and_migrate(&db_path).unwrap();
-        let vol_conn = open_and_migrate(&db_path).unwrap();
         let tag_conn = open_and_migrate(&db_path).unwrap();
         let meta_conn = open_and_migrate(&db_path).unwrap();
         let search_conn = open_and_migrate(&db_path).unwrap();
 
         let files: Arc<dyn FileRepository> = Arc::new(SqliteFileRepository::new(file_conn));
-        let volumes: Arc<dyn VolumeRepository> = Arc::new(SqliteVolumeRepository::new(vol_conn));
+        let volumes: Arc<dyn VolumeRepository> =
+            Arc::new(SqliteVolumeRepository::new(writer.sender(), reads));
         let tags: Arc<dyn TagRepository> = Arc::new(SqliteTagRepository::new(tag_conn));
         let metadata: Arc<dyn MetadataRepository> =
             Arc::new(SqliteMetadataRepository::new(meta_conn));
@@ -345,12 +387,13 @@ mod tests {
                 scanner,
                 thumbnailer,
             },
+            writer,
         )
     }
 
     #[test]
     fn app_container_new_builds_successfully_with_real_adapters() {
-        let (_db_tmp, deps) = deps_harness();
+        let (_db_tmp, deps, _writer) = deps_harness();
         let container = AppContainer::new(deps, vec![]);
 
         // Arc clone must be cheap; the inner struct is shared.
@@ -371,7 +414,7 @@ mod tests {
         // UseCase receives an `Arc::clone` of it. After construction,
         // the strong count on `container.events` reflects the shared
         // ownership: 1 (container) + 5 (one per UseCase) = 6.
-        let (_db_tmp, deps) = deps_harness();
+        let (_db_tmp, deps, _writer) = deps_harness();
 
         // Pass a recording handler so we can observe fan-out from the
         // container's single shared bus, if a UseCase were to emit.

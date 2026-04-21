@@ -195,7 +195,8 @@ mod tests {
         MediaMetadata, MediaPath, VolumeId, VolumeIdentifiers, VolumeRepository,
     };
     use perima_db::{
-        SqliteFileRepository, SqliteMetadataRepository, SqliteVolumeRepository, open_and_migrate,
+        ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteVolumeRepository,
+        SqliteWriter, open_and_migrate,
     };
     use tempfile::TempDir;
 
@@ -280,10 +281,23 @@ mod tests {
         hash
     }
 
-    /// Create a volume id for testing (using volume repo via a separate connection).
+    /// Create a volume id for testing (using volume repo via writer+pool).
+    ///
+    /// WHY a self-contained writer here: these metadata tests don't
+    /// otherwise need a volume adapter in their shared harness, and the
+    /// seed path is a one-shot. The writer thread is dropped when
+    /// `handle.join()` runs at scope end — tempfile-backed DB stays
+    /// alive via the caller's `TempDir`.
     fn seed_volume(db_path: &std::path::Path, dev: DeviceId) -> VolumeId {
-        let conn = open_and_migrate(db_path).unwrap();
-        let vol_repo = SqliteVolumeRepository::new(conn);
+        struct NoopBus;
+        impl EventBus for NoopBus {
+            fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+                Ok(())
+            }
+        }
+        let writer = SqliteWriter::start(db_path, Arc::new(NoopBus)).unwrap();
+        let reads = ReadPool::open(db_path).unwrap();
+        let vol_repo = SqliteVolumeRepository::new(writer.sender(), reads);
         let ident = VolumeIdentifiers {
             gpt_partition_guid: None,
             fs_uuid: Some("test-uuid-meta".to_owned()),
@@ -291,7 +305,10 @@ mod tests {
             capacity_bytes: 1_000_000,
             is_removable: false,
         };
-        vol_repo.find_or_create(&ident, dev).unwrap()
+        let out = vol_repo.find_or_create(&ident, dev).unwrap();
+        drop(vol_repo);
+        writer.join();
+        out
     }
 
     // -----------------------------------------------------------------------

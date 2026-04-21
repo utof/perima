@@ -28,8 +28,8 @@ use perima_core::{
     TagRepository, VolumeRepository,
 };
 use perima_db::{
-    SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository,
-    SqliteVolumeRepository, open_and_migrate,
+    ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository,
+    SqliteTagRepository, SqliteVolumeRepository, SqliteWriter, open_and_migrate,
 };
 use perima_fs::WalkdirScanner;
 use perima_hash::Blake3Service;
@@ -214,20 +214,45 @@ async fn main() -> ExitCode {
 /// `DbEventHandler` so that filesystem events can mutate location rows via the
 /// shared bus without constructing a second `CompositeEventBus` in the shell.
 ///
-/// WHY one connection per repo (not one `Arc<Mutex<Connection>>` shared):
-/// each `Sqlite*Repository` owns its own `Mutex<Connection>` today (see
-/// `crates/db/src/*_repo.rs`). Under WAL mode opening multiple connections
-/// to the same file is cheap and avoids a second layer of `Mutex` that none
-/// of the repo constructors accept. Batch C (connection-actor) will
-/// consolidate this to a single writer + read pool.
+/// WHY hybrid state post-Batch-C Task 2: Volume migrated to writer+pool;
+/// File/Tag/Metadata/Search still take an owned `Connection`. Tasks 3-6
+/// will migrate the remaining four repos; until then `build_container`
+/// runs ONE migration sweep via `SqliteWriter::start` (which is also the
+/// sole production caller of `open_and_migrate`) and then opens
+/// legacy connections for the not-yet-migrated repos. The `SqliteWriter`
+/// handle is intentionally dropped at the end of `build_container` —
+/// the writer thread keeps running as long as any `flume::Sender<WriteCmd>`
+/// lives, which is held inside the `SqliteVolumeRepository` embedded in
+/// `AppContainer`. The thread reaps at process exit when all senders
+/// drop.
 fn build_container(
     db_path: &Path,
     extra_handlers: Vec<Arc<dyn EventBus>>,
 ) -> Result<Arc<AppContainer>, perima_core::CoreError> {
+    // WHY a `NoopBus` passed to the writer in Task 2: the writer's
+    // after-COMMIT emission path is scaffolded but NO command emits
+    // events today — volume register + mount-recording are not on the
+    // `FileEvent` bus surface. Tasks 3-6 introduce commands that DO
+    // emit (`File::Upsert` → `FileEvent::Created` etc.); at that point
+    // we re-plumb the writer bus through `AppContainer::events` once
+    // Batch E's `async-broadcast` replaces `CompositeEventBus` (the
+    // current single-construction-site invariant forbids building a
+    // second composite here). Spec §§3.3 + 4.8 (A4.8 first bullet).
+    struct NoopBus;
+    impl EventBus for NoopBus {
+        fn emit(&self, _: &perima_core::FileEvent) -> Result<(), perima_core::CoreError> {
+            Ok(())
+        }
+    }
+    let writer_bus: Arc<dyn EventBus> = Arc::new(NoopBus);
+
+    let writer = SqliteWriter::start(db_path, writer_bus)?;
+    let reads = ReadPool::open(db_path)?;
+
     let files: Arc<dyn FileRepository> =
         Arc::new(SqliteFileRepository::new(open_and_migrate(db_path)?));
     let volumes: Arc<dyn VolumeRepository> =
-        Arc::new(SqliteVolumeRepository::new(open_and_migrate(db_path)?));
+        Arc::new(SqliteVolumeRepository::new(writer.sender(), reads));
     let tags: Arc<dyn TagRepository> =
         Arc::new(SqliteTagRepository::new(open_and_migrate(db_path)?));
     let metadata: Arc<dyn MetadataRepository> =
@@ -236,6 +261,15 @@ fn build_container(
         Arc::new(SqliteSearchRepository::new(open_and_migrate(db_path)?));
     let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
     let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());
+    // WHY no explicit `writer` keep-alive: `volumes` above holds a
+    // cloned `flume::Sender<WriteCmd>` via `writer.sender()`. When
+    // `build_container` returns, the local `writer` handle drops and
+    // its `JoinHandle` is lost (the thread detaches), but the sender
+    // clone inside `volumes` — riding into the returned container —
+    // keeps the writer thread running for the container's lifetime.
+    // At CLI process exit, all senders drop and the thread observes
+    // `Disconnected` + returns. Tasks 3-6 will replace this with a
+    // container-owned writer handle that supports explicit join.
 
     // WHY the thumbnailer is chosen at container-build time: the container
     // is constructed once per command dispatch (via `build_container`),
@@ -499,7 +533,17 @@ async fn dispatch_watch(root: PathBuf, config: &Config, cancel: &Cancellation) -
 /// a `UseCase` in Batch B; the single-file extraction path is post-v1 work).
 async fn dispatch_metadata(path: PathBuf, json: bool, config: &Config) -> ExitCode {
     let args = cmd::metadata::MetadataArgs { path, json };
-    match cmd::metadata::run(&config.data_dir, config.device_id, &args).await {
+    // WHY build_container here: `cmd::metadata::run` now consumes
+    // `AppContainer.volumes` for `find_or_create` (Batch C Task 2).
+    let db_path = config.data_dir.join("perima.db");
+    let container = match build_container(&db_path, vec![]) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("perima: database: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match cmd::metadata::run(&container, &config.data_dir, config.device_id, &args).await {
         Ok(()) => ExitCode::from(0),
         Err(perima_core::CoreError::InvalidPath(msg)) => {
             eprintln!("perima: {msg}");

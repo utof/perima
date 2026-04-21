@@ -148,7 +148,7 @@ impl VolumeUseCase {
 #[allow(clippy::unwrap_used)] // Test code; unwrap panics signal bugs.
 mod tests {
     use perima_core::{DeviceId, FileEvent, VolumeIdentifiers};
-    use perima_db::{SqliteVolumeRepository, open_and_migrate};
+    use perima_db::{ReadPool, SqliteVolumeRepository, SqliteWriter, SqliteWriterHandle};
     use tempfile::TempDir;
 
     use super::*;
@@ -161,17 +161,42 @@ mod tests {
         }
     }
 
+    /// Harness output: the `UseCase`, the tempdir (kept to anchor the
+    /// DB file lifetime), the shared adapter (for tests that seed via
+    /// the raw repo), and the writer handle (kept so the actor thread
+    /// outlives all tests until teardown).
+    struct Harness {
+        uc: VolumeUseCase,
+        tmp: TempDir,
+        repo: Arc<dyn VolumeRepository>,
+        _writer: SqliteWriterHandle,
+    }
+
     /// Build a [`VolumeUseCase`] backed by a real `SQLite` DB in a tempdir.
     ///
-    /// WHY single harness: every test uses this helper so setup is
-    /// consistent and the `TempDir` lifetime is managed uniformly.
-    fn harness() -> (VolumeUseCase, TempDir) {
+    /// WHY tempfile (not in-memory): post-Batch-C Task 2 the adapter
+    /// holds `(flume::Sender<WriteCmd>, ReadPool)`. The writer opens
+    /// one connection and the read pool opens its own; both need to
+    /// see the same DB. `Connection::open_in_memory()` is
+    /// per-connection private, so the two sides cannot share an
+    /// in-memory handle. A tempfile-backed DB works with WAL and is
+    /// cheap; the `TempDir` teardown runs on drop.
+    fn harness() -> Harness {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("perima.db");
-        let conn = open_and_migrate(&db_path).unwrap();
-        let volumes: Arc<dyn VolumeRepository> = Arc::new(SqliteVolumeRepository::new(conn));
+        let bus: Arc<dyn EventBus> = Arc::new(NullBus);
+        let writer = SqliteWriter::start(&db_path, bus).unwrap();
+        let reads = ReadPool::open(&db_path).unwrap();
+        let repo: Arc<dyn VolumeRepository> =
+            Arc::new(SqliteVolumeRepository::new(writer.sender(), reads));
         let events: Arc<dyn EventBus> = Arc::new(NullBus);
-        (VolumeUseCase::new(volumes, events), tmp)
+        let uc = VolumeUseCase::new(Arc::clone(&repo), events);
+        Harness {
+            uc,
+            tmp,
+            repo,
+            _writer: writer,
+        }
     }
 
     fn device() -> DeviceId {
@@ -195,26 +220,26 @@ mod tests {
 
     #[tokio::test]
     async fn list_returns_volumes_after_mount() {
-        let (uc, tmp) = harness();
+        let h = harness();
         let dev = device();
 
         // Seed: find_or_create a volume then record a mount for it.
-        // WHY use the repo directly for seeding: `VolumeCommand` doesn't
-        // expose `find_or_create` (scan startup concern), so we seed via the
-        // underlying repository as other integration tests do.
-        let db_path = tmp.path().join("perima.db");
-        let seed_conn = open_and_migrate(&db_path).unwrap();
-        let seed_repo = SqliteVolumeRepository::new(seed_conn);
+        // WHY reuse the harness repo Arc for seeding: the writer actor
+        // is single-instance; opening a second `SqliteVolumeRepository`
+        // is not just unnecessary — the writer-actor pattern expects
+        // exactly one writer thread per process. Cloning the adapter
+        // Arc reuses the same writer sender.
+        let seed_repo = Arc::clone(&h.repo);
         let ident = test_ident("TestVol");
         let vol_id = seed_repo.find_or_create(&ident, dev).unwrap();
         seed_repo
             .record_mount(vol_id, dev, std::path::Path::new("/mnt/test"))
             .unwrap();
 
-        let out = uc
-            .execute(VolumeCommand::List { device: dev })
-            .await
-            .unwrap();
+        let out =
+            h.uc.execute(VolumeCommand::List { device: dev })
+                .await
+                .unwrap();
         let VolumeOutput::Volumes(records) = out else {
             panic!("expected VolumeOutput::Volumes");
         };
@@ -223,6 +248,9 @@ mod tests {
             "expected at least one volume after mount"
         );
         assert_eq!(records[0].id, vol_id);
+        // WHY hold `tmp` until here: dropping it earlier would remove
+        // the DB file out from under the still-live writer thread.
+        drop(h.tmp);
     }
 
     // -----------------------------------------------------------------------
@@ -231,28 +259,27 @@ mod tests {
 
     #[tokio::test]
     async fn record_mount_is_idempotent() {
-        let (uc, tmp) = harness();
+        let h = harness();
         let dev = device();
         let mount_path = PathBuf::from("/mnt/idempotent");
 
-        // Seed volume via raw repo (find_or_create is a scan startup concern).
-        let db_path = tmp.path().join("perima.db");
-        let seed_conn = open_and_migrate(&db_path).unwrap();
-        let seed_repo = SqliteVolumeRepository::new(seed_conn);
+        // Seed volume via the shared repo handle (single writer actor;
+        // see `list_returns_volumes_after_mount` rationale above).
+        let seed_repo = Arc::clone(&h.repo);
         let ident = test_ident("IdempotentVol");
         let vol_id = seed_repo.find_or_create(&ident, dev).unwrap();
 
         // Record the same mount twice via the UseCase.
-        let out1 = uc
-            .execute(VolumeCommand::RecordMount {
+        let out1 =
+            h.uc.execute(VolumeCommand::RecordMount {
                 volume_id: vol_id,
                 path: mount_path.clone(),
                 device: dev,
             })
             .await
             .unwrap();
-        let out2 = uc
-            .execute(VolumeCommand::RecordMount {
+        let out2 =
+            h.uc.execute(VolumeCommand::RecordMount {
                 volume_id: vol_id,
                 path: mount_path.clone(),
                 device: dev,
@@ -271,10 +298,10 @@ mod tests {
         );
 
         // After two record_mount calls, list should still return exactly 1 volume.
-        let list_out = uc
-            .execute(VolumeCommand::List { device: dev })
-            .await
-            .unwrap();
+        let list_out =
+            h.uc.execute(VolumeCommand::List { device: dev })
+                .await
+                .unwrap();
         let VolumeOutput::Volumes(records) = list_out else {
             panic!("expected VolumeOutput::Volumes");
         };
@@ -289,5 +316,6 @@ mod tests {
             1,
             "idempotent record_mount should not duplicate mount paths"
         );
+        drop(h.tmp);
     }
 }

@@ -11,13 +11,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use perima_app::AppContainer;
 use perima_core::{
     CoreError, DeviceId, FileLocationRecord, FileRepository, MediaMetadata, MetadataExtractor,
-    MetadataRepository, VolumeRepository,
+    MetadataRepository,
 };
-use perima_db::{
-    SqliteFileRepository, SqliteMetadataRepository, SqliteVolumeRepository, open_and_migrate,
-};
+use perima_db::{SqliteFileRepository, SqliteMetadataRepository, open_and_migrate};
 use perima_media::{
     CompositeExtractor, ImageExtractor, MetadataQueue, ThumbnailGenerator, VideoExtractor,
 };
@@ -49,6 +48,7 @@ pub(crate) struct MetadataArgs {
 /// is not yet indexed (run `perima scan` first); propagates
 /// [`CoreError`] from volume detection, DB access, and the extractor.
 pub(crate) async fn run(
+    container: &AppContainer,
     data_dir: &Path,
     device: DeviceId,
     args: &MetadataArgs,
@@ -67,14 +67,19 @@ pub(crate) async fn run(
 
     let db_path = data_dir.join("perima.db");
 
-    // WHY three connections: each repo owns its `Mutex<Connection>`, and
-    // under WAL mode a fresh open is ~microseconds. Sharing a single
-    // connection across repos would require wrapping it in another layer
-    // of `Mutex`, which none of the repos' `new(...)` constructors accept.
-    let vol_repo = SqliteVolumeRepository::new(open_and_migrate(&db_path)?);
-    let volume_id = vol_repo.find_or_create(&detected.identifiers, device)?;
-    drop(vol_repo);
+    // WHY delegate to `container.volumes` post-Batch-C Task 2: the
+    // writer actor owns the sole writable connection; opening a second
+    // one just for `find_or_create` would require a second writer
+    // (spec §3.1 forbids). The container holds the shared adapter.
+    let volume_id = container
+        .volumes
+        .find_or_create(&detected.identifiers, device)?;
 
+    // WHY legacy `open_and_migrate` still here (Task 2 hybrid state):
+    // `SqliteFileRepository` + `SqliteMetadataRepository` still take
+    // an owned `Connection` — Tasks 5 + 4 migrate them to the writer
+    // actor. Keeping these opens until those tasks land keeps the
+    // Task-2 diff bounded; WAL mode makes the re-open cheap.
     let file_repo = SqliteFileRepository::new(open_and_migrate(&db_path)?);
     let metadata_repo = Arc::new(SqliteMetadataRepository::new(open_and_migrate(&db_path)?));
 
