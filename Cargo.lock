@@ -3345,6 +3345,7 @@ dependencies = [
  "directories",
  "image",
  "miette",
+ "perima-app",
  "perima-core",
  "perima-db",
  "perima-fs",

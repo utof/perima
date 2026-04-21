@@ -1,16 +1,26 @@
 //! Tauri IPC commands exposed to the frontend.
 //!
-//! WHY per-command DB connections: Tauri's command system runs handlers in a
-//! thread-pool. Holding a single shared `rusqlite::Connection` across commands
-//! would require `Arc<Mutex<Connection>>`, adding contention and lifetime
-//! complexity. Opening per-command is cheap under `SQLite` WAL mode — the second
-//! `open_and_migrate` call is a no-op migration that returns instantly.
+//! After the Batch B Task 9 migration (#69 consolidation), every migrated
+//! handler delegates to one of the `UseCase` fields on `AppState.container`
+//! via a short `container.xx.execute(cmd).await` call. Pre-existing
+//! `_inner` helpers are retained unchanged so `crates/desktop/tests/
+//! commands_test.rs` keeps exercising the underlying logic without
+//! constructing `tauri::State` (those helpers re-open per-call connections
+//! exactly like the pre-migration code path did).
+//!
+//! WHY two styles coexist: the `#[tauri::command]` production path is
+//! thin-delegation to `container.*.execute`; the `_inner` helpers remain
+//! as a test seam until a future batch replaces them with a
+//! container-based test harness.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use perima_app::{
+    FullScan, MetadataCommand, MetadataOutput, ScanCommand, SearchCommand, SearchOutput,
+    TagCommand, TagFilter, TagOutput, VolumeCommand, VolumeOutput,
+};
 use perima_core::{
     CoreError, DeviceId, EventBus, FileEvent, LocationStatus, MetadataExtractor,
     MetadataRepository, SearchRepository, TagRepository, VolumeId,
@@ -25,7 +35,6 @@ use rayon::prelude::*;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::events::TauriEventEmitter;
 use crate::payloads::{FileWithMetadataPayload, FileWithTagsPayload, SearchHitPayload, TagPayload};
 use crate::state::{AppState, WatcherState};
 
@@ -38,52 +47,40 @@ use crate::state::{AppState, WatcherState};
 const METADATA_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
-// Event handlers (duplicated from crates/cli/src/cmd/watch.rs)
+// Event handlers
 //
-// WHY duplicated: `crates/cli` is a binary crate shell; `crates/desktop`
-// cannot depend on it (that would create an unwanted coupling between two
-// app shells and pull in CLI-only dependencies). Consolidating these into a
-// shared crate (`crates/watch-handlers` or similar) is deferred to post-v1
-// once the API has stabilised. The duplication is intentional and small.
+// WHY kept in commands.rs (not hoisted to `perima_app`): Task 10 of the
+// Batch B plan moves `LogEventHandler` + `DbEventHandler` into
+// `perima_app::telemetry`. Until then, this module keeps them `pub` so
+// `lib.rs::build_container` can wire them into the container's single
+// `CompositeEventBus` at setup time (the Task-7 hoist of the bus itself
+// already landed). The shell-local `CompositeEventBus` struct that lived
+// here pre-Task-9 is deleted — spec §4 acceptance demands exactly one
+// `CompositeEventBus::new` call in the codebase and that site is now
+// `crates/app/src/container.rs::AppContainer::new`.
 // ---------------------------------------------------------------------------
-
-/// Fans out events to multiple [`EventBus`] implementations.
-///
-/// Individual handler errors are logged but do not abort the fan-out —
-/// all registered handlers always fire regardless of prior failures.
-///
-/// WHY lives in commands.rs (not core): `CompositeEventBus` uses
-/// `tracing::warn!` which requires the `tracing` crate. `crates/core`
-/// deliberately has zero framework dependencies.
-struct CompositeEventBus {
-    handlers: Vec<Arc<dyn EventBus>>,
-}
-
-impl CompositeEventBus {
-    /// Construct from a list of handlers.
-    fn new(handlers: Vec<Arc<dyn EventBus>>) -> Self {
-        Self { handlers }
-    }
-}
-
-impl EventBus for CompositeEventBus {
-    fn emit(&self, event: &FileEvent) -> Result<(), CoreError> {
-        for h in &self.handlers {
-            if let Err(e) = h.emit(event) {
-                tracing::warn!(error = %e, "event handler failed");
-            }
-        }
-        Ok(())
-    }
-}
 
 /// Updates the database in response to filesystem events.
 ///
 /// WHY `Arc<SqliteFileRepository>`: `EventBus` requires `Send + Sync`.
 /// `SqliteFileRepository` uses `Mutex<Connection>` internally, satisfying both.
-struct DbEventHandler {
+pub struct DbEventHandler {
     repo: Arc<SqliteFileRepository>,
     device: DeviceId,
+}
+
+impl DbEventHandler {
+    /// Construct a [`DbEventHandler`] bound to the given file repository
+    /// and device.
+    ///
+    /// WHY a `new` constructor: `lib.rs::setup` builds the handler before
+    /// `AppContainer::new` wraps it into the single `CompositeEventBus`.
+    /// Keeping the struct fields private + exposing `new` preserves
+    /// encapsulation across the crate boundary.
+    #[must_use]
+    pub const fn new(repo: Arc<SqliteFileRepository>, device: DeviceId) -> Self {
+        Self { repo, device }
+    }
 }
 
 impl EventBus for DbEventHandler {
@@ -136,7 +133,7 @@ impl EventBus for DbEventHandler {
 }
 
 /// Logs every filesystem event at INFO level.
-struct LogEventHandler;
+pub struct LogEventHandler;
 
 impl EventBus for LogEventHandler {
     fn emit(&self, event: &FileEvent) -> Result<(), CoreError> {
@@ -269,19 +266,51 @@ pub async fn scan(
     dry_run: bool,
     state: tauri::State<'_, AppState>,
 ) -> Result<ScanResult, String> {
-    let root = PathBuf::from(&path);
-    // WHY pass metadata_repo through: phase 4's metadata queue +
-    // thumbnail pipeline was wired into the CLI scan but the desktop
-    // scan shipped without it — the desktop app would index files but
-    // never run extractors or generate thumbnails. See
-    // utof/perima#15 HIGH #11a.
-    let metadata_repo: Arc<dyn MetadataRepository> =
-        Arc::clone(&state.metadata_repo) as Arc<dyn MetadataRepository>;
-    let data_dir = state.data_dir.clone();
-    let device_id = state.device_id;
-    run_scan_inner_with_metadata(&root, dry_run, &data_dir, device_id, Some(metadata_repo))
+    let cmd = ScanCommand::Full(FullScan {
+        path: PathBuf::from(&path),
+        device_id: state.device_id,
+        // WHY `with_metadata = !dry_run`: preserves the pre-migration
+        // desktop default — every non-dry scan spawns the metadata queue.
+        with_metadata: !dry_run,
+        dry_run,
+        // WHY no_wait_metadata = false: the Tauri command blocks until
+        // the bounded drain completes so the frontend sees a fully
+        // populated metadata + thumbnails set by the time `scan` returns.
+        no_wait_metadata: false,
+        // WHY no_thumbnails = false: the desktop UI grid depends on
+        // WebP thumbnails in `<data_dir>/thumbnails/**`; disabling them
+        // would yield an empty grid.
+        no_thumbnails: false,
+        // WHY fresh `CancellationToken::new()`: the desktop has no
+        // Ctrl-C handler today (users close the window). A cancel RPC
+        // is future work (Batch E); for now we hand the UseCase a
+        // never-cancelled token.
+        cancel: CancellationToken::new(),
+        on_persist: None,
+    });
+    let report = state
+        .container
+        .scan
+        .execute(cmd)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // WHY write_manifest stays in the shell: per spec §2 IN, `crates/app`
+    // deliberately does not depend on `perima-db`. The `ScanReport`
+    // surfaces `volume_mount` + `manifest_files` for the shell to wire
+    // manifest persistence; the CLI does the same in `crates/cli/src/
+    // cmd/scan.rs::run`.
+    if let Some((vol_id, mount)) = report.volume_mount.as_ref() {
+        perima_db::manifest::write_manifest(mount, *vol_id, &report.manifest_files)
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(ScanResult {
+        total: report.files_new + report.files_updated + report.files_errored,
+        new: report.files_new,
+        existing: report.files_updated,
+        errors: report.files_errored,
+    })
 }
 
 /// Inner scan logic extracted for testability without a live Tauri state.
@@ -291,6 +320,12 @@ pub async fn scan(
 /// arguments. This overload skips the metadata queue; use
 /// [`run_scan_inner_with_metadata`] to exercise the full extract + thumbnail
 /// pipeline.
+///
+/// WHY retained post-Batch-B: `crates/desktop/tests/commands_test.rs`
+/// references this function directly (search for `run_scan_inner`). The
+/// production `scan` command delegates through `AppContainer` instead;
+/// this helper keeps the test seam alive until a container-based test
+/// harness lands in a follow-up batch.
 ///
 /// # Errors
 /// Returns [`perima_core::CoreError`] on filesystem, volume detection, hash,
@@ -315,6 +350,10 @@ pub async fn run_scan_inner(
 /// so generated WebP files live under `<data_dir>/thumbnails/...` —
 /// the same directory the Tauri asset protocol scope exposes.
 ///
+/// WHY retained post-Batch-B: see `run_scan_inner`. This helper is
+/// referenced directly by the `desktop_scan_populates_metadata_and_thumbnails`
+/// regression test.
+///
 /// # Errors
 /// Returns [`perima_core::CoreError`] on filesystem, volume detection, hash,
 /// or database failures.
@@ -333,11 +372,11 @@ pub async fn run_scan_inner_with_metadata(
     let scanner = WalkdirScanner::new();
     let hasher = Blake3Service::new();
 
-    // WHY AtomicBool(false): no signal handler in the desktop backend.
-    // The desktop user closes the window rather than issuing Ctrl-C.
-    // A proper cancellation channel will be introduced in phase 3 when the
+    // WHY fresh `CancellationToken`: no signal handler in the desktop
+    // backend (users close the window rather than issuing Ctrl-C).
+    // A proper cancellation channel will be introduced when the
     // file-watcher IPC arrives and we need a cancel RPC.
-    let never_cancel = Arc::new(AtomicBool::new(false));
+    let never_cancel = CancellationToken::new();
 
     if dry_run {
         return run_scan_dry(&scanner, &hasher, &canonical_root, &never_cancel);
@@ -394,7 +433,7 @@ pub async fn run_scan_inner_with_metadata(
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 #[specta::specta]
-pub fn list_files(
+pub async fn list_files(
     limit: u32,
     volume: Option<String>,
     state: tauri::State<'_, AppState>,
@@ -406,7 +445,31 @@ pub fn list_files(
                 .map_err(|e| format!("bad volume UUID: {e}"))
         })
         .transpose()?;
-    list_files_inner(&state.data_dir, limit, volume_id).map_err(|e| e.to_string())
+
+    let out = state
+        .container
+        .metadata
+        .execute(MetadataCommand::ListFiles {
+            limit: Some(limit),
+            offset: None,
+            device: state.device_id,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    let MetadataOutput::Files(records) = out else {
+        return Err("ListFiles returned non-Files output".to_owned());
+    };
+
+    // WHY post-filter by volume in the shell: `MetadataCommand::ListFiles`
+    // does not yet accept a volume filter (Batch B kept its surface
+    // narrow); filtering in memory after the UseCase returns matches the
+    // CLI `ls.rs` pattern for the same constraint.
+    let filtered: Vec<FileEntry> = records
+        .into_iter()
+        .filter(|r| volume_id.is_none_or(|v| r.volume_id == v))
+        .map(FileEntry::from)
+        .collect();
+    Ok(filtered)
 }
 
 /// Inner list-files logic extracted for testability without a live Tauri state.
@@ -454,8 +517,30 @@ pub async fn list_files_with_metadata(
                 .map_err(|e| format!("bad volume UUID: {e}"))
         })
         .transpose()?;
-    list_files_with_metadata_inner(state.metadata_repo.as_ref(), limit, volume_id)
-        .map_err(|e| e.to_string())
+
+    let out = state
+        .container
+        .metadata
+        .execute(MetadataCommand::ListFilesWithMetadata {
+            limit: Some(limit),
+            offset: None,
+            device: state.device_id,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    let MetadataOutput::FilesWithMetadata(rows) = out else {
+        return Err("ListFilesWithMetadata returned non-FilesWithMetadata output".to_owned());
+    };
+
+    // WHY post-filter by volume: see `list_files` — the `MetadataCommand`
+    // variants don't expose a volume filter yet. Kept symmetric with
+    // `list_files` for maintainability.
+    let filtered: Vec<FileWithMetadataPayload> = rows
+        .into_iter()
+        .filter(|(loc, _)| volume_id.is_none_or(|v| loc.volume_id == v))
+        .map(FileWithMetadataPayload::from)
+        .collect();
+    Ok(filtered)
 }
 
 /// Inner list-files-with-metadata logic extracted for testability without
@@ -490,8 +575,19 @@ where
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 #[specta::specta]
-pub fn list_volumes(state: tauri::State<'_, AppState>) -> Result<Vec<VolumeEntry>, String> {
-    list_volumes_inner(&state.data_dir, state.device_id).map_err(|e| e.to_string())
+pub async fn list_volumes(state: tauri::State<'_, AppState>) -> Result<Vec<VolumeEntry>, String> {
+    let out = state
+        .container
+        .volume
+        .execute(VolumeCommand::List {
+            device: state.device_id,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    let VolumeOutput::Volumes(records) = out else {
+        return Err("VolumeCommand::List returned non-Volumes output".to_owned());
+    };
+    Ok(records.into_iter().map(VolumeEntry::from).collect())
 }
 
 /// Inner list-volumes logic extracted for testability without a live Tauri state.
@@ -518,9 +614,12 @@ pub fn list_volumes_inner(
 
 /// Start watching `path` for filesystem changes.
 ///
-/// Validates the path, detects the volume, opens the database, cancels any
-/// prior watcher, then starts a new [`DebouncedWatcher`] that emits
-/// `"file-event"` Tauri events and DB updates on every filesystem change.
+/// Validates the path, detects the volume, then starts a new
+/// [`DebouncedWatcher`] that forwards every filesystem event to the
+/// shared `container.events` bus. The bus was assembled once at
+/// `lib.rs::setup` with the `DbEventHandler`, `TauriEventEmitter`, and
+/// `LogEventHandler` already wired — no second `CompositeEventBus` is
+/// constructed here (spec §4 acceptance).
 ///
 /// # Errors
 /// Returns a `String` if the path is invalid, volume detection fails, or the
@@ -532,7 +631,6 @@ pub fn list_volumes_inner(
 #[specta::specta]
 pub async fn start_watch(
     path: String,
-    app_handle: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     watcher_state: tauri::State<'_, WatcherState>,
 ) -> Result<(), String> {
@@ -541,44 +639,38 @@ pub async fn start_watch(
     let canonical_root =
         perima_fs::platform_path::canonicalize(&root).map_err(|e| format!("canonicalize: {e}"))?;
 
+    // Resolve or create the volume record for this mount.
+    //
+    // WHY delegate to the VolumeUseCase for `record_mount` but open a
+    // short-lived connection for `find_or_create`: the UseCase surface
+    // does not yet expose `find_or_create` (scan-startup concern). Under
+    // WAL mode a one-off open here is instant. When Batch C lands, the
+    // writer actor consolidates every SQL entry point.
     let detected = perima_fs::detect_volume(&canonical_root).map_err(|e| e.to_string())?;
     let db_path = state.data_dir.join("perima.db");
     let device_id = state.device_id;
 
-    // WHY two connections: SqliteVolumeRepository and SqliteFileRepository
-    // each take an owned Connection. Under WAL mode a second open is instant.
     let vol_conn = open_and_migrate(&db_path).map_err(|e| e.to_string())?;
-    let file_conn = open_and_migrate(&db_path).map_err(|e| e.to_string())?;
-
     let vol_repo = SqliteVolumeRepository::new(vol_conn);
     let volume_id =
         perima_core::VolumeRepository::find_or_create(&vol_repo, &detected.identifiers, device_id)
             .map_err(|e| e.to_string())?;
-    perima_core::VolumeRepository::record_mount(
-        &vol_repo,
-        volume_id,
-        device_id,
-        &detected.mount_point,
-    )
-    .map_err(|e| e.to_string())?;
     drop(vol_repo);
 
-    let file_repo = Arc::new(SqliteFileRepository::new(file_conn));
-
-    let db_handler: Arc<dyn EventBus> = Arc::new(DbEventHandler {
-        repo: Arc::clone(&file_repo),
-        device: device_id,
-    });
-    let tauri_emitter: Arc<dyn EventBus> = Arc::new(TauriEventEmitter {
-        app_handle: app_handle.clone(),
-    });
-    let log_handler: Arc<dyn EventBus> = Arc::new(LogEventHandler);
-
-    let composite = Arc::new(CompositeEventBus::new(vec![
-        db_handler,
-        tauri_emitter,
-        log_handler,
-    ]));
+    // WHY delegate mount-recording to the VolumeUseCase: this is the
+    // single call the UseCase's `RecordMount` variant was built for;
+    // routing it through the container keeps the event-bus emission
+    // contract consistent once Batch E wires volume events.
+    state
+        .container
+        .volume
+        .execute(VolumeCommand::RecordMount {
+            volume_id,
+            path: detected.mount_point.clone(),
+            device: device_id,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Cancel any existing watcher before starting a new one.
     {
@@ -595,13 +687,20 @@ pub async fn start_watch(
 
     let cancel = CancellationToken::new();
 
+    // WHY `Arc::clone(&state.container.events)`: the container's
+    // `events` field is the already-composed `CompositeEventBus` built
+    // at setup time with every shell handler (log, DB, Tauri-emit).
+    // DebouncedWatcher takes an `Arc<dyn EventBus>`; cloning the Arc
+    // avoids a second bus construction in this shell.
+    let bus: Arc<dyn EventBus> = Arc::clone(&state.container.events);
+
     // WHY 1 s production debounce: short enough for responsive feedback,
     // long enough to coalesce rapid saves (e.g. editors that write-then-chmod).
     let watcher = DebouncedWatcher::start(
         std::slice::from_ref(&canonical_root),
         &canonical_root,
         volume_id,
-        composite,
+        bus,
         cancel.clone(),
         Duration::from_secs(1),
     )
@@ -671,8 +770,17 @@ pub async fn is_watching(watcher_state: tauri::State<'_, WatcherState>) -> Resul
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 #[specta::specta]
-pub fn list_tags(state: tauri::State<'_, AppState>) -> Result<Vec<TagPayload>, String> {
-    list_tags_inner(state.tag_repo.as_ref()).map_err(|e| e.to_string())
+pub async fn list_tags(state: tauri::State<'_, AppState>) -> Result<Vec<TagPayload>, String> {
+    let out = state
+        .container
+        .tag
+        .execute(TagCommand::List)
+        .await
+        .map_err(|e| e.to_string())?;
+    let TagOutput::Tags(tags) = out else {
+        return Err("TagCommand::List returned non-Tags output".to_owned());
+    };
+    Ok(tags.into_iter().map(TagPayload::from).collect())
 }
 
 /// Inner list-tags logic extracted for testability without a live Tauri state.
@@ -701,13 +809,41 @@ pub fn list_tags_inner<T: TagRepository + ?Sized>(
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 #[specta::specta]
-pub fn attach_tag(
+pub async fn attach_tag(
     hash: String,
     tag_name: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<TagPayload, String> {
-    attach_tag_inner(state.tag_repo.as_ref(), &hash, &tag_name, state.device_id)
-        .map_err(|e| e.to_string())
+    // WHY parse the hash + resolve tag through the shell-side
+    // `state.tag_repo` instead of adding a "return the tag" variant to
+    // `TagCommand::Attach`: the frontend currently expects the full
+    // [`TagPayload`] (id + name + first_seen) back from `attach_tag`.
+    // The `TagUseCase::Attach` response is `TagOutput::Attached(u64)`
+    // — just a rows-changed count. Rather than widen the UseCase
+    // output mid-batch, we do the attach via the container and then
+    // read the freshly-upserted tag via the legacy `state.tag_repo`
+    // handle. A future follow-up ("Attached { tag: Tag }") removes
+    // this second lookup.
+    let parsed_hash = perima_core::BlakeHash::parse_hex(&hash).map_err(|e| e.to_string())?;
+    state
+        .container
+        .tag
+        .execute(TagCommand::Attach {
+            hash: parsed_hash,
+            name: tag_name.clone(),
+            device: state.device_id,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Look up the freshly-upserted tag so the frontend gets the full
+    // payload. `upsert_tag` is idempotent — calling it here returns the
+    // same row the UseCase just wrote.
+    let tag = state
+        .tag_repo
+        .upsert_tag(&tag_name, state.device_id)
+        .map_err(|e| e.to_string())?;
+    Ok(TagPayload::from(tag))
 }
 
 /// Inner attach-tag logic extracted for testability without a live Tauri state.
@@ -743,13 +879,40 @@ pub fn attach_tag_inner<T: TagRepository + ?Sized>(
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 #[specta::specta]
-pub fn detach_tag(
+pub async fn detach_tag(
     hash: String,
     tag_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    detach_tag_inner(state.tag_repo.as_ref(), &hash, &tag_id, state.device_id)
-        .map_err(|e| e.to_string())
+    // WHY resolve tag_id -> tag name in the shell: the
+    // `TagCommand::Detach` variant takes `{ hash, name, device }` — it
+    // looks up the tag by name via `upsert_tag`, the same idempotent
+    // path used pre-Batch-B. The frontend still passes the tag's UUID
+    // (string) because the `TagPayload` it already has in hand surfaces
+    // `id`, not `name`. We resolve id → name via the legacy
+    // `state.tag_repo` handle. A future "Detach by id" variant on the
+    // UseCase obsoletes this lookup.
+    let parsed_hash = perima_core::BlakeHash::parse_hex(&hash).map_err(|e| e.to_string())?;
+    let parsed_id = uuid::Uuid::parse_str(&tag_id).map_err(|e| format!("bad tag UUID: {e}"))?;
+
+    let tags = state.tag_repo.list_tags().map_err(|e| e.to_string())?;
+    let tag_name = tags
+        .into_iter()
+        .find(|t| t.id == parsed_id)
+        .map(|t| t.name)
+        .ok_or_else(|| format!("tag not found: {parsed_id}"))?;
+
+    state
+        .container
+        .tag
+        .execute(TagCommand::Detach {
+            hash: parsed_hash,
+            name: tag_name,
+            device: state.device_id,
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Inner detach-tag logic extracted for testability without a live Tauri state.
@@ -787,7 +950,7 @@ pub fn detach_tag_inner<T: TagRepository + ?Sized>(
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 #[specta::specta]
-pub fn list_files_with_tags(
+pub async fn list_files_with_tags(
     limit: u32,
     volume: Option<String>,
     state: tauri::State<'_, AppState>,
@@ -799,13 +962,29 @@ pub fn list_files_with_tags(
                 .map_err(|e| format!("bad volume UUID: {e}"))
         })
         .transpose()?;
-    list_files_with_tags_inner(
-        state.metadata_repo.as_ref(),
-        state.tag_repo.as_ref(),
-        limit,
-        volume_id,
-    )
-    .map_err(|e| e.to_string())
+
+    let out = state
+        .container
+        .tag
+        .execute(TagCommand::ListFilesWithTags {
+            filter: Some(TagFilter {
+                limit,
+                volume: volume_id,
+            }),
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    let TagOutput::FilesWithTags(files) = out else {
+        return Err("TagCommand::ListFilesWithTags returned non-FilesWithTags output".to_owned());
+    };
+
+    Ok(files
+        .into_iter()
+        .map(|fwt| FileWithTagsPayload {
+            file: FileWithMetadataPayload::from((fwt.location, fwt.metadata)),
+            tags: fwt.tags.into_iter().map(TagPayload::from).collect(),
+        })
+        .collect())
 }
 
 /// Inner list-files-with-tags: two queries + merge in Rust.
@@ -871,7 +1050,7 @@ fn run_scan_dry<S, H>(
     scanner: &S,
     hasher: &H,
     canonical_root: &Path,
-    never_cancel: &Arc<AtomicBool>,
+    never_cancel: &CancellationToken,
 ) -> Result<ScanResult, perima_core::CoreError>
 where
     S: perima_core::Scanner + ?Sized,
@@ -879,14 +1058,14 @@ where
 {
     let discovered: Vec<perima_core::DiscoveredFile> = scanner
         .walk(canonical_root, canonical_root)?
-        .take_while(|_| !never_cancel.load(Ordering::SeqCst))
+        .take_while(|_| !never_cancel.is_cancelled())
         .collect();
 
-    let cancel_flag = Arc::clone(never_cancel);
+    let cancel_flag = never_cancel.clone();
     let results: Vec<Result<_, perima_core::CoreError>> = discovered
         .into_par_iter()
         .map(|d| {
-            if cancel_flag.load(Ordering::SeqCst) {
+            if cancel_flag.is_cancelled() {
                 return Err(perima_core::CoreError::Internal("cancelled".into()));
             }
             let h = hasher.full_hash(&d.absolute_path)?;
@@ -926,7 +1105,7 @@ async fn run_scan_live<S, H, FR, VR>(
     on_persist: OnPersistFn<'_>,
     device_id: DeviceId,
     canonical_root: &Path,
-    never_cancel: &Arc<AtomicBool>,
+    never_cancel: &CancellationToken,
     metadata_repo: Option<Arc<dyn MetadataRepository>>,
     thumbnailer: Arc<ThumbnailGenerator>,
 ) -> Result<ScanResult, perima_core::CoreError>
@@ -971,14 +1150,14 @@ where
 
     let discovered: Vec<perima_core::DiscoveredFile> = scanner
         .walk(canonical_root, canonical_root)?
-        .take_while(|_| !never_cancel.load(Ordering::SeqCst))
+        .take_while(|_| !never_cancel.is_cancelled())
         .collect();
 
-    let cancel_flag = Arc::clone(never_cancel);
+    let cancel_flag = never_cancel.clone();
     let results: Vec<Result<_, perima_core::CoreError>> = discovered
         .into_par_iter()
         .map(|d| {
-            if cancel_flag.load(Ordering::SeqCst) {
+            if cancel_flag.is_cancelled() {
                 return Err(perima_core::CoreError::Internal("cancelled".into()));
             }
             let h = hasher.full_hash(&d.absolute_path)?;
@@ -1110,12 +1289,36 @@ const SEARCH_LIMIT_DEFAULT: u32 = 100;
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 #[specta::specta]
-pub fn search(
+pub async fn search(
     query: String,
     limit: u32,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<SearchHitPayload>, String> {
-    search_inner(state.search_repo.as_ref(), &query, limit).map_err(|e| e.to_string())
+    // WHY keep the empty / whitespace short-circuit in the shell: the
+    // `SearchUseCase` returns `CoreError::Unsupported` for an empty
+    // query, but the frontend's contract with pre-Batch-B `search` was
+    // "empty input -> []". Preserving that contract here until the
+    // frontend migrates to typed errors (Batch D) keeps the UI stable.
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    // Clamp limit: 0 -> default; anything > MAX -> MAX.
+    let clamped = if limit == 0 {
+        SEARCH_LIMIT_DEFAULT
+    } else {
+        limit.min(SEARCH_LIMIT_MAX)
+    };
+
+    let out = state
+        .container
+        .search
+        .execute(SearchCommand::Query {
+            q: query,
+            limit: Some(clamped),
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(out.hits.into_iter().map(SearchHitPayload::from).collect())
 }
 
 /// Inner search logic extracted for testability without a live Tauri
@@ -1152,6 +1355,15 @@ pub fn search_inner(
 #[allow(clippy::needless_pass_by_value)]
 #[tauri::command]
 #[specta::specta]
-pub fn search_rebuild(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    state.search_repo.rebuild().map_err(|e| e.to_string())
+pub async fn search_rebuild(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    // WHY `SearchCommand::Rebuild` through the container: matches the
+    // CLI `--rebuild` pattern (`perima_app::SearchCommand::Rebuild`);
+    // the shell discards the empty `hits` payload.
+    let _: SearchOutput = state
+        .container
+        .search
+        .execute(SearchCommand::Rebuild)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
