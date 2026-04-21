@@ -63,6 +63,9 @@ uuid         = { version = "1", features = ["v4", "v7", "serde"] }
 blake3       = "1"
 rusqlite     = { version = "0.38", features = ["bundled"] }
 refinery     = { version = "0.9", features = ["rusqlite"] }
+flume        = "0.12"
+r2d2         = "0.8"
+r2d2_sqlite  = "0.32"
 walkdir      = "2"
 notify       = "8.2"
 notify-debouncer-full = "0.7"

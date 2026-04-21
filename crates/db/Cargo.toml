@@ -15,6 +15,9 @@ thiserror.workspace = true
 tracing.workspace   = true
 uuid.workspace      = true
 chrono.workspace    = true
+flume.workspace     = true
+r2d2.workspace      = true
+r2d2_sqlite.workspace = true
 
 [dev-dependencies]
 tempfile.workspace  = true
