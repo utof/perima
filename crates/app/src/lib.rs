@@ -1,6 +1,6 @@
 //! perima-app — application-service layer.
 //!
-//! Five concrete `UseCase` structs orchestrate across the `perima-core`
+//! Six concrete `UseCase` structs orchestrate across the `perima-core`
 //! ports. Each exposes a single `async fn execute(&self, cmd: Cmd) ->
 //! Result<Out, CoreError>`. Zero generic parameters; dependency ports
 //! carried as `Arc<dyn Port>` fields. CLI and Desktop shells consume
@@ -25,11 +25,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod metadata;
 pub mod scan;
 pub mod search;
 pub mod tag;
 pub mod volume;
 
+pub use metadata::{MetadataCommand, MetadataOutput, MetadataUseCase};
 pub use scan::{
     FullScan, METADATA_DRAIN_TIMEOUT, OnPersist, ScanCommand, ScanReport, ScanReportEntry,
     ScanUseCase,
