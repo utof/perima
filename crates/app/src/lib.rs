@@ -28,6 +28,7 @@
 pub mod scan;
 pub mod search;
 pub mod tag;
+pub mod volume;
 
 pub use scan::{
     FullScan, METADATA_DRAIN_TIMEOUT, OnPersist, ScanCommand, ScanReport, ScanReportEntry,
@@ -35,3 +36,4 @@ pub use scan::{
 };
 pub use search::{SearchCommand, SearchOutput, SearchUseCase};
 pub use tag::{FileWithTags, TagCommand, TagFilter, TagOutput, TagUseCase};
+pub use volume::{VolumeCommand, VolumeOutput, VolumeUseCase};
