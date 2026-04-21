@@ -3269,6 +3269,7 @@ dependencies = [
  "insta",
  "miette",
  "nix",
+ "perima-app",
  "perima-core",
  "perima-db",
  "perima-fs",

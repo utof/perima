@@ -17,12 +17,16 @@ mod logging;
 mod panic;
 mod signals;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use perima_core::MetadataRepository;
+use perima_app::{AppContainer, AppDeps};
+use perima_core::{
+    EventBus, FileRepository, HashService, MetadataRepository, Scanner, SearchRepository,
+    TagRepository, VolumeRepository,
+};
 use perima_db::{
     SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository,
     SqliteVolumeRepository, open_and_migrate,
@@ -127,10 +131,7 @@ enum Command {
     },
 }
 
-/// Entry point. Tokio runtime is required for the `watch` command (phase 3a)
-/// and for `CancellationToken::cancelled().await` in future sub-commands.
-/// All existing sync commands (`scan`, `ls`, `volumes`) run directly on the
-/// main task without blocking — they complete before yielding.
+/// Entry point.
 ///
 /// WHY `#[tokio::main]`: `CancellationToken::cancelled()` is an async future;
 /// we need a runtime even when the current command is sync. The cost is one
@@ -187,13 +188,13 @@ async fn main() -> ExitCode {
             json,
             with_metadata,
             tag,
-        } => dispatch_ls(volume, limit, json, with_metadata, tag, &config),
+        } => dispatch_ls(volume, limit, json, with_metadata, tag, &config).await,
 
-        Command::Tag(args) => dispatch_tag(&args, &config),
+        Command::Tag(args) => dispatch_tag(&args, &config).await,
 
-        Command::Search(args) => dispatch_search(&args, &config),
+        Command::Search(args) => dispatch_search(&args, &config).await,
 
-        Command::Volumes => dispatch_volumes(&config),
+        Command::Volumes => dispatch_volumes(&config).await,
 
         Command::Watch { root } => dispatch_watch(root, &config, &cancel).await,
 
@@ -201,16 +202,74 @@ async fn main() -> ExitCode {
     }
 }
 
+// ---------------------------------------------------------------------------
+// AppContainer construction
+// ---------------------------------------------------------------------------
+
+/// Build an [`AppContainer`] for a given database path.
+///
+/// WHY one connection per repo (not one `Arc<Mutex<Connection>>` shared):
+/// each `Sqlite*Repository` owns its own `Mutex<Connection>` today (see
+/// `crates/db/src/*_repo.rs`). Under WAL mode opening multiple connections
+/// to the same file is cheap and avoids a second layer of `Mutex` that none
+/// of the repo constructors accept. Batch C (connection-actor) will
+/// consolidate this to a single writer + read pool.
+fn build_container(db_path: &Path) -> Result<Arc<AppContainer>, perima_core::CoreError> {
+    let files: Arc<dyn FileRepository> =
+        Arc::new(SqliteFileRepository::new(open_and_migrate(db_path)?));
+    let volumes: Arc<dyn VolumeRepository> =
+        Arc::new(SqliteVolumeRepository::new(open_and_migrate(db_path)?));
+    let tags: Arc<dyn TagRepository> =
+        Arc::new(SqliteTagRepository::new(open_and_migrate(db_path)?));
+    let metadata: Arc<dyn MetadataRepository> =
+        Arc::new(SqliteMetadataRepository::new(open_and_migrate(db_path)?));
+    let search: Arc<dyn SearchRepository> =
+        Arc::new(SqliteSearchRepository::new(open_and_migrate(db_path)?));
+    let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
+    let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());
+
+    // WHY the thumbnailer is chosen at container-build time: the container
+    // is constructed once per command dispatch (via `build_container`),
+    // and each dispatcher overrides the thumbnailer *flag* via the
+    // `FullScan { no_thumbnails }` field at UseCase call time. The wired
+    // generator here stays enabled by default; `--no-thumbnails` flips
+    // to `disabled()` inside the UseCase.
+    let thumbnailer = Arc::new(ThumbnailGenerator::new(
+        db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf(),
+    ));
+
+    let deps = AppDeps {
+        files,
+        volumes,
+        tags,
+        metadata,
+        search,
+        hasher,
+        scanner,
+        thumbnailer,
+    };
+
+    // WHY a log-only handler set at the CLI level: the `watch` command
+    // still constructs its own `DbEventHandler` + local `CompositeEventBus`
+    // (see `cmd/watch.rs` WHY-block for rationale). Other commands don't
+    // emit events yet (Batch E); passing a log handler here keeps the
+    // container honest and lets tracing show any event emissions if a
+    // future UseCase does emit.
+    let log_handler: Arc<dyn EventBus> = Arc::new(crate::cmd::watch::LogEventHandler);
+    Ok(AppContainer::new(deps, vec![log_handler]))
+}
+
+// ---------------------------------------------------------------------------
+// Dispatchers
+// ---------------------------------------------------------------------------
+
 /// Run the `scan` subcommand.
 //
-// WHY `#[allow(clippy::future_not_send)]`: propagates from
-// `scan::run` (`on_persist` captures a non-Sync closure). This task
-// is awaited directly from `#[tokio::main]` — never sent between
-// threads — so the non-Send future is acceptable here.
 // WHY allow(fn_params_excessive_bools): each bool corresponds to a
-// distinct `--flag` on `perima scan`. Collapsing them into an enum
-// would either merge orthogonal axes or lose the 1:1 CLI mapping.
-#[allow(clippy::future_not_send)]
+// distinct `--flag` on `perima scan`.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::fn_params_excessive_bools)]
 async fn dispatch_scan(
@@ -229,66 +288,31 @@ async fn dispatch_scan(
         no_wait_metadata,
         no_thumbnails,
     };
-    let scanner = WalkdirScanner::new();
-    let hasher = Blake3Service::new();
 
-    if dry_run {
-        // WHY turbofish: both repos are None so the type parameters FR and VR
-        // are never instantiated, but Rust needs concrete types for
-        // monomorphisation. SqliteFileRepository / SqliteVolumeRepository are
-        // the production impls; using them here is a zero-cost hint with no
-        // allocation because the None branches never call them.
-        map_scan_result(
-            cmd::scan::run::<_, _, SqliteFileRepository, SqliteVolumeRepository>(
-                &scanner,
-                &hasher,
-                None,
-                None,
-                None,
-                None,
-                None,
-                config.device_id,
-                cancel,
-                &args,
-            )
-            .await,
-        )
+    let db_path = config.data_dir.join("perima.db");
+
+    // WHY dry-run takes the same container path: the UseCase's
+    // `FullScan { dry_run: true }` branch skips every DB write and
+    // volume detection internally — no split path needed. Building the
+    // container still requires migrations to have run, which is
+    // harmless for a fresh dry-run against an empty data dir.
+    let container = match build_container(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("perima: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    // WHY sentinel migration closure stays in the shell: the
+    // `FileRepository` trait doesn't expose `migrate_sentinel_row`; it's
+    // an impl-specific method on `SqliteFileRepository`. The UseCase
+    // accepts an opaque `OnPersist = Arc<dyn Fn + Send + Sync>` hook,
+    // and the CLI constructs one here with its own short-lived
+    // `SqliteFileRepository`.
+    let on_persist: cmd::scan::OnPersistFactory = if dry_run {
+        None
     } else {
-        let db_path = config.data_dir.join("perima.db");
-        // WHY two separate open_and_migrate calls: SqliteFileRepository and
-        // SqliteVolumeRepository each take owned Connections wrapped in
-        // Mutex<Connection>. Rather than introduce Arc<Mutex<Connection>>
-        // complexity, we open the DB twice. Under WAL mode SQLite allows
-        // multiple concurrent readers; the second open is instant because
-        // migrations already ran on the first connection.
-        let file_conn = match open_and_migrate(&db_path) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("perima: database: {e}");
-                return ExitCode::from(1);
-            }
-        };
-        let vol_conn = match open_and_migrate(&db_path) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("perima: database (volume repo): {e}");
-                return ExitCode::from(1);
-            }
-        };
-        let mut file_repo = SqliteFileRepository::new(file_conn);
-        let mut vol_repo = SqliteVolumeRepository::new(vol_conn);
-
-        // WHY closure for sentinel migration: migrate_sentinel_row is an
-        // impl-specific method on SqliteFileRepository (not on the
-        // FileRepository trait). Passing it as a closure lets scan.rs stay
-        // generic over FR while still invoking the concrete migration in the
-        // production path.
-        //
-        // WHY second DB connection for sentinel migration: the closure and
-        // the FileRepository mutable borrow cannot alias in safe Rust. We
-        // open a third lightweight connection for the sentinel UPDATE queries
-        // only; under WAL mode this is a cheap SELECT + UPDATE path with no
-        // contention against the scan writer.
         let sentinel_conn = match open_and_migrate(&db_path) {
             Ok(c) => c,
             Err(e) => {
@@ -296,58 +320,19 @@ async fn dispatch_scan(
                 return ExitCode::from(1);
             }
         };
-        let sentinel_repo = SqliteFileRepository::new(sentinel_conn);
-        let device = config.device_id;
-        let on_persist = |path: &perima_core::MediaPath,
-                          volume: perima_core::VolumeId,
-                          dev: perima_core::DeviceId| {
-            if let Err(e) = sentinel_repo.migrate_sentinel_row(path, volume, dev) {
-                tracing::warn!(error = %e, "sentinel migration failed (non-fatal)");
-            }
-        };
+        let sentinel_repo = Arc::new(SqliteFileRepository::new(sentinel_conn));
+        Some(Arc::new(
+            move |path: &perima_core::MediaPath,
+                  volume: perima_core::VolumeId,
+                  dev: perima_core::DeviceId| {
+                if let Err(e) = sentinel_repo.migrate_sentinel_row(path, volume, dev) {
+                    tracing::warn!(error = %e, "sentinel migration failed (non-fatal)");
+                }
+            },
+        ) as perima_app::OnPersist)
+    };
 
-        // WHY separate metadata connection: SqliteMetadataRepository
-        // owns a Mutex<Connection>. Under WAL mode another open is
-        // instant; sharing across repos would require Arc<Mutex<>>
-        // layering none of the existing constructors accept. The same
-        // rationale applies to file_repo/vol_repo above.
-        let metadata_conn = match open_and_migrate(&db_path) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("perima: database (metadata repo): {e}");
-                return ExitCode::from(1);
-            }
-        };
-        let metadata_repo: Arc<dyn MetadataRepository> =
-            Arc::new(SqliteMetadataRepository::new(metadata_conn));
-
-        // WHY build the thumbnailer here: `config.data_dir` is the
-        // root the rest of `scan::run` uses to resolve `perima.db`, so
-        // thumbnails co-locating under `<data_dir>/thumbnails/...` is
-        // the simplest layout. `--no-thumbnails` short-circuits to a
-        // no-op generator that returns `Ok(None)` from `generate`.
-        let thumbnailer: Arc<ThumbnailGenerator> = Arc::new(if no_thumbnails {
-            ThumbnailGenerator::disabled()
-        } else {
-            ThumbnailGenerator::new(config.data_dir.clone())
-        });
-
-        map_scan_result(
-            cmd::scan::run(
-                &scanner,
-                &hasher,
-                Some(&mut file_repo),
-                Some(&mut vol_repo),
-                Some(metadata_repo),
-                Some(thumbnailer),
-                Some(&on_persist),
-                device,
-                cancel,
-                &args,
-            )
-            .await,
-        )
-    }
+    map_scan_result(cmd::scan::run(&container, config.device_id, cancel, on_persist, &args).await)
 }
 
 /// Convert a scan result to a process `ExitCode`.
@@ -369,7 +354,7 @@ fn map_scan_result(
 }
 
 /// Run the `ls` subcommand.
-fn dispatch_ls(
+async fn dispatch_ls(
     volume: Option<String>,
     limit: usize,
     json: bool,
@@ -392,30 +377,13 @@ fn dispatch_ls(
         }
     };
     let db_path = config.data_dir.join("perima.db");
-    let file_conn = match open_and_migrate(&db_path) {
+    let container = match build_container(&db_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database: {e}");
             return ExitCode::from(1);
         }
     };
-    let meta_conn = match open_and_migrate(&db_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("perima: database (metadata): {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let tag_conn = match open_and_migrate(&db_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("perima: database (tag repo): {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let repo = SqliteFileRepository::new(file_conn);
-    let metadata_repo = SqliteMetadataRepository::new(meta_conn);
-    let tag_repo = SqliteTagRepository::new(tag_conn);
     let ls_args = cmd::ls::LsArgs {
         volume: volume_id,
         limit,
@@ -423,8 +391,12 @@ fn dispatch_ls(
         with_metadata,
         tag,
     };
-    match cmd::ls::run(&repo, &metadata_repo, &tag_repo, &ls_args) {
+    match cmd::ls::run(&container, &config.data_dir, config.device_id, &ls_args).await {
         Ok(()) => ExitCode::from(0),
+        Err(perima_core::CoreError::NotFound(msg)) => {
+            eprintln!("perima: {msg}");
+            ExitCode::from(1)
+        }
         Err(e) => {
             eprintln!("perima: {e}");
             ExitCode::from(1)
@@ -433,25 +405,16 @@ fn dispatch_ls(
 }
 
 /// Run the `tag` subcommand.
-fn dispatch_tag(args: &cmd::tag::TagArgs, config: &Config) -> ExitCode {
+async fn dispatch_tag(args: &cmd::tag::TagArgs, config: &Config) -> ExitCode {
     let db_path = config.data_dir.join("perima.db");
-    let tag_conn = match open_and_migrate(&db_path) {
+    let container = match build_container(&db_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("perima: database (tag repo): {e}");
+            eprintln!("perima: database: {e}");
             return ExitCode::from(1);
         }
     };
-    let file_conn = match open_and_migrate(&db_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("perima: database (file repo): {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let tag_repo = SqliteTagRepository::new(tag_conn);
-    let file_repo = SqliteFileRepository::new(file_conn);
-    match cmd::tag::run(&tag_repo, &file_repo, config.device_id, args) {
+    match cmd::tag::run(&container, &config.data_dir, config.device_id, args).await {
         Ok(()) => ExitCode::from(0),
         Err(e) => {
             eprintln!("perima: {e}");
@@ -462,7 +425,23 @@ fn dispatch_tag(args: &cmd::tag::TagArgs, config: &Config) -> ExitCode {
 
 /// Run the `watch` subcommand.
 async fn dispatch_watch(root: PathBuf, config: &Config, cancel: &Cancellation) -> ExitCode {
-    match cmd::watch::run(&config.data_dir, config.device_id, &root, cancel).await {
+    let db_path = config.data_dir.join("perima.db");
+    let container = match build_container(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("perima: database: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match cmd::watch::run(
+        &container,
+        &config.data_dir,
+        config.device_id,
+        &root,
+        cancel,
+    )
+    .await
+    {
         Ok(()) => ExitCode::from(0),
         Err(perima_core::CoreError::InvalidPath(msg)) => {
             eprintln!("perima: {msg}");
@@ -475,7 +454,8 @@ async fn dispatch_watch(root: PathBuf, config: &Config, cancel: &Cancellation) -
     }
 }
 
-/// Run the `metadata` subcommand.
+/// Run the `metadata` subcommand (single-file re-extract — NOT migrated to
+/// a `UseCase` in Batch B; the single-file extraction path is post-v1 work).
 async fn dispatch_metadata(path: PathBuf, json: bool, config: &Config) -> ExitCode {
     let args = cmd::metadata::MetadataArgs { path, json };
     match cmd::metadata::run(&config.data_dir, config.device_id, &args).await {
@@ -492,17 +472,16 @@ async fn dispatch_metadata(path: PathBuf, json: bool, config: &Config) -> ExitCo
 }
 
 /// Run the `search` subcommand.
-fn dispatch_search(args: &cmd::search::SearchArgs, config: &Config) -> ExitCode {
+async fn dispatch_search(args: &cmd::search::SearchArgs, config: &Config) -> ExitCode {
     let db_path = config.data_dir.join("perima.db");
-    let conn = match open_and_migrate(&db_path) {
+    let container = match build_container(&db_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("perima: database (search repo): {e}");
+            eprintln!("perima: database (search): {e}");
             return ExitCode::from(1);
         }
     };
-    let repo = SqliteSearchRepository::new(conn);
-    match cmd::search::run(&repo, args) {
+    match cmd::search::run(&container, args).await {
         Ok(()) => ExitCode::from(0),
         Err(e) => {
             eprintln!("perima: {e}");
@@ -512,17 +491,16 @@ fn dispatch_search(args: &cmd::search::SearchArgs, config: &Config) -> ExitCode 
 }
 
 /// Run the `volumes` subcommand.
-fn dispatch_volumes(config: &Config) -> ExitCode {
+async fn dispatch_volumes(config: &Config) -> ExitCode {
     let db_path = config.data_dir.join("perima.db");
-    let conn = match open_and_migrate(&db_path) {
+    let container = match build_container(&db_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database: {e}");
             return ExitCode::from(1);
         }
     };
-    let repo = SqliteVolumeRepository::new(conn);
-    match cmd::volumes::run(&repo, config.device_id) {
+    match cmd::volumes::run(&container, config.device_id).await {
         Ok(()) => ExitCode::from(0),
         Err(e) => {
             eprintln!("perima: {e}");

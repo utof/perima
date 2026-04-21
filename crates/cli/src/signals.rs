@@ -15,18 +15,13 @@ pub(crate) struct Cancellation {
 }
 
 impl Cancellation {
-    /// Has a cancellation signal been received?
-    #[must_use]
-    pub(crate) fn cancelled(&self) -> bool {
-        self.token.is_cancelled()
-    }
-
     /// Clone the underlying [`CancellationToken`] for use in a rayon closure
     /// or an async task.
     ///
     /// WHY cloned not referenced: `CancellationToken` is an `Arc`-wrapped
     /// inner handle, so `clone()` is O(1) and the clone shares state with the
-    /// original. Callers that only need a boolean should prefer `cancelled()`.
+    /// original. Callers needing a boolean check can call `.is_cancelled()`
+    /// on the cloned token directly.
     #[must_use]
     pub(crate) fn token(&self) -> CancellationToken {
         self.token.clone()

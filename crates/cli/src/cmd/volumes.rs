@@ -1,8 +1,9 @@
-//! `perima volumes` implementation.
+//! `perima volumes` — thin delegator to [`perima_app::VolumeUseCase`].
 
 use std::io::Write;
 
-use perima_core::{CoreError, DeviceId, VolumeRepository};
+use perima_app::{AppContainer, VolumeCommand, VolumeOutput};
+use perima_core::{CoreError, DeviceId};
 
 use super::format::format_size;
 
@@ -13,9 +14,18 @@ use super::format::format_size;
 /// any mount paths seen on this machine.
 ///
 /// # Errors
-/// Propagates `CoreError` from the repository.
-pub(crate) fn run<VR: VolumeRepository>(repo: &VR, machine: DeviceId) -> Result<(), CoreError> {
-    let records = repo.list(machine)?;
+/// Propagates `CoreError` from the `UseCase` / repository.
+pub(crate) async fn run(container: &AppContainer, machine: DeviceId) -> Result<(), CoreError> {
+    let out = container
+        .volume
+        .execute(VolumeCommand::List { device: machine })
+        .await?;
+
+    let VolumeOutput::Volumes(records) = out else {
+        return Err(CoreError::Internal(
+            "VolumeCommand::List returned non-Volumes output".into(),
+        ));
+    };
 
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();

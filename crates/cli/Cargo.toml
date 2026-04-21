@@ -17,6 +17,9 @@ perima-db    = { path = "../db" }
 # commit must propagate to `perima` so the CLI rev matches the media rev
 # it links against.
 perima-media = { workspace = true }
+# WHY workspace = true: release-plz propagates Batch-B app-layer bumps
+# into the CLI, same rationale as perima-media above.
+perima-app   = { workspace = true }
 chrono.workspace    = true
 serde_json.workspace = true
 serde.workspace      = true

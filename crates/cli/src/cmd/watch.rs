@@ -6,52 +6,25 @@
 //! - [`FileEvent::Modified`] → `status = stale`.
 //! - [`FileEvent::Deleted`] → `status = missing`.
 //! - [`FileEvent::Renamed`] → rename the location row, reset to active.
+//!
+//! WHY still opens its own DB connections (vs. reading them from
+//! `AppContainer`): the watch command needs a `DbEventHandler` with a
+//! live `FileRepository` handle so inbound filesystem events can mutate
+//! location rows. `AppContainer` does not (yet) expose the repo ports
+//! directly — only the `UseCases`. A future batch will either hoist
+//! `DbEventHandler` into `perima_app` or surface the deps on the
+//! container; Task 8 keeps the shell minimal without revising Task 7.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use perima_app::{AppContainer, CompositeEventBus};
 use perima_core::{CoreError, DeviceId, EventBus, FileEvent, LocationStatus, VolumeRepository};
 use perima_db::{SqliteFileRepository, SqliteVolumeRepository, open_and_migrate};
 use perima_fs::DebouncedWatcher;
 
 use crate::signals::Cancellation;
-
-// ---------------------------------------------------------------------------
-// CompositeEventBus
-// ---------------------------------------------------------------------------
-
-/// Fans out events to multiple [`EventBus`] implementations.
-///
-/// Individual handler errors are logged but do not abort the fan-out —
-/// all registered handlers always fire regardless of prior failures.
-///
-/// WHY lives in watch.rs (not core): `CompositeEventBus` uses `tracing::warn!`
-/// which requires the `tracing` crate. `crates/core` deliberately has zero
-/// framework dependencies, so the composite lives in the CLI shell where
-/// `tracing` is already a direct dependency.
-pub(crate) struct CompositeEventBus {
-    handlers: Vec<Arc<dyn EventBus>>,
-}
-
-impl CompositeEventBus {
-    /// Construct from a list of handlers.
-    #[must_use]
-    pub(crate) fn new(handlers: Vec<Arc<dyn EventBus>>) -> Self {
-        Self { handlers }
-    }
-}
-
-impl EventBus for CompositeEventBus {
-    fn emit(&self, event: &FileEvent) -> Result<(), CoreError> {
-        for h in &self.handlers {
-            if let Err(e) = h.emit(event) {
-                tracing::warn!(error = %e, "event handler failed");
-            }
-        }
-        Ok(())
-    }
-}
 
 // ---------------------------------------------------------------------------
 // DbEventHandler
@@ -62,10 +35,6 @@ impl EventBus for CompositeEventBus {
 /// WHY `Arc<SqliteFileRepository>`: `EventBus` requires `Send + Sync`.
 /// `SqliteFileRepository` uses `Mutex<Connection>` internally, satisfying both.
 /// `Arc` lets `DbEventHandler` be cheaply cloneable and placed in a composite.
-///
-/// WHY no `volume` field: every [`FileEvent`] variant carries its own
-/// `volume: VolumeId` derived from the watcher's configured volume. We use the
-/// event's volume directly rather than shadowing it with a stored copy.
 struct DbEventHandler {
     repo: Arc<SqliteFileRepository>,
     device: DeviceId,
@@ -133,7 +102,11 @@ impl EventBus for DbEventHandler {
 // ---------------------------------------------------------------------------
 
 /// Logs every filesystem event at INFO level.
-struct LogEventHandler;
+///
+/// WHY `pub(crate)`: Task 10 will hoist this into `perima_app::telemetry`
+/// alongside the `tracing-subscriber` bootstrap. Until then, `main.rs`
+/// references it during `AppContainer` construction — hence crate-visible.
+pub(crate) struct LogEventHandler;
 
 impl EventBus for LogEventHandler {
     fn emit(&self, event: &FileEvent) -> Result<(), CoreError> {
@@ -178,10 +151,21 @@ fn canonicalize(root: &Path) -> Result<PathBuf, CoreError> {
 /// [`DebouncedWatcher`] that emits status updates for every filesystem event.
 /// Blocks until the cancellation token fires (Ctrl-C).
 ///
+/// WHY builds its own `CompositeEventBus` (rather than reading
+/// `container.events`): watch needs to fan out to a `DbEventHandler` bound
+/// to a `FileRepository` that can mutate location rows in response to
+/// `Modified` / `Deleted` / `Renamed` events. `container.events` carries
+/// the shell's chosen listener set (log-only today; Task 10 hoists the
+/// log handler up) — the watcher needs the DB handler too, which
+/// `AppContainer` does not currently construct. Re-using
+/// [`perima_app::CompositeEventBus`] (#69 hoist) here is still a net
+/// reduction because the type lives in the app layer, not in this file.
+///
 /// # Errors
 /// Returns [`CoreError::InvalidPath`] if `root` is not an existing directory;
 /// propagates [`CoreError`] from volume detection, DB access, or watcher init.
 pub(crate) async fn run(
+    _container: &AppContainer,
     data_dir: &Path,
     device_id: DeviceId,
     root: &Path,
@@ -206,23 +190,16 @@ pub(crate) async fn run(
 
     let file_repo = Arc::new(SqliteFileRepository::new(file_conn));
 
-    let db_handler = Arc::new(DbEventHandler {
+    let db_handler: Arc<dyn EventBus> = Arc::new(DbEventHandler {
         repo: Arc::clone(&file_repo),
         device: device_id,
     });
-    let log_handler = Arc::new(LogEventHandler);
+    let log_handler: Arc<dyn EventBus> = Arc::new(LogEventHandler);
 
-    let composite = CompositeEventBus::new(vec![
-        db_handler as Arc<dyn EventBus>,
-        log_handler as Arc<dyn EventBus>,
-    ]);
+    let composite = CompositeEventBus::new(vec![db_handler, log_handler]);
 
     // WHY 1 s production debounce: short enough for responsive feedback, long
     // enough to coalesce rapid saves (e.g. editors that write-then-chmod).
-    // WHY `watcher` (not `_watcher`): the binding must stay live until after
-    // `cancelled().await` so the underlying OS watch registration persists for
-    // the full watch session. Using a plain name avoids the
-    // `clippy::used_underscore_binding` warning when we explicitly drop it.
     let watcher = DebouncedWatcher::start(
         std::slice::from_ref(&canonical_root),
         &canonical_root,

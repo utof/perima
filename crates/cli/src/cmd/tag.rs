@@ -1,14 +1,25 @@
-//! `perima tag` subcommand — add, remove, and list tags.
+//! `perima tag` subcommand — thin delegator to [`perima_app::TagUseCase`].
 //!
 //! Provides three sub-subcommands:
 //! - `tag add <path> <tags…>` — attach one or more labels to a file
 //! - `tag rm <path> <tag>` — detach a label from a file
 //! - `tag ls [--json]` — list all active tags with attachment counts
+//!
+//! WHY still opens one DB connection inline: two helpers here
+//! (`resolve_hash` and the `tag ls` per-tag count lookup) need ports
+//! that `TagUseCase` does not currently expose on its output surface
+//! (`FileRepository::list_file_locations` for path→hash resolution +
+//! `TagRepository::count_files_for_tag` for attachment counts). A future
+//! batch can lift these onto the app layer; Task 8 keeps the shell
+//! minimal by re-using a short-lived connection, matching the pattern
+//! already in `cmd/metadata.rs`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use perima_app::{AppContainer, TagCommand, TagOutput};
 use perima_core::{BlakeHash, CoreError, DeviceId, FileRepository, TagRepository, normalize_tag};
+use perima_db::{SqliteFileRepository, SqliteTagRepository, open_and_migrate};
 
 use super::metadata::find_by_absolute_suffix;
 
@@ -28,12 +39,6 @@ pub(crate) enum TagAction {
         /// Path to the file to tag.
         path: PathBuf,
         /// One or more tag names to attach.
-        ///
-        /// WHY required + 1..: clap's default for `Vec<T>` is "zero or
-        /// more positionals" — `perima tag add foo.jpg` would silently
-        /// no-op. Force at least one tag argument so the error is a
-        /// clear "missing required tag" message instead of success-
-        /// that-did-nothing.
         #[arg(required = true, num_args = 1..)]
         tags: Vec<String>,
     },
@@ -58,32 +63,22 @@ pub(crate) enum TagAction {
 /// Returns [`CoreError::InvalidPath`] when the file does not exist or
 /// is not yet indexed (run `perima scan` first); propagates
 /// [`CoreError`] from tag normalization, DB access, and I/O.
-pub(crate) fn run<T, F>(
-    tag_repo: &T,
-    file_repo: &F,
+pub(crate) async fn run(
+    container: &AppContainer,
+    data_dir: &Path,
     device: DeviceId,
     args: &TagArgs,
-) -> Result<(), CoreError>
-where
-    T: TagRepository + ?Sized,
-    F: FileRepository + ?Sized,
-{
+) -> Result<(), CoreError> {
     match &args.action {
-        TagAction::Add { path, tags } => run_add(tag_repo, file_repo, device, path, tags),
-        TagAction::Rm { path, tag } => run_rm(tag_repo, file_repo, device, path, tag),
-        TagAction::Ls { json } => run_ls(tag_repo, *json),
+        TagAction::Add { path, tags } => run_add(container, data_dir, device, path, tags).await,
+        TagAction::Rm { path, tag } => run_rm(container, data_dir, device, path, tag).await,
+        TagAction::Ls { json } => run_ls(container, data_dir, *json).await,
     }
 }
 
-/// Resolve a path to a `BlakeHash` by suffix-matching indexed locations.
-///
-/// WHY separate helper: both `run_add` and `run_rm` need the same
-/// canonicalization + suffix-match logic. Extracting it avoids
-/// duplicating the error messages and the `list_file_locations` call.
-fn resolve_hash<F>(file_repo: &F, path: &Path) -> Result<BlakeHash, CoreError>
-where
-    F: FileRepository + ?Sized,
-{
+/// Resolve a path to a `BlakeHash` by opening a fresh `FileRepository`
+/// connection and suffix-matching indexed locations.
+fn resolve_hash(data_dir: &Path, path: &Path) -> Result<BlakeHash, CoreError> {
     if !path.exists() {
         return Err(CoreError::InvalidPath(format!(
             "does not exist: {}",
@@ -102,10 +97,11 @@ where
         .to_str()
         .ok_or_else(|| CoreError::InvalidPath(format!("non-UTF8 path: {}", absolute.display())))?;
 
+    let db_path = data_dir.join("perima.db");
+    let file_repo = SqliteFileRepository::new(open_and_migrate(&db_path)?);
     // WHY list across ALL volumes (None): the user supplies an absolute
-    // path that may live on any known volume. We don't know which scan
-    // root produced the relative-path record, so suffix-matching against
-    // the full location set is the only portable approach.
+    // path that may live on any known volume. Suffix-matching across the
+    // full location set is the only portable approach.
     let records = file_repo.list_file_locations(usize::MAX, None)?;
     let record = find_by_absolute_suffix(&records, absolute_str).ok_or_else(|| {
         CoreError::InvalidPath(format!(
@@ -118,24 +114,31 @@ where
 }
 
 /// Attach one or more tags to a file.
-fn run_add<T, F>(
-    tag_repo: &T,
-    file_repo: &F,
+async fn run_add(
+    container: &AppContainer,
+    data_dir: &Path,
     device: DeviceId,
     path: &Path,
     tags: &[String],
-) -> Result<(), CoreError>
-where
-    T: TagRepository + ?Sized,
-    F: FileRepository + ?Sized,
-{
-    let hash = resolve_hash(file_repo, path)?;
+) -> Result<(), CoreError> {
+    let hash = resolve_hash(data_dir, path)?;
 
     let mut applied = Vec::with_capacity(tags.len());
     for raw in tags {
-        let tag = tag_repo.upsert_tag(raw, device)?;
-        tag_repo.attach(&hash, tag.id, device)?;
-        applied.push(tag.name);
+        container
+            .tag
+            .execute(TagCommand::Attach {
+                hash,
+                name: raw.clone(),
+                device,
+            })
+            .await?;
+        // WHY call normalize_tag for the message: the UseCase does the
+        // same normalization internally; doing it here keeps the user-
+        // visible confirmation line consistent with the actual stored
+        // name when the raw input carried whitespace/case variance.
+        let normalized = normalize_tag(raw)?;
+        applied.push(normalized);
     }
 
     let stdout = std::io::stdout();
@@ -150,24 +153,23 @@ where
 }
 
 /// Remove a tag from a file.
-fn run_rm<T, F>(
-    tag_repo: &T,
-    file_repo: &F,
+async fn run_rm(
+    container: &AppContainer,
+    data_dir: &Path,
     device: DeviceId,
     path: &Path,
     tag_raw: &str,
-) -> Result<(), CoreError>
-where
-    T: TagRepository + ?Sized,
-    F: FileRepository + ?Sized,
-{
-    let hash = resolve_hash(file_repo, path)?;
+) -> Result<(), CoreError> {
+    let hash = resolve_hash(data_dir, path)?;
 
-    // WHY upsert_tag for rm: we need the tag's UUID to call detach.
-    // upsert_tag is idempotent — if the tag doesn't exist we create it
-    // (harmless), then detach finds no active row (no-op soft-delete).
-    let tag = tag_repo.upsert_tag(tag_raw, device)?;
-    tag_repo.detach(&hash, tag.id, device)?;
+    container
+        .tag
+        .execute(TagCommand::Detach {
+            hash,
+            name: tag_raw.to_owned(),
+            device,
+        })
+        .await?;
 
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
@@ -176,24 +178,26 @@ where
 }
 
 /// List all active tags with their per-tag file counts.
-fn run_ls<T>(tag_repo: &T, json: bool) -> Result<(), CoreError>
-where
-    T: TagRepository + ?Sized,
-{
-    let tags = tag_repo.list_tags()?;
+async fn run_ls(container: &AppContainer, data_dir: &Path, json: bool) -> Result<(), CoreError> {
+    let out = container.tag.execute(TagCommand::List).await?;
+    let TagOutput::Tags(tags) = out else {
+        return Err(CoreError::Internal(
+            "TagCommand::List returned non-Tags output".into(),
+        ));
+    };
 
-    // WHY pre-compute counts: propagate DB errors via `?` instead of
-    // swallowing them with `unwrap_or(0)` — a mutex-poison or SQLite
-    // failure should surface, not produce silent zero-counts.
+    // WHY direct TagRepository open for counts: `count_files_for_tag` is
+    // not (yet) exposed through `TagUseCase`. Opening one short-lived
+    // connection for the count pass matches the `cmd/metadata.rs` pattern
+    // and is a follow-up for the next UseCase iteration.
+    let db_path = data_dir.join("perima.db");
+    let tag_repo = SqliteTagRepository::new(open_and_migrate(&db_path)?);
     let counts: Vec<u64> = tags
         .iter()
         .map(|t| tag_repo.count_files_for_tag(t.id))
         .collect::<Result<_, _>>()?;
 
     if json {
-        // WHY manual construction instead of deriving Serialize on Tag:
-        // Tag already derives Serialize but we want a flat `{name, count, id}`
-        // shape rather than Tag's `{id, name, first_seen}` shape.
         let rows: Vec<serde_json::Value> = tags
             .iter()
             .zip(&counts)
