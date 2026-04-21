@@ -27,9 +27,11 @@
 
 pub mod scan;
 pub mod search;
+pub mod tag;
 
 pub use scan::{
     FullScan, METADATA_DRAIN_TIMEOUT, OnPersist, ScanCommand, ScanReport, ScanReportEntry,
     ScanUseCase,
 };
 pub use search::{SearchCommand, SearchOutput, SearchUseCase};
+pub use tag::{FileWithTags, TagCommand, TagFilter, TagOutput, TagUseCase};
