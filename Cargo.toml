@@ -71,12 +71,12 @@ directories  = "6"
 unicode-normalization = "0.1"
 dunce        = "1"
 file-id      = "0.2"
-tauri             = { version = "2", features = ["protocol-asset"] }
+tauri             = { version = "~2.10", features = ["protocol-asset"] }
 tauri-specta      = { version = "=2.0.0-rc.24", features = ["derive", "typescript"] }
 specta            = "=2.0.0-rc.24"
 specta-typescript = "0.0.11"
-tauri-build       = "2"
-tauri-plugin-dialog = "2"
+tauri-build       = "~2.5"
+tauri-plugin-dialog = "~2.7"
 clap         = { version = "4", features = ["derive"] }
 tempfile     = "3"
 insta        = { version = "1", features = ["yaml", "filters"] }
