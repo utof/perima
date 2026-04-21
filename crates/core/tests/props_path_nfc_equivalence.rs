@@ -39,6 +39,7 @@
 
 #[cfg(target_os = "macos")]
 #[test]
+#[allow(clippy::similar_names)] // NFC/NFD are domain terms of art — intentional
 fn fs_canonicalize_resolves_nfc_and_nfd_lookups_to_same_stored_name() {
     use std::fs;
     let dir = tempfile::tempdir().expect("tempdir");
