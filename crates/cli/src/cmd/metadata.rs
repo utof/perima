@@ -53,7 +53,7 @@ pub(crate) async fn run(
 ) -> Result<(), CoreError> {
     validate_file(&args.path)?;
     let absolute_path =
-        perima_fs::platform_path::canonicalize(&args.path).map_err(CoreError::Io)?;
+        perima_fs::platform_path::canonicalize(&args.path).map_err(CoreError::from)?;
 
     // Resolve volume from the containing directory. WHY parent(): volume
     // detection inspects the mount point; a file path's parent is the
@@ -216,38 +216,38 @@ fn print_json(meta: &MediaMetadata) -> Result<(), CoreError> {
     let mut handle = stdout.lock();
     serde_json::to_writer_pretty(&mut handle, meta)
         .map_err(|e| CoreError::Internal(format!("json: {e}")))?;
-    writeln!(handle).map_err(CoreError::Io)
+    writeln!(handle).map_err(CoreError::from)
 }
 
 fn print_table(meta: &MediaMetadata, record: &FileLocationRecord) -> Result<(), CoreError> {
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     let hash_hex = meta.hash.to_hex();
-    writeln!(handle, "hash:         {hash_hex}").map_err(CoreError::Io)?;
-    writeln!(handle, "path:         {}", record.relative_path.as_str()).map_err(CoreError::Io)?;
+    writeln!(handle, "hash:         {hash_hex}").map_err(CoreError::from)?;
+    writeln!(handle, "path:         {}", record.relative_path.as_str()).map_err(CoreError::from)?;
     if let Some(m) = &meta.mime_type {
-        writeln!(handle, "mime:         {m}").map_err(CoreError::Io)?;
+        writeln!(handle, "mime:         {m}").map_err(CoreError::from)?;
     }
     if let (Some(w), Some(h)) = (meta.width, meta.height) {
-        writeln!(handle, "dimensions:   {w}x{h}").map_err(CoreError::Io)?;
+        writeln!(handle, "dimensions:   {w}x{h}").map_err(CoreError::from)?;
     }
     if let Some(d) = meta.duration_ms {
-        writeln!(handle, "duration_ms:  {d}").map_err(CoreError::Io)?;
+        writeln!(handle, "duration_ms:  {d}").map_err(CoreError::from)?;
     }
     if let Some(c) = &meta.captured_at {
-        writeln!(handle, "captured_at:  {c}").map_err(CoreError::Io)?;
+        writeln!(handle, "captured_at:  {c}").map_err(CoreError::from)?;
     }
     if let Some(m) = &meta.camera_make {
-        writeln!(handle, "camera_make:  {m}").map_err(CoreError::Io)?;
+        writeln!(handle, "camera_make:  {m}").map_err(CoreError::from)?;
     }
     if let Some(m) = &meta.camera_model {
-        writeln!(handle, "camera_model: {m}").map_err(CoreError::Io)?;
+        writeln!(handle, "camera_model: {m}").map_err(CoreError::from)?;
     }
     if let Some(c) = &meta.codec {
-        writeln!(handle, "codec:        {c}").map_err(CoreError::Io)?;
+        writeln!(handle, "codec:        {c}").map_err(CoreError::from)?;
     }
     if let Some(b) = meta.bitrate_bps {
-        writeln!(handle, "bitrate_bps:  {b}").map_err(CoreError::Io)?;
+        writeln!(handle, "bitrate_bps:  {b}").map_err(CoreError::from)?;
     }
     Ok(())
 }

@@ -3344,6 +3344,8 @@ dependencies = [
  "blake3",
  "proptest",
  "serde",
+ "serde_json",
+ "specta",
  "tempfile",
  "thiserror 2.0.18",
  "unicode-normalization",

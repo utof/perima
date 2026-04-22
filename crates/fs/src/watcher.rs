@@ -66,11 +66,15 @@ impl DebouncedWatcher {
         // volume_root ensures they match whatever the OS reports in events.
         // crate::platform_path::canonicalize wraps dunce on Windows (avoids
         // UNC prefix pollution) and std::fs::canonicalize elsewhere.
+        // WHY closure not CoreError::Io: Io is now a struct variant (not a
+        // tuple variant), so it cannot be used as a function pointer.
+        // Delegating through CoreError::from(io) keeps the kind+message
+        // lowering in one place.
         let canonical_root =
-            crate::platform_path::canonicalize(volume_root).map_err(CoreError::Io)?;
+            crate::platform_path::canonicalize(volume_root).map_err(CoreError::from)?;
         let canonical_paths: Vec<PathBuf> = paths
             .iter()
-            .map(|p| crate::platform_path::canonicalize(p).map_err(CoreError::Io))
+            .map(|p| crate::platform_path::canonicalize(p).map_err(CoreError::from))
             .collect::<Result<_, _>>()?;
 
         // WHY std mpsc: notify-debouncer-full uses std::sync::mpsc for its

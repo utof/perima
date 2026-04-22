@@ -86,7 +86,7 @@ fn resolve_hash(container: &AppContainer, path: &Path) -> Result<BlakeHash, Core
         )));
     }
 
-    let absolute = perima_fs::platform_path::canonicalize(path).map_err(CoreError::Io)?;
+    let absolute = perima_fs::platform_path::canonicalize(path).map_err(CoreError::from)?;
     let absolute_str = absolute
         .to_str()
         .ok_or_else(|| CoreError::InvalidPath(format!("non-UTF8 path: {}", absolute.display())))?;
@@ -141,7 +141,7 @@ async fn run_add(
         path.display(),
         applied.join(", ")
     )
-    .map_err(CoreError::Io)
+    .map_err(CoreError::from)
 }
 
 /// Remove a tag from a file.
@@ -166,7 +166,7 @@ async fn run_rm(
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     let normalized = normalize_tag(tag_raw)?;
-    writeln!(handle, "removed {} from {}", normalized, path.display()).map_err(CoreError::Io)
+    writeln!(handle, "removed {} from {}", normalized, path.display()).map_err(CoreError::from)
 }
 
 /// List all active tags with their per-tag file counts.
@@ -205,13 +205,13 @@ async fn run_ls(container: &AppContainer, _data_dir: &Path, json: bool) -> Resul
         let mut handle = stdout.lock();
         serde_json::to_writer_pretty(&mut handle, &rows)
             .map_err(|e| CoreError::Internal(format!("json: {e}")))?;
-        writeln!(handle).map_err(CoreError::Io)?;
+        writeln!(handle).map_err(CoreError::from)?;
     } else {
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
-        writeln!(handle, "{:<32} {:>6}  ID", "NAME", "COUNT").map_err(CoreError::Io)?;
+        writeln!(handle, "{:<32} {:>6}  ID", "NAME", "COUNT").map_err(CoreError::from)?;
         for (t, &count) in tags.iter().zip(&counts) {
-            writeln!(handle, "{:<32} {:>6}  {}", t.name, count, t.id).map_err(CoreError::Io)?;
+            writeln!(handle, "{:<32} {:>6}  {}", t.name, count, t.id).map_err(CoreError::from)?;
         }
     }
 

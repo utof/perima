@@ -82,7 +82,7 @@ pub(crate) async fn run(
             let mut handle = stdout.lock();
             serde_json::to_writer_pretty(&mut handle, &rows)
                 .map_err(|e| CoreError::Internal(format!("json: {e}")))?;
-            writeln!(handle).map_err(CoreError::Io)?;
+            writeln!(handle).map_err(CoreError::from)?;
         } else {
             print_table_with_metadata(&rows)?;
         }
@@ -109,7 +109,7 @@ pub(crate) async fn run(
         let mut handle = stdout.lock();
         serde_json::to_writer_pretty(&mut handle, &records)
             .map_err(|e| CoreError::Internal(format!("json: {e}")))?;
-        writeln!(handle).map_err(CoreError::Io)?;
+        writeln!(handle).map_err(CoreError::from)?;
     } else {
         print_table(&records)?;
     }
@@ -183,7 +183,7 @@ fn print_table(records: &[FileLocationRecord]) -> Result<(), CoreError> {
         "{:<10} {:<10} {:<10} PATH",
         "HASH", "SIZE", "VOLUME",
     )
-    .map_err(CoreError::Io)?;
+    .map_err(CoreError::from)?;
     for r in records {
         let hash_hex = r.hash.to_hex();
         let hash_short = &hash_hex[..8];
@@ -195,7 +195,7 @@ fn print_table(records: &[FileLocationRecord]) -> Result<(), CoreError> {
             "{hash_short}…  {size:<10} {vol_short}…  {}",
             r.relative_path.as_str()
         )
-        .map_err(CoreError::Io)?;
+        .map_err(CoreError::from)?;
     }
     Ok(())
 }
@@ -211,7 +211,7 @@ fn print_table_with_metadata(
         "{:<10} {:<10} {:<10} {:<20} {:<10} {:<20} PATH",
         "HASH", "SIZE", "VOLUME", "CAPTURED_AT", "DIMS", "CAMERA",
     )
-    .map_err(CoreError::Io)?;
+    .map_err(CoreError::from)?;
     for (r, meta) in rows {
         let hash_hex = r.hash.to_hex();
         let hash_short = &hash_hex[..8];
@@ -238,7 +238,7 @@ fn print_table_with_metadata(
             "{hash_short}…  {size:<10} {vol_short}…  {captured_at:<20} {dims:<10} {camera:<20} {}",
             r.relative_path.as_str()
         )
-        .map_err(CoreError::Io)?;
+        .map_err(CoreError::from)?;
     }
     Ok(())
 }

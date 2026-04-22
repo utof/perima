@@ -130,7 +130,7 @@ pub(crate) async fn run(
                 entry.size,
                 entry.relative_path.as_str()
             )
-            .map_err(CoreError::Io)?;
+            .map_err(CoreError::from)?;
         }
     }
 

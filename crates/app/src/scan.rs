@@ -578,7 +578,9 @@ fn canonicalize_for_walk(root: &Path) -> Result<PathBuf, CoreError> {
     // WHY: routes through `perima_fs::platform_path::canonicalize` —
     // the single source of truth for the `#[cfg(windows)]` dunce /
     // std fallback.
-    perima_fs::platform_path::canonicalize(root).map_err(CoreError::Io)
+    // WHY CoreError::from not CoreError::Io: Io is now a struct variant
+    // (Batch D Task 2) so it cannot be used as a function pointer.
+    perima_fs::platform_path::canonicalize(root).map_err(CoreError::from)
 }
 
 #[cfg(test)]

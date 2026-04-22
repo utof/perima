@@ -134,7 +134,7 @@ fn validate_root(root: &Path) -> Result<(), CoreError> {
 fn canonicalize(root: &Path) -> Result<PathBuf, CoreError> {
     // WHY: routes through perima_fs::platform_path::canonicalize — the single
     // source of truth for the #[cfg(windows)] dunce / std fallback.
-    perima_fs::platform_path::canonicalize(root).map_err(CoreError::Io)
+    perima_fs::platform_path::canonicalize(root).map_err(CoreError::from)
 }
 
 // ---------------------------------------------------------------------------

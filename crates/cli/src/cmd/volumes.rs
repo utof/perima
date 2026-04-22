@@ -35,7 +35,7 @@ pub(crate) async fn run(container: &AppContainer, machine: DeviceId) -> Result<(
         "{:<10} {:<16} {:<9} {:<10} MOUNT PATHS",
         "VOLUME ID", "LABEL", "REMOVABLE", "CAPACITY",
     )
-    .map_err(CoreError::Io)?;
+    .map_err(CoreError::from)?;
 
     for r in &records {
         let vol_str = r.id.0.to_string();
@@ -56,7 +56,7 @@ pub(crate) async fn run(container: &AppContainer, machine: DeviceId) -> Result<(
             handle,
             "{vol_short:<10} {label:<16} {removable:<9} {capacity:<10} {mounts}",
         )
-        .map_err(CoreError::Io)?;
+        .map_err(CoreError::from)?;
     }
 
     Ok(())
