@@ -45,6 +45,7 @@ use rusqlite::Connection;
 use crate::cmd::WriteCmd;
 use crate::connection::open_and_migrate;
 
+mod file;
 mod metadata;
 mod tag;
 mod volume;
@@ -230,13 +231,8 @@ fn dispatch(conn: &mut Connection, cmd: WriteCmd, bus: &Arc<dyn EventBus>) {
     }
 }
 
-// WHY allow needless_pass_by_value: `cmd` is moved into `match cmd {}`,
-// which is the canonical exhaustive-match on an uninhabited enum. Clippy
-// can't tell the empty match consumes `cmd`; Tasks 5-6 populate the
-// sub-enums and the move becomes load-bearing.
-#[allow(clippy::needless_pass_by_value)]
-fn handle_file(_conn: &mut Connection, cmd: crate::cmd::FileWriteCmd, _bus: &Arc<dyn EventBus>) {
-    match cmd {}
+fn handle_file(conn: &mut Connection, cmd: crate::cmd::FileWriteCmd, bus: &Arc<dyn EventBus>) {
+    file::handle(conn, cmd, bus);
 }
 
 #[allow(clippy::needless_pass_by_value)]

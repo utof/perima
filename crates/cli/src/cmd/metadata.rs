@@ -75,10 +75,10 @@ pub(crate) async fn run(
         .volumes
         .find_or_create(&detected.identifiers, device)?;
 
-    // WHY legacy `open_and_migrate` still here (Task 4 hybrid state):
-    // `SqliteFileRepository` still takes an owned `Connection` —
-    // Task 5 migrates it. WAL mode makes the re-open cheap.
-    let file_repo = SqliteFileRepository::new(open_and_migrate(&db_path)?);
+    // WHY new_legacy: Task 5 adds the writer+pool constructor.
+    // This callsite migrates to container.files_repo in Task 7.
+    #[allow(deprecated)]
+    let file_repo = SqliteFileRepository::new_legacy(open_and_migrate(&db_path)?);
     // WHY metadata via container (post-Batch-C Task 4): the writer actor
     // owns the sole writable connection. Cloning the `Arc<dyn
     // MetadataRepository>` from the container shares the same writer

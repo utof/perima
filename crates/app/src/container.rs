@@ -399,7 +399,9 @@ mod tests {
         let file_conn = open_and_migrate(&db_path).unwrap();
         let search_conn = open_and_migrate(&db_path).unwrap();
 
-        let files: Arc<dyn FileRepository> = Arc::new(SqliteFileRepository::new(file_conn));
+        // WHY new_legacy: Task 7 migrates this to SqliteFileRepository::new(writer, reads).
+        #[allow(deprecated)]
+        let files: Arc<dyn FileRepository> = Arc::new(SqliteFileRepository::new_legacy(file_conn));
         let volumes: Arc<dyn VolumeRepository> =
             Arc::new(SqliteVolumeRepository::new(writer.sender(), reads.clone()));
         let tags: Arc<dyn TagRepository> =

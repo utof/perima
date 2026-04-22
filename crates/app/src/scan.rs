@@ -692,7 +692,10 @@ mod tests {
         let reads = ReadPool::open(&db_path).unwrap();
         let file_conn = open_and_migrate(&db_path).unwrap();
 
-        let files: Arc<dyn FileRepository> = Arc::new(SqliteFileRepository::new(file_conn));
+        // WHY new_legacy: Task 5 adds the writer+pool constructor; this test
+        // fixture migrates in Task 7 once the production callsites are updated.
+        #[allow(deprecated)]
+        let files: Arc<dyn FileRepository> = Arc::new(SqliteFileRepository::new_legacy(file_conn));
         let volumes: Arc<dyn VolumeRepository> =
             Arc::new(SqliteVolumeRepository::new(writer.sender(), reads.clone()));
         // Use the real metadata repo for the DB so persistence tests

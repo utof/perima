@@ -237,7 +237,9 @@ mod tests {
         let events: Arc<dyn EventBus> = Arc::new(NullBus);
         let writer = SqliteWriter::start(&db_path, Arc::clone(&events)).unwrap();
         let reads = ReadPool::open(&db_path).unwrap();
-        let files: Arc<SqliteFileRepository> = Arc::new(SqliteFileRepository::new(
+        // WHY new_legacy: Task 7 migrates this fixture to writer+pool.
+        #[allow(deprecated)]
+        let files: Arc<SqliteFileRepository> = Arc::new(SqliteFileRepository::new_legacy(
             open_and_migrate(&db_path).unwrap(),
         ));
         let metadata: Arc<SqliteMetadataRepository> =

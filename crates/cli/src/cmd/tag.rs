@@ -98,7 +98,10 @@ fn resolve_hash(data_dir: &Path, path: &Path) -> Result<BlakeHash, CoreError> {
         .ok_or_else(|| CoreError::InvalidPath(format!("non-UTF8 path: {}", absolute.display())))?;
 
     let db_path = data_dir.join("perima.db");
-    let file_repo = SqliteFileRepository::new(open_and_migrate(&db_path)?);
+    // WHY new_legacy: Task 7 migrates this callsite to use the shared
+    // writer+pool via container.files_repo. Legacy constructor is deprecated.
+    #[allow(deprecated)]
+    let file_repo = SqliteFileRepository::new_legacy(open_and_migrate(&db_path)?);
     // WHY list across ALL volumes (None): the user supplies an absolute
     // path that may live on any known volume. Suffix-matching across the
     // full location set is the only portable approach.

@@ -15,7 +15,8 @@ use std::path::PathBuf;
 use flume::Sender;
 
 use perima_core::{
-    BlakeHash, CoreError, DeviceId, MediaMetadata, Tag, UpsertOutcome, VolumeId, VolumeIdentifiers,
+    BlakeHash, CoreError, DeviceId, HashedFile, LocationStatus, MediaMetadata, MediaPath, Tag,
+    UpsertOutcome, VolumeId, VolumeIdentifiers,
 };
 use uuid::Uuid;
 
@@ -185,9 +186,102 @@ pub enum MetadataWriteCmd {
 }
 
 /// File-repo write commands. Populated by Task 5.
+///
+/// WHY `UpsertFile` reply is `ReplyTx<UpsertOutcome>` (not `()`):
+/// `ScanUseCase` classifies Inserted / Updated / Unchanged to decide
+/// whether to trigger downstream thumbnail generation and metadata
+/// extraction. The outcome signal must cross the writer boundary.
+///
+/// WHY three inherent-method variants (`UpdateLocationStatus`,
+/// `UpdateLocationPath`, `MigrateSentinelRow`) sit alongside the two
+/// port-trait variants: `DbEventHandler` (desktop + CLI) calls them on
+/// `Arc<SqliteFileRepository>` without going through the `FileRepository`
+/// trait. Keeping them as `WriteCmd` variants means a single writer-actor
+/// serializes ALL writes to `file_locations`, including the watcher's
+/// status flips — no second writable connection needed.
 #[derive(Debug)]
-#[non_exhaustive]
-pub enum FileWriteCmd {}
+pub enum FileWriteCmd {
+    /// Upsert the content-addressed `files` row keyed by `file.hash`.
+    ///
+    /// Binds `files.hlc` on INSERT and on UPDATE. Skips all writes on
+    /// Unchanged (prior `hlc` is preserved).
+    UpsertFile {
+        /// Hashed file (hash + discovered metadata).
+        file: HashedFile,
+        /// Device that initiated the upsert.
+        device: DeviceId,
+        /// Reply channel carrying `Inserted / Updated / Unchanged`.
+        reply: ReplyTx<UpsertOutcome>,
+    },
+    /// Upsert a `file_locations` row for `(volume, path)`.
+    ///
+    /// Binds `file_locations.hlc` on INSERT, UPDATE, and the
+    /// collision-path soft-delete. Skips writes on Unchanged.
+    UpsertLocation {
+        /// Content hash linking to the `files` row.
+        hash: BlakeHash,
+        /// Volume the location lives on.
+        volume: VolumeId,
+        /// Relative path within the volume.
+        path: MediaPath,
+        /// Device that initiated the upsert.
+        device: DeviceId,
+        /// Reply channel carrying `Inserted / Updated / Unchanged`.
+        reply: ReplyTx<UpsertOutcome>,
+    },
+    /// Update the status of a non-deleted `file_locations` row.
+    ///
+    /// WHY inherent (not port-trait): called by `DbEventHandler` in
+    /// response to already-emitted `FileEvent`s from the filesystem
+    /// watcher; not part of the `FileRepository` port surface.
+    /// Binds `file_locations.hlc` on the UPDATE.
+    UpdateLocationStatus {
+        /// Volume the location lives on.
+        volume: VolumeId,
+        /// Relative path within the volume.
+        path: MediaPath,
+        /// New status value.
+        status: LocationStatus,
+        /// Device that initiated the update.
+        device: DeviceId,
+        /// Reply channel carrying `rows_changed` (`0` or `1`).
+        reply: ReplyTx<u64>,
+    },
+    /// Rename a `file_locations` row and reset status to `active`.
+    ///
+    /// WHY inherent: called by `DbEventHandler` on
+    /// `FileEvent::Renamed`. Binds `file_locations.hlc` on the UPDATE
+    /// or collision-path soft-delete.
+    UpdateLocationPath {
+        /// Volume the location lives on.
+        volume: VolumeId,
+        /// Current (old) relative path.
+        old_path: MediaPath,
+        /// Target (new) relative path.
+        new_path: MediaPath,
+        /// Device that initiated the update.
+        device: DeviceId,
+        /// Reply channel carrying `rows_changed` (`0` or `1`).
+        reply: ReplyTx<u64>,
+    },
+    /// Migrate a sentinel (`volume_id = nil-UUID`) `file_locations` row
+    /// to the real volume after scan phase 1c resolves the volume.
+    ///
+    /// WHY inherent: called by the scan sentinel-migration closure
+    /// (CLI `dispatch_scan` + desktop scan path). Not part of the
+    /// `FileRepository` port surface. Binds `file_locations.hlc` on
+    /// the UPDATE.
+    MigrateSentinelRow {
+        /// Relative path of the sentinel row to migrate.
+        path: MediaPath,
+        /// Resolved real volume to assign.
+        real_volume: VolumeId,
+        /// Device that initiated the migration.
+        device: DeviceId,
+        /// Reply channel carrying `rows_changed` (`0` or `1`).
+        reply: ReplyTx<u64>,
+    },
+}
 
 /// Search-repo write commands. Populated by Task 6.
 #[derive(Debug)]

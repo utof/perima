@@ -642,13 +642,15 @@ mod tests {
         let vol = VolumeId::new();
         let f = sample_hashed_file(b"joinsnull", "no_meta.txt");
 
-        // WHY a separate legacy `file_repo` here: `SqliteFileRepository`
-        // has not yet migrated to the writer+pool (Task 5). Seeding
-        // via `open_and_migrate` works on the same DB file because
-        // migrations already ran in `SqliteWriter::start`.
+        // WHY new_legacy: Task 5 adds the writer+pool constructor for
+        // SqliteFileRepository. This test fixture uses the legacy constructor
+        // (deprecated, Task 7 migrates it). Seeding via open_and_migrate on
+        // the same DB file works because migrations already ran in
+        // SqliteWriter::start.
         {
             let conn = open_and_migrate(&db_path).expect("open");
-            let file_repo = SqliteFileRepository::new(conn);
+            #[allow(deprecated)]
+            let file_repo = SqliteFileRepository::new_legacy(conn);
             file_repo.upsert_file(&f, dev).expect("upsert file");
             file_repo
                 .upsert_location(&f.hash, vol, &f.discovered.relative_path, dev)
@@ -683,7 +685,8 @@ mod tests {
 
         {
             let conn = open_and_migrate(&db_path).expect("open");
-            let file_repo = SqliteFileRepository::new(conn);
+            #[allow(deprecated)]
+            let file_repo = SqliteFileRepository::new_legacy(conn);
             file_repo.upsert_file(&f, dev).expect("upsert file");
             file_repo
                 .upsert_location(&f.hash, vol, &f.discovered.relative_path, dev)

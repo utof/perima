@@ -250,11 +250,15 @@ fn build_container(
     let writer = SqliteWriter::start(db_path, writer_bus)?;
     let reads = ReadPool::open(db_path)?;
 
+    // WHY new_legacy: Task 5 adds the writer+pool constructor; this
+    // production callsite migrates to `SqliteFileRepository::new(writer.sender(),
+    // reads)` in Task 7. Legacy constructor is deprecated and compiles.
+    #[allow(deprecated)]
     let files: Arc<dyn FileRepository> =
-        Arc::new(SqliteFileRepository::new(open_and_migrate(db_path)?));
+        Arc::new(SqliteFileRepository::new_legacy(open_and_migrate(db_path)?));
     // WHY clone `reads` for each writer+pool-backed adapter: `ReadPool`
-    // is cheap to [`Clone`] (inner `r2d2::Pool` is `Arc`-backed). Task 4
-    // migrates Metadata; File/Search remain legacy until Tasks 5-6.
+    // is cheap to [`Clone`] (inner `r2d2::Pool` is `Arc`-backed). File/Search
+    // migrate to writer+pool in Tasks 5-6 respectively; Task 7 wires them up.
     let volumes: Arc<dyn VolumeRepository> =
         Arc::new(SqliteVolumeRepository::new(writer.sender(), reads.clone()));
     let tags: Arc<dyn TagRepository> =
@@ -324,8 +328,10 @@ fn build_watch_db_handler(
     // WHY a fresh connection: `watch` needs its own `SqliteFileRepository`
     // to mutate location rows as filesystem events arrive. Under WAL mode
     // opening an additional connection is cheap and safe.
+    // WHY new_legacy: Task 7 migrates this to writer+pool via container.files_repo.
     let file_conn = open_and_migrate(db_path)?;
-    let file_repo = Arc::new(SqliteFileRepository::new(file_conn));
+    #[allow(deprecated)]
+    let file_repo = Arc::new(SqliteFileRepository::new_legacy(file_conn));
     Ok(crate::cmd::watch::make_db_event_handler(
         file_repo, device_id,
     ))
@@ -389,7 +395,9 @@ async fn dispatch_scan(
                 return ExitCode::from(1);
             }
         };
-        let sentinel_repo = Arc::new(SqliteFileRepository::new(sentinel_conn));
+        // WHY new_legacy: Task 7 migrates sentinel_repo to use the shared writer.
+        #[allow(deprecated)]
+        let sentinel_repo = Arc::new(SqliteFileRepository::new_legacy(sentinel_conn));
         Some(Arc::new(
             move |path: &perima_core::MediaPath,
                   volume: perima_core::VolumeId,
