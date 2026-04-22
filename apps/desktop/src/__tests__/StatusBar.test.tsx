@@ -35,4 +35,21 @@ describe("StatusBar", () => {
     render(<StatusBar scanResult={null} error={null} />);
     expect(screen.getByText("No scans yet")).toBeInTheDocument();
   });
+
+  // WHY: These two tests pin the switch(err.kind) discriminated-union branches
+  // added in Task 11 — NotFound renders distinct UX; all other variants fall
+  // through to the generic catch-all path.
+
+  it("shows 'No results found.' for NotFound errors (distinct UX branch)", () => {
+    const err: CoreError = { kind: "NotFound", data: "query returned nothing" };
+    render(<StatusBar scanResult={null} error={err} />);
+    expect(screen.getByText("No results found.")).toBeInTheDocument();
+  });
+
+  it("shows generic error message for Internal errors (catch-all branch)", () => {
+    const err: CoreError = { kind: "Internal", data: "unexpected db error" };
+    render(<StatusBar scanResult={null} error={err} />);
+    expect(screen.getByText(/something went wrong/i)).toBeInTheDocument();
+    expect(screen.getByText(/unexpected db error/i)).toBeInTheDocument();
+  });
 });

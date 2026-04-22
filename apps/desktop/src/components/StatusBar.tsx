@@ -6,10 +6,48 @@ interface StatusBarProps {
   scanResult: ScanReport | null;
   /**
    * Current error, or null if none.
-   * WHY CoreError not string: api.ts now surfaces typed errors from
-   * the backend discriminated union. Task 11 will add per-variant UI.
+   * WHY CoreError not string: api.ts surfaces typed errors from the backend
+   * discriminated union; the switch(error.kind) below renders distinct UX
+   * per variant (Task 11).
    */
   error: CoreError | null;
+}
+
+/**
+ * Renders a human-readable label for a {@link CoreError} discriminated union.
+ *
+ * WHY distinct NotFound branch: "No results found." is user-facing vocabulary
+ * for a search miss — not a system error. All other variants share the generic
+ * "Something went wrong" phrasing that conveys unexpected failure. The
+ * TypeScript `never` default forces a compile error if a new CoreError variant
+ * is added without updating this switch.
+ */
+function renderError(error: CoreError): React.ReactNode {
+  switch (error.kind) {
+    case "NotFound":
+      return "No results found.";
+    case "Internal":
+    case "Io":
+    case "Duplicate":
+    case "InvalidPath":
+    case "InvalidHash":
+    case "InvalidTag":
+    case "Unsupported": {
+      // WHY: Io carries { kind, message }; all others carry a plain string.
+      const detail =
+        error.data instanceof Object
+          ? (error.data as { message: string }).message
+          : error.data;
+      return `Something went wrong: ${detail}`;
+    }
+    default: {
+      // WHY exhaustive default with `never`: TypeScript verifies every
+      // CoreError variant is handled at compile time — adding a new variant
+      // without updating this switch is a compile error.
+      const _exhaustive: never = error;
+      return `Unknown error (${(_exhaustive as CoreError).kind})`;
+    }
+  }
 }
 
 /**
@@ -19,13 +57,9 @@ interface StatusBarProps {
  */
 export default function StatusBar({ scanResult, error }: StatusBarProps) {
   if (error) {
-    // WHY inline stringification: Task 11 adds a proper switch(error.kind) here;
-    // for now surface the data payload so the error is still readable.
-    const errMsg =
-      typeof error.data === "string" ? error.data : JSON.stringify(error.data);
     return (
       <div className="px-4 py-2 bg-gray-800 border-t border-gray-700 text-sm text-red-400">
-        {errMsg}
+        {renderError(error)}
       </div>
     );
   }

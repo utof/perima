@@ -1,5 +1,6 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as api from "../api";
+import { coreErrorMessage } from "../lib/coreError";
 import type { ScanReport } from "../bindings";
 
 /** Props for {@link ScanButton}. */
@@ -37,9 +38,9 @@ export default function ScanButton({
     onScanStart();
     void api.scan(selected, false).match(
       (result) => { onScanComplete(result, selected); },
-      // WHY err.data: CoreError is a discriminated union { kind, data };
-      // Task 11 will add a proper switch(err.kind) pattern here.
-      (err) => { window.alert(`Scan failed [${err.kind}]: ${typeof err.data === "string" ? err.data : JSON.stringify(err.data)}`); },
+      // WHY coreErrorMessage: helper centralises the data-payload stringification
+      // (plain string vs Io's { kind, message } struct) with cyclic-object safety.
+      (err) => { window.alert(`Scan failed [${err.kind}]: ${coreErrorMessage(err)}`); },
     );
   }
 

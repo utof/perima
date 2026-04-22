@@ -9,6 +9,7 @@ import StatusBar from "./components/StatusBar";
 import TagSidebar from "./components/TagSidebar";
 import WatcherBanner from "./components/WatcherBanner";
 import { composeVisible, computeFacets, sortByRank } from "./lib/search";
+import { coreErrorMessage } from "./lib/coreError";
 import type { CoreError, FileWithTagsPayload, ScanReport, SearchHit, Tag } from "./bindings";
 
 /**
@@ -157,8 +158,7 @@ export default function App() {
     void api.startWatch(path).match(
       () => { setWatcherError(null); },
       (err) => {
-        const msg = typeof err.data === "string" ? err.data : JSON.stringify(err.data);
-        setWatcherError(`Failed to start watcher [${err.kind}]: ${msg}`);
+        setWatcherError(`Failed to start watcher [${err.kind}]: ${coreErrorMessage(err)}`);
       },
     );
   }
