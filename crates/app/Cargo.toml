@@ -19,6 +19,9 @@ perima-core  = { path = "../core" }
 perima-fs    = { path = "../fs" }
 perima-hash  = { path = "../hash" }
 perima-media = { workspace = true }
+async-broadcast = { workspace = true }
+async-trait     = { workspace = true }
+futures         = { workspace = true }
 tokio.workspace    = true
 tokio-util.workspace = true
 thiserror.workspace = true

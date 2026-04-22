@@ -50,6 +50,9 @@ perima-app   = { path = "crates/app",   version = "0.6.4" }
 # (perima CLI) need it reachable via `workspace = true` so bumps
 # propagate correctly via the workspace graph.
 perima-media = { path = "crates/media", version = "0.6.3" }
+async-broadcast = "=0.7.2"
+async-trait     = "=0.1.89"
+futures         = "0.3"
 anyhow       = "1"
 miette       = { version = "7", features = ["fancy"] }
 thiserror    = "2"
