@@ -12,6 +12,11 @@ thiserror.workspace = true
 serde.workspace     = true
 uuid.workspace      = true
 unicode-normalization.workspace = true
+specta = { workspace = true, optional = true }
+
+[features]
+default = []
+specta = ["dep:specta"]
 
 [dev-dependencies]
 proptest.workspace = true
