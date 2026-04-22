@@ -1337,13 +1337,16 @@ mod tests {
 
     proptest::proptest! {
         // WHY cases=64 (down from the 256 default): post-Batch-C each proptest
-        // case creates a writer-actor thread + `r2d2` read pool + seed
-        // connection on a fresh tempdir DB — ~5x the per-case cost of the
-        // pre-Task-7 single-`Mutex<Connection>` fixture (#124). At 256 cases
-        // the cumulative overhead exceeds the 80s terminate-after window on
-        // VM filesystems even though no individual case contends for the
-        // write lock. 64 cases × up to 30 ops = ~1 920 ops per proptest,
-        // still strong combinatorial coverage for FTS trigger invariants.
+        // case creates a writer-actor thread + `r2d2` read pool + a single
+        // `seed_conn` on a fresh tempdir DB — ~5x the per-case cost of the
+        // pre-Task-7 single-`Mutex<Connection>` fixture (#124). The seed
+        // connection is already hoisted below to case scope so per-op
+        // `Connection::open` churn is gone; the residual per-case cost is
+        // the writer-thread + pool init itself. At 256 cases the cumulative
+        // overhead exceeds the 80s terminate-after window on VM filesystems
+        // even though no individual case contends for the write lock. 64
+        // cases × up to 30 ops = ~1 920 ops per proptest, still strong
+        // combinatorial coverage for FTS trigger invariants.
         #![proptest_config(proptest::test_runner::Config {
             cases: 64,
             ..proptest::test_runner::Config::default()

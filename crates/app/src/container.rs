@@ -191,11 +191,11 @@ pub struct AppContainer {
     /// WHY exposed (post-Batch-C Task 7): CLI `tag add/rm` and
     /// `metadata <path>` resolve a filesystem path to a `BlakeHash` by
     /// calling `FileRepository::list_file_locations`. Those paths operate
-    /// outside the `UseCase` surface. Before Task 7, each callsite opened a
-    /// short-lived `SqliteFileRepository::new_legacy(conn)`; with the
-    /// writer actor owning the sole writable connection every shell site
-    /// must share one adapter handle via this field. Same pattern /
-    /// rationale as `volumes`, `tags`, `metadata_repo` above.
+    /// outside the `UseCase` surface. Each such callsite used to open a
+    /// short-lived `Mutex<Connection>`-backed adapter; the writer actor
+    /// now owns the sole writable connection, so every shell site shares
+    /// this single adapter handle. Same pattern as `volumes`, `tags`,
+    /// `metadata_repo` above.
     pub files_repo: Arc<dyn FileRepository>,
 }
 

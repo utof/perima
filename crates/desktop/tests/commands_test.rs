@@ -449,9 +449,11 @@ async fn search_returns_hit_after_scan_and_rebuild() {
         .expect("scan");
 
     let db_path = data_dir.join("perima.db");
-    // WHY writer+pool: SqliteSearchRepository::new_legacy was removed in
-    // Batch C Task 7. Use writer+pool; the writer handle is dropped after
-    // construction since the repo's sender keeps the thread alive.
+    // WHY spawn a test-local writer + pool: the repo adapter is constructed
+    // from `(Sender<WriteCmd>, ReadPool)`, and this integration test drives
+    // search without going through `AppContainer`. The repo clones the
+    // sender; dropping `search_writer` at end-of-test closes the channel
+    // and lets the writer thread exit.
     struct NoopBus;
     impl EventBus for NoopBus {
         fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
