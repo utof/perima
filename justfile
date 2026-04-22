@@ -44,6 +44,14 @@ test-frontend:
 lint-frontend:
     cd apps/desktop && bun install --frozen-lockfile && bun run lint
 
+# Regenerate apps/desktop/src/bindings.ts via tauri-specta and verify
+# it doesn't drift from the committed copy. Mirrors the CI bindings-drift
+# job. Run pre-push when you've touched a #[tauri::command] signature, a
+# specta-derived type, or a CoreError variant.
+bindings:
+    cargo build -p perima-desktop --features specta-export
+    git diff --exit-code apps/desktop/src/bindings.ts
+
 deny:
     cargo deny check
 
