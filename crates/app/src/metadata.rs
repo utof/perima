@@ -191,7 +191,7 @@ mod tests {
     use std::sync::Arc;
 
     use perima_core::{
-        BlakeHash, CoreError, DeviceId, DiscoveredFile, EventBus, FileEvent, FileSize, HashedFile,
+        AppEvent, BlakeHash, CoreError, DeviceId, DiscoveredFile, EventBus, FileSize, HashedFile,
         MediaMetadata, MediaPath, VolumeId, VolumeIdentifiers, VolumeRepository,
     };
     use perima_db::{
@@ -205,7 +205,7 @@ mod tests {
     /// No-op event bus for tests that don't care about emissions.
     struct NullBus;
     impl EventBus for NullBus {
-        fn emit(&self, _event: &FileEvent) -> Result<(), CoreError> {
+        fn emit(&self, _event: &AppEvent) -> Result<(), CoreError> {
             Ok(())
         }
     }
@@ -295,7 +295,7 @@ mod tests {
     fn seed_volume(db_path: &std::path::Path, dev: DeviceId) -> VolumeId {
         struct NoopBus;
         impl EventBus for NoopBus {
-            fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+            fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
                 Ok(())
             }
         }

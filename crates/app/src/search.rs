@@ -128,7 +128,7 @@ impl SearchUseCase {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)] // Test code; unwrap panics signal bugs.
 mod tests {
-    use perima_core::FileEvent;
+    use perima_core::AppEvent;
     use perima_db::{ReadPool, SqliteSearchRepository, SqliteWriter};
     use tempfile::TempDir;
 
@@ -137,7 +137,7 @@ mod tests {
     /// No-op event bus for tests that don't care about emissions.
     struct NullBus;
     impl EventBus for NullBus {
-        fn emit(&self, _event: &FileEvent) -> Result<(), CoreError> {
+        fn emit(&self, _event: &AppEvent) -> Result<(), CoreError> {
             Ok(())
         }
     }

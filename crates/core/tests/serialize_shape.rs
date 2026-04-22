@@ -7,8 +7,8 @@
 //! frontend's `parseCoreError` matcher.
 
 use perima_core::{
-    BlakeHash, CoreError, FileEvent, FileLocationRecord, FileSize, LocationStatus, MediaMetadata,
-    MediaPath, SearchHit, Tag, VolumeId, VolumeRecord,
+    AppEvent, BlakeHash, CoreError, FileEvent, FileLocationRecord, FileSize, InvalidationReason,
+    LocationStatus, MediaMetadata, MediaPath, SearchHit, Tag, VolumeId, VolumeRecord,
 };
 
 #[test]
@@ -264,4 +264,57 @@ fn file_event_created_serializes_with_kind_and_data() {
         v["volume"],
         serde_json::json!("00000000-0000-0000-0000-000000000000")
     );
+}
+
+// ── E2: AppEvent + InvalidationReason wire-shape tests ─────────────────────
+// WHY: AppEvent uses #[serde(tag = "kind", content = "data")] matching
+// CoreError's discriminated-union shape. Inner FileEvent keeps its own
+// #[serde(tag = "type")] inline shape. Pinning both here catches any
+// serde-tag drift before it silently breaks the frontend.
+
+#[test]
+fn app_event_file_wraps_file_event_with_kind_data() {
+    let event = AppEvent::File(FileEvent::Created {
+        path: MediaPath::new("photos/img.jpg"),
+        volume: VolumeId(uuid::Uuid::nil()),
+    });
+    let v: serde_json::Value = serde_json::to_value(&event).expect("serialize");
+    assert_eq!(v["kind"], "File");
+    assert_eq!(v["data"]["type"], "Created");
+    assert_eq!(v["data"]["path"], "photos/img.jpg");
+}
+
+#[test]
+fn app_event_scan_completed_serializes_with_named_fields() {
+    let event = AppEvent::ScanCompleted {
+        volume: VolumeId(uuid::Uuid::nil()),
+        files_seen: 42,
+        files_new: 7,
+        duration_ms: 1234,
+    };
+    let v: serde_json::Value = serde_json::to_value(&event).expect("serialize");
+    assert_eq!(v["kind"], "ScanCompleted");
+    assert_eq!(v["data"]["files_seen"], 42);
+    assert_eq!(v["data"]["files_new"], 7);
+    assert_eq!(v["data"]["duration_ms"], 1234);
+}
+
+#[test]
+fn app_event_index_invalidated_serializes_with_reason() {
+    // WHY: InvalidationReason uses #[serde(tag = "reason")] (unit-variant
+    // tag-only), so the inner object serializes as {"reason": "TagsChanged"}.
+    // AppEvent::IndexInvalidated { reason } has a field named "reason" that
+    // holds the InvalidationReason object; with tag="kind" content="data",
+    // the full shape is:
+    //   {"kind":"IndexInvalidated","data":{"reason":{"reason":"TagsChanged"}}}.
+    // v["data"]["reason"] is the InvalidationReason object; its "reason" key
+    // carries the variant name string.
+    let event = AppEvent::IndexInvalidated {
+        reason: InvalidationReason::TagsChanged,
+    };
+    let v: serde_json::Value = serde_json::to_value(&event).expect("serialize");
+    assert_eq!(v["kind"], "IndexInvalidated");
+    // The "reason" field on IndexInvalidated serializes the InvalidationReason
+    // enum (which itself has tag="reason"), producing a nested object.
+    assert_eq!(v["data"]["reason"]["reason"], "TagsChanged");
 }

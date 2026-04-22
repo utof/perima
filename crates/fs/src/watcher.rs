@@ -11,7 +11,7 @@ use std::time::Duration;
 use notify::RecursiveMode;
 use notify::event::{EventKind, ModifyKind, RenameMode};
 use notify_debouncer_full::new_debouncer;
-use perima_core::{CoreError, EventBus, FileEvent, VolumeId};
+use perima_core::{AppEvent, CoreError, EventBus, FileEvent, VolumeId};
 use tokio_util::sync::CancellationToken;
 
 use crate::paths::relativize;
@@ -143,8 +143,8 @@ fn run_event_loop(
                     if cancel.is_cancelled() {
                         return;
                     }
-                    if let Some(event) = map_event(&de.event, volume_root, volume_id)
-                        && let Err(e) = bus.emit(&event)
+                    if let Some(file_event) = map_event(&de.event, volume_root, volume_id)
+                        && let Err(e) = bus.emit(&AppEvent::File(file_event))
                     {
                         tracing::warn!(error = %e, "EventBus::emit failed");
                     }
@@ -211,7 +211,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use perima_core::{CoreError, EventBus, FileEvent, VolumeId};
+    use perima_core::{AppEvent, CoreError, EventBus, FileEvent, VolumeId};
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
 
@@ -223,11 +223,13 @@ mod tests {
     }
 
     impl EventBus for MockEventBus {
-        fn emit(&self, event: &FileEvent) -> Result<(), CoreError> {
-            self.events
-                .lock()
-                .expect("MockEventBus mutex poisoned")
-                .push(event.clone());
+        fn emit(&self, event: &AppEvent) -> Result<(), CoreError> {
+            if let AppEvent::File(file_event) = event {
+                self.events
+                    .lock()
+                    .expect("MockEventBus mutex poisoned")
+                    .push(file_event.clone());
+            }
             Ok(())
         }
     }

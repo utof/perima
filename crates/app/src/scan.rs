@@ -621,7 +621,7 @@ mod tests {
     use std::io::Write;
     use std::sync::Mutex;
 
-    use perima_core::{FileEvent, FileLocationRecord, MediaMetadata};
+    use perima_core::{AppEvent, FileLocationRecord, MediaMetadata};
     use perima_db::{
         ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteVolumeRepository,
         SqliteWriter, SqliteWriterHandle,
@@ -635,7 +635,7 @@ mod tests {
     /// No-op event bus for tests that don't care about emissions.
     struct NullBus;
     impl EventBus for NullBus {
-        fn emit(&self, _event: &FileEvent) -> Result<(), CoreError> {
+        fn emit(&self, _event: &AppEvent) -> Result<(), CoreError> {
             Ok(())
         }
     }

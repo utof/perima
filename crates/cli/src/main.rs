@@ -224,7 +224,7 @@ fn build_container(
     // invariant is relaxed. Spec §§3.3 + 4.8 (A4.8 first bullet).
     struct NoopBus;
     impl EventBus for NoopBus {
-        fn emit(&self, _: &perima_core::FileEvent) -> Result<(), perima_core::CoreError> {
+        fn emit(&self, _: &perima_core::AppEvent) -> Result<(), perima_core::CoreError> {
             Ok(())
         }
     }
@@ -307,7 +307,7 @@ fn build_watch_db_handler(
 ) -> Result<Arc<dyn EventBus>, perima_core::CoreError> {
     struct NoopBus;
     impl EventBus for NoopBus {
-        fn emit(&self, _: &perima_core::FileEvent) -> Result<(), perima_core::CoreError> {
+        fn emit(&self, _: &perima_core::AppEvent) -> Result<(), perima_core::CoreError> {
             Ok(())
         }
     }
@@ -384,7 +384,7 @@ async fn dispatch_scan(
     } else {
         struct NoopBus;
         impl EventBus for NoopBus {
-            fn emit(&self, _: &perima_core::FileEvent) -> Result<(), perima_core::CoreError> {
+            fn emit(&self, _: &perima_core::AppEvent) -> Result<(), perima_core::CoreError> {
                 Ok(())
             }
         }

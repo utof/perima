@@ -123,7 +123,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use perima_core::{DeviceId, EventBus, FileEvent, TagRepository};
+    use perima_core::{AppEvent, DeviceId, EventBus, TagRepository};
     use tempfile::TempDir;
 
     use crate::pool::ReadPool;
@@ -135,7 +135,7 @@ mod tests {
 
     struct NoopBus;
     impl EventBus for NoopBus {
-        fn emit(&self, _: &FileEvent) -> Result<(), perima_core::CoreError> {
+        fn emit(&self, _: &AppEvent) -> Result<(), perima_core::CoreError> {
             Ok(())
         }
     }

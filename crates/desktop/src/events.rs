@@ -16,7 +16,7 @@
 
 use tauri::{AppHandle, Emitter};
 
-use perima_core::{CoreError, EventBus, FileEvent};
+use perima_core::{AppEvent, CoreError, EventBus, FileEvent};
 
 // ---------------------------------------------------------------------------
 // TauriEventEmitter
@@ -40,14 +40,24 @@ impl std::fmt::Debug for TauriEventEmitter {
 }
 
 impl EventBus for TauriEventEmitter {
-    fn emit(&self, event: &FileEvent) -> Result<(), CoreError> {
-        // WHY direct emit of &FileEvent: post-Batch-D, FileEvent
-        // derives Serialize + specta::Type + #[serde(tag = "type")]
-        // matching the pre-Batch-D FileEventPayload mirror exactly.
-        // The frontend "file-event" channel listener consumes the
-        // same JSON shape with no rename.
-        self.app_handle
-            .emit("file-event", event)
-            .map_err(|e| CoreError::Internal(format!("tauri emit: {e}")))
+    fn emit(&self, event: &AppEvent) -> Result<(), CoreError> {
+        match event {
+            AppEvent::File(file_event) => {
+                // WHY direct emit of &FileEvent: post-Batch-D, FileEvent
+                // derives Serialize + specta::Type + #[serde(tag = "type")]
+                // matching the pre-Batch-D FileEventPayload mirror exactly.
+                // The frontend "file-event" channel listener consumes the
+                // same JSON shape with no rename. Task 12 will rename the
+                // channel once the frontend is updated.
+                self.app_handle
+                    .emit("file-event", file_event)
+                    .map_err(|e| CoreError::Internal(format!("tauri emit: {e}")))
+            }
+            AppEvent::ScanCompleted { .. } | AppEvent::IndexInvalidated { .. } => {
+                // WHY Ok(()): non-File events land on the frontend via a
+                // separate channel in Task 12+. No-op here is correct for now.
+                Ok(())
+            }
+        }
     }
 }

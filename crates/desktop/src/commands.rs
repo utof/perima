@@ -30,7 +30,7 @@ use perima_app::{
     SearchOutput, TagCommand, TagFilter, TagOutput, VolumeCommand, VolumeOutput,
 };
 use perima_core::{
-    CoreError, DeviceId, EventBus, FileEvent, FileLocationRecord, LocationStatus,
+    AppEvent, CoreError, DeviceId, EventBus, FileEvent, FileLocationRecord, LocationStatus,
     MetadataExtractor, MetadataRepository, SearchRepository, Tag, TagRepository, VolumeId,
     VolumeRecord,
 };
@@ -113,7 +113,16 @@ impl DbEventHandler {
 }
 
 impl EventBus for DbEventHandler {
-    fn emit(&self, event: &FileEvent) -> Result<(), CoreError> {
+    fn emit(&self, event: &AppEvent) -> Result<(), CoreError> {
+        match event {
+            AppEvent::File(file_event) => self.record_file_event(file_event),
+            AppEvent::ScanCompleted { .. } | AppEvent::IndexInvalidated { .. } => Ok(()),
+        }
+    }
+}
+
+impl DbEventHandler {
+    fn record_file_event(&self, event: &FileEvent) -> Result<(), CoreError> {
         match event {
             FileEvent::Created { path, .. } => {
                 // WHY: we do not hash new files in watch mode. Hashing requires
@@ -326,7 +335,7 @@ pub async fn run_scan_inner_with_metadata(
     // this function call.
     struct NoopBus;
     impl EventBus for NoopBus {
-        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
             Ok(())
         }
     }
@@ -442,7 +451,7 @@ pub fn list_files_inner(
     // the query completes.
     struct NoopBus;
     impl EventBus for NoopBus {
-        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
             Ok(())
         }
     }
@@ -568,7 +577,7 @@ pub fn list_volumes_inner(
     // `state.container.volume.execute(List)`.
     struct NoopBus;
     impl EventBus for NoopBus {
-        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
             Ok(())
         }
     }

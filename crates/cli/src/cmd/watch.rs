@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use perima_app::AppContainer;
-use perima_core::{CoreError, DeviceId, EventBus, FileEvent, LocationStatus};
+use perima_core::{AppEvent, CoreError, DeviceId, EventBus, FileEvent, LocationStatus};
 use perima_db::SqliteFileRepository;
 use perima_fs::DebouncedWatcher;
 
@@ -41,7 +41,16 @@ struct DbEventHandler {
 }
 
 impl EventBus for DbEventHandler {
-    fn emit(&self, event: &FileEvent) -> Result<(), CoreError> {
+    fn emit(&self, event: &AppEvent) -> Result<(), CoreError> {
+        match event {
+            AppEvent::File(file_event) => self.record_file_event(file_event),
+            AppEvent::ScanCompleted { .. } | AppEvent::IndexInvalidated { .. } => Ok(()),
+        }
+    }
+}
+
+impl DbEventHandler {
+    fn record_file_event(&self, event: &FileEvent) -> Result<(), CoreError> {
         match event {
             FileEvent::Created { path, .. } => {
                 // WHY: we do not hash new files in watch mode. Hashing requires

@@ -147,7 +147,7 @@ impl VolumeUseCase {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)] // Test code; unwrap panics signal bugs.
 mod tests {
-    use perima_core::{DeviceId, FileEvent, VolumeIdentifiers};
+    use perima_core::{AppEvent, DeviceId, VolumeIdentifiers};
     use perima_db::{ReadPool, SqliteVolumeRepository, SqliteWriter, SqliteWriterHandle};
     use tempfile::TempDir;
 
@@ -156,7 +156,7 @@ mod tests {
     /// No-op event bus for tests that don't care about emissions.
     struct NullBus;
     impl EventBus for NullBus {
-        fn emit(&self, _event: &FileEvent) -> Result<(), CoreError> {
+        fn emit(&self, _event: &AppEvent) -> Result<(), CoreError> {
             Ok(())
         }
     }

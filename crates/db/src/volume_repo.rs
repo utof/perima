@@ -166,7 +166,7 @@ impl VolumeRepository for SqliteVolumeRepository {
 mod tests {
     use std::sync::Arc;
 
-    use perima_core::{EventBus, FileEvent};
+    use perima_core::{AppEvent, EventBus};
     use tempfile::TempDir;
 
     use super::*;
@@ -176,7 +176,7 @@ mod tests {
     /// No-op event bus used by writer-backed test fixtures.
     struct NoopBus;
     impl EventBus for NoopBus {
-        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
             Ok(())
         }
     }

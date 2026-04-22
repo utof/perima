@@ -19,14 +19,14 @@
 use std::sync::Arc;
 
 use perima_core::{
-    BlakeHash, CoreError, DeviceId, EventBus, FileEvent, MediaMetadata, MetadataRepository,
+    AppEvent, BlakeHash, CoreError, DeviceId, EventBus, MediaMetadata, MetadataRepository,
 };
 use perima_db::{ReadPool, SqliteMetadataRepository, SqliteWriter};
 use rusqlite::{Connection, OpenFlags};
 
 struct NoopBus;
 impl EventBus for NoopBus {
-    fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+    fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
         Ok(())
     }
 }

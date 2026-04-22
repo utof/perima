@@ -19,8 +19,8 @@
 use std::sync::Arc;
 
 use perima_core::{
-    FileRepository, HashService, MetadataRepository, Scanner, SearchRepository, TagRepository,
-    VolumeRepository, events::EventBus,
+    AppEvent, FileRepository, HashService, MetadataRepository, Scanner, SearchRepository,
+    TagRepository, VolumeRepository, events::EventBus,
 };
 use perima_media::ThumbnailGenerator;
 
@@ -67,7 +67,7 @@ impl CompositeEventBus {
 }
 
 impl EventBus for CompositeEventBus {
-    fn emit(&self, event: &perima_core::FileEvent) -> Result<(), perima_core::CoreError> {
+    fn emit(&self, event: &AppEvent) -> Result<(), perima_core::CoreError> {
         for h in &self.handlers {
             if let Err(e) = h.emit(event) {
                 tracing::warn!(error = %e, "event handler failed");
@@ -302,7 +302,7 @@ impl AppContainer {
 mod tests {
     use std::sync::Mutex;
 
-    use perima_core::{CoreError, FileEvent, MediaPath, VolumeId};
+    use perima_core::{AppEvent, CoreError, FileEvent, MediaPath, VolumeId};
     use perima_db::{
         ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository,
         SqliteTagRepository, SqliteVolumeRepository, SqliteWriter, SqliteWriterHandle,
@@ -316,10 +316,10 @@ mod tests {
     /// Records every event it receives. Used to assert fan-out.
     #[derive(Default)]
     struct RecordingBus {
-        received: Mutex<Vec<FileEvent>>,
+        received: Mutex<Vec<AppEvent>>,
     }
     impl EventBus for RecordingBus {
-        fn emit(&self, event: &FileEvent) -> Result<(), CoreError> {
+        fn emit(&self, event: &AppEvent) -> Result<(), CoreError> {
             self.received.lock().unwrap().push(event.clone());
             Ok(())
         }
@@ -328,17 +328,17 @@ mod tests {
     /// Always errors. Used to verify failure isolation.
     struct FailingBus;
     impl EventBus for FailingBus {
-        fn emit(&self, _event: &FileEvent) -> Result<(), CoreError> {
+        fn emit(&self, _event: &AppEvent) -> Result<(), CoreError> {
             Err(CoreError::Internal("synthetic handler failure".into()))
         }
     }
 
-    /// Build a `FileEvent::Created` for tests.
-    fn event() -> FileEvent {
-        FileEvent::Created {
+    /// Build an `AppEvent::File(FileEvent::Created)` for tests.
+    fn event() -> AppEvent {
+        AppEvent::File(FileEvent::Created {
             path: MediaPath::new("test-fanout.bin"),
             volume: VolumeId::new(),
-        }
+        })
     }
 
     #[test]
@@ -389,7 +389,7 @@ mod tests {
     /// `Arc<dyn EventBus>` parameter.
     struct TestNoopBus;
     impl EventBus for TestNoopBus {
-        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
             Ok(())
         }
     }

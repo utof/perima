@@ -240,14 +240,14 @@ fn handle_file(conn: &mut Connection, cmd: crate::cmd::FileWriteCmd, bus: &Arc<d
 mod tests {
     use std::sync::Arc;
 
-    use perima_core::{CoreError, EventBus, FileEvent};
+    use perima_core::{AppEvent, CoreError, EventBus};
 
     use super::SqliteWriter;
 
     struct NoopBus;
 
     impl EventBus for NoopBus {
-        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
             Ok(())
         }
     }
