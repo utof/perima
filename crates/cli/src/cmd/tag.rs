@@ -4,22 +4,12 @@
 //! - `tag add <path> <tags…>` — attach one or more labels to a file
 //! - `tag rm <path> <tag>` — detach a label from a file
 //! - `tag ls [--json]` — list all active tags with attachment counts
-//!
-//! WHY still opens one DB connection inline: two helpers here
-//! (`resolve_hash` and the `tag ls` per-tag count lookup) need ports
-//! that `TagUseCase` does not currently expose on its output surface
-//! (`FileRepository::list_file_locations` for path→hash resolution +
-//! `TagRepository::count_files_for_tag` for attachment counts). A future
-//! batch can lift these onto the app layer; Task 8 keeps the shell
-//! minimal by re-using a short-lived connection, matching the pattern
-//! already in `cmd/metadata.rs`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use perima_app::{AppContainer, TagCommand, TagOutput};
-use perima_core::{BlakeHash, CoreError, DeviceId, FileRepository, normalize_tag};
-use perima_db::{SqliteFileRepository, open_and_migrate};
+use perima_core::{BlakeHash, CoreError, DeviceId, normalize_tag};
 
 use super::metadata::find_by_absolute_suffix;
 
@@ -76,9 +66,13 @@ pub(crate) async fn run(
     }
 }
 
-/// Resolve a path to a `BlakeHash` by opening a fresh `FileRepository`
-/// connection and suffix-matching indexed locations.
-fn resolve_hash(data_dir: &Path, path: &Path) -> Result<BlakeHash, CoreError> {
+/// Resolve a path to a `BlakeHash` via the container's shared file repository.
+///
+/// WHY `container` instead of a local open: the writer actor owns the sole
+/// writable connection; opening a second one here would require a second
+/// writer. `container.files_repo` is the shared `Arc<dyn FileRepository>`
+/// already wired to the writer+pool.
+fn resolve_hash(container: &AppContainer, path: &Path) -> Result<BlakeHash, CoreError> {
     if !path.exists() {
         return Err(CoreError::InvalidPath(format!(
             "does not exist: {}",
@@ -97,15 +91,10 @@ fn resolve_hash(data_dir: &Path, path: &Path) -> Result<BlakeHash, CoreError> {
         .to_str()
         .ok_or_else(|| CoreError::InvalidPath(format!("non-UTF8 path: {}", absolute.display())))?;
 
-    let db_path = data_dir.join("perima.db");
-    // WHY new_legacy: Task 7 migrates this callsite to use the shared
-    // writer+pool via container.files_repo. Legacy constructor is deprecated.
-    #[allow(deprecated)]
-    let file_repo = SqliteFileRepository::new_legacy(open_and_migrate(&db_path)?);
     // WHY list across ALL volumes (None): the user supplies an absolute
     // path that may live on any known volume. Suffix-matching across the
     // full location set is the only portable approach.
-    let records = file_repo.list_file_locations(usize::MAX, None)?;
+    let records = container.files_repo.list_file_locations(usize::MAX, None)?;
     let record = find_by_absolute_suffix(&records, absolute_str).ok_or_else(|| {
         CoreError::InvalidPath(format!(
             "not indexed: {} (run `perima scan` first)",
@@ -119,12 +108,12 @@ fn resolve_hash(data_dir: &Path, path: &Path) -> Result<BlakeHash, CoreError> {
 /// Attach one or more tags to a file.
 async fn run_add(
     container: &AppContainer,
-    data_dir: &Path,
+    _data_dir: &Path,
     device: DeviceId,
     path: &Path,
     tags: &[String],
 ) -> Result<(), CoreError> {
-    let hash = resolve_hash(data_dir, path)?;
+    let hash = resolve_hash(container, path)?;
 
     let mut applied = Vec::with_capacity(tags.len());
     for raw in tags {
@@ -158,12 +147,12 @@ async fn run_add(
 /// Remove a tag from a file.
 async fn run_rm(
     container: &AppContainer,
-    data_dir: &Path,
+    _data_dir: &Path,
     device: DeviceId,
     path: &Path,
     tag_raw: &str,
 ) -> Result<(), CoreError> {
-    let hash = resolve_hash(data_dir, path)?;
+    let hash = resolve_hash(container, path)?;
 
     container
         .tag

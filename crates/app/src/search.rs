@@ -129,7 +129,7 @@ impl SearchUseCase {
 #[allow(clippy::unwrap_used)] // Test code; unwrap panics signal bugs.
 mod tests {
     use perima_core::FileEvent;
-    use perima_db::{SqliteSearchRepository, open_and_migrate};
+    use perima_db::{ReadPool, SqliteSearchRepository, SqliteWriter};
     use tempfile::TempDir;
 
     use super::*;
@@ -143,16 +143,15 @@ mod tests {
     }
 
     /// Build a [`SearchUseCase`] backed by a real `SQLite` DB in a tempdir.
-    ///
-    /// WHY `new_legacy`: `SearchUseCase` tests are thin orchestration
-    /// tests that don't need writer+pool setup. Task 7 migrates these
-    /// to `SqliteSearchRepository::new(writer, reads)`.
     fn harness() -> (SearchUseCase, TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("perima.db");
-        let conn = open_and_migrate(&db_path).unwrap();
-        #[allow(deprecated)]
-        let repo: Arc<dyn SearchRepository> = Arc::new(SqliteSearchRepository::new_legacy(conn));
+        let writer = SqliteWriter::start(&db_path, Arc::new(NullBus) as Arc<dyn EventBus>).unwrap();
+        let reads = ReadPool::open(&db_path).unwrap();
+        let repo: Arc<dyn SearchRepository> =
+            Arc::new(SqliteSearchRepository::new(writer.sender(), reads));
+        // WHY drop handle: sender inside repo keeps thread alive.
+        drop(writer);
         let events: Arc<dyn EventBus> = Arc::new(NullBus);
         (SearchUseCase::new(repo, events), tmp)
     }
@@ -184,9 +183,11 @@ mod tests {
     async fn query_returns_matching_hits() {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("perima.db");
-        let conn = open_and_migrate(&db_path).unwrap();
-        #[allow(deprecated)]
-        let repo: Arc<dyn SearchRepository> = Arc::new(SqliteSearchRepository::new_legacy(conn));
+        let writer = SqliteWriter::start(&db_path, Arc::new(NullBus) as Arc<dyn EventBus>).unwrap();
+        let reads = ReadPool::open(&db_path).unwrap();
+        let repo: Arc<dyn SearchRepository> =
+            Arc::new(SqliteSearchRepository::new(writer.sender(), reads));
+        drop(writer);
         let events: Arc<dyn EventBus> = Arc::new(NullBus);
         let uc = SearchUseCase::new(repo, events);
 
@@ -209,9 +210,11 @@ mod tests {
     async fn query_limit_is_respected() {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("perima.db");
-        let conn = open_and_migrate(&db_path).unwrap();
-        #[allow(deprecated)]
-        let repo: Arc<dyn SearchRepository> = Arc::new(SqliteSearchRepository::new_legacy(conn));
+        let writer = SqliteWriter::start(&db_path, Arc::new(NullBus) as Arc<dyn EventBus>).unwrap();
+        let reads = ReadPool::open(&db_path).unwrap();
+        let repo: Arc<dyn SearchRepository> =
+            Arc::new(SqliteSearchRepository::new(writer.sender(), reads));
+        drop(writer);
         let events: Arc<dyn EventBus> = Arc::new(NullBus);
         let uc = SearchUseCase::new(repo, events);
 

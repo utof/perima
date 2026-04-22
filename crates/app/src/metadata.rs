@@ -196,7 +196,7 @@ mod tests {
     };
     use perima_db::{
         ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteVolumeRepository,
-        SqliteWriter, SqliteWriterHandle, open_and_migrate,
+        SqliteWriter, SqliteWriterHandle,
     };
     use tempfile::TempDir;
 
@@ -228,20 +228,11 @@ mod tests {
     ) {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("perima.db");
-        // WHY writer + pool for metadata (Task 4):
-        // `SqliteMetadataRepository` now holds
-        // `(flume::Sender<WriteCmd>, ReadPool)`. `SqliteFileRepository`
-        // still takes an owned `Connection` until Task 5 — open a
-        // separate legacy connection for it (safe under WAL mode;
-        // migrations already ran via `SqliteWriter::start`).
         let events: Arc<dyn EventBus> = Arc::new(NullBus);
         let writer = SqliteWriter::start(&db_path, Arc::clone(&events)).unwrap();
         let reads = ReadPool::open(&db_path).unwrap();
-        // WHY new_legacy: Task 7 migrates this fixture to writer+pool.
-        #[allow(deprecated)]
-        let files: Arc<SqliteFileRepository> = Arc::new(SqliteFileRepository::new_legacy(
-            open_and_migrate(&db_path).unwrap(),
-        ));
+        let files: Arc<SqliteFileRepository> =
+            Arc::new(SqliteFileRepository::new(writer.sender(), reads.clone()));
         let metadata: Arc<SqliteMetadataRepository> =
             Arc::new(SqliteMetadataRepository::new(writer.sender(), reads));
         let uc = MetadataUseCase::new(

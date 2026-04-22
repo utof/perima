@@ -1,19 +1,14 @@
 //! `SearchRepository` implementation backed by rusqlite FTS5.
 //!
-//! Post-Batch-C Task 6. The struct holds two cheap-to-clone handles:
+//! Post-Batch-C Task 7. The struct holds two cheap-to-clone handles:
 //! a [`flume::Sender<WriteCmd>`] connected to the single writer actor
 //! (spec §3.1) and a [`ReadPool`] of read-only `r2d2_sqlite`
 //! connections (spec §3.4). Writes build a [`SearchWriteCmd`] variant
 //! with a `flume::bounded(1)` reply channel and block on the reply.
 //! Reads run SQL directly against a pooled connection.
 //!
-//! No `Mutex<Connection>`. The legacy `::new(conn)` constructor is
-//! deprecated and will be removed in Batch C Task 7 once all callers
-//! are updated to supply `(writer_sender, read_pool)`.
-
-#[cfg(test)]
-use std::sync::MutexGuard;
-use std::sync::{Arc, Mutex};
+//! No `Mutex<Connection>`. Every caller now supplies
+//! `(writer_sender, read_pool)` via `SqliteSearchRepository::new`.
 
 use flume::Sender;
 use perima_core::{CoreError, SearchHit, SearchRepository};
@@ -27,46 +22,16 @@ use crate::pool::ReadPool;
 ///
 /// Cheap to [`Clone`]: both fields (`flume::Sender`, `ReadPool`) are
 /// internally refcounted.
-///
-/// The deprecated `Mutex<Connection>`-based shape still compiles for
-/// Task-7 callsites; it will be removed once those are updated.
 #[derive(Clone)]
 pub struct SqliteSearchRepository {
-    inner: Inner,
-}
-
-/// Internal state: either the new writer+pool shape (post-Task-6) or
-/// the legacy `Mutex<Connection>` shape (pre-Task-7 callsites).
-///
-/// WHY enum: tasks 6 and 7 are separate commits; this bridge keeps
-/// existing callers compiling while the migration lands incrementally.
-/// Task 7 deletes the `Legacy` arm and the enum itself, leaving only
-/// a plain `writer + reads` pair on the struct.
-#[derive(Clone)]
-enum Inner {
-    /// Post-Batch-C Task 6 shape.
-    WriterPool {
-        writer: Sender<WriteCmd>,
-        reads: ReadPool,
-    },
-    /// Pre-Batch-C Task 6 legacy shape; deprecated — Task 7 removes.
-    #[deprecated(note = "Use SqliteSearchRepository::new(writer, reads) (Task 7 cleanup)")]
-    Legacy(Arc<Mutex<Connection>>),
+    writer: Sender<WriteCmd>,
+    reads: ReadPool,
 }
 
 impl std::fmt::Debug for SqliteSearchRepository {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.inner {
-            Inner::WriterPool { .. } => f
-                .debug_struct("SqliteSearchRepository")
-                .field("shape", &"writer+pool")
-                .finish_non_exhaustive(),
-            #[allow(deprecated)]
-            Inner::Legacy(_) => f
-                .debug_struct("SqliteSearchRepository")
-                .field("shape", &"legacy(Mutex<Connection>)")
-                .finish_non_exhaustive(),
-        }
+        f.debug_struct("SqliteSearchRepository")
+            .finish_non_exhaustive()
     }
 }
 
@@ -78,47 +43,7 @@ impl SqliteSearchRepository {
     /// (spec §3.6). The read pool is opened after migrations complete.
     #[must_use]
     pub const fn new(writer: Sender<WriteCmd>, reads: ReadPool) -> Self {
-        Self {
-            inner: Inner::WriterPool { writer, reads },
-        }
-    }
-
-    /// Wrap an existing connection. **Deprecated** — use
-    /// `SqliteSearchRepository::new(writer, reads)` instead.
-    ///
-    /// WHY kept: Batch C Task 7 migrates all callsites to the
-    /// `new(writer, reads)` constructor. Until that commit lands the
-    /// legacy callers (CLI, desktop, test helpers outside this module)
-    /// still compile via this constructor. Task 7 deletes it.
-    ///
-    /// The caller must have run migrations before constructing this.
-    #[must_use]
-    #[deprecated(note = "Use SqliteSearchRepository::new(writer, reads) (Task 7 cleanup)")]
-    pub fn new_legacy(conn: Connection) -> Self {
-        #[allow(deprecated)]
-        Self {
-            inner: Inner::Legacy(Arc::new(Mutex::new(conn))),
-        }
-    }
-
-    /// Test-only access to the legacy `Mutex<Connection>`.
-    ///
-    /// WHY `#[cfg(test)]`: the lock is only needed by in-module test
-    /// helpers that seed raw SQL rows (trigger + proptest harnesses).
-    /// Post-Task-7 this disappears along with the `Legacy` arm.
-    ///
-    /// # Panics
-    /// Panics if called on the `WriterPool` variant (not available in
-    /// legacy-free shapes) or if the mutex is poisoned.
-    #[cfg(test)]
-    pub(crate) fn conn(&self) -> MutexGuard<'_, Connection> {
-        match &self.inner {
-            #[allow(deprecated)]
-            Inner::Legacy(arc) => arc.lock().expect("legacy mutex poisoned"),
-            Inner::WriterPool { .. } => {
-                panic!("conn() is only available on the Legacy shape (Task 7 cleanup)")
-            }
-        }
+        Self { writer, reads }
     }
 }
 
@@ -128,39 +53,17 @@ impl SqliteSearchRepository {
 
 impl SearchRepository for SqliteSearchRepository {
     fn search(&self, query: &str, limit: u32) -> Result<Vec<SearchHit>, CoreError> {
-        match &self.inner {
-            Inner::WriterPool { reads, .. } => {
-                let conn = reads.get()?;
-                search_impl(&conn, query, limit)
-            }
-            #[allow(deprecated)]
-            Inner::Legacy(arc) => {
-                let conn = arc
-                    .lock()
-                    .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-                search_impl(&conn, query, limit)
-            }
-        }
+        let conn = self.reads.get()?;
+        search_impl(&conn, query, limit)
     }
 
     fn rebuild(&self) -> Result<(), CoreError> {
-        match &self.inner {
-            Inner::WriterPool { writer, .. } => {
-                let (tx, rx) = flume::bounded::<Result<(), CoreError>>(1);
-                writer
-                    .send(WriteCmd::Search(SearchWriteCmd::Rebuild { reply: tx }))
-                    .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
-                rx.recv()
-                    .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
-            }
-            #[allow(deprecated)]
-            Inner::Legacy(arc) => {
-                let mut conn = arc
-                    .lock()
-                    .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-                rebuild_legacy_impl(&mut conn)
-            }
-        }
+        let (tx, rx) = flume::bounded::<Result<(), CoreError>>(1);
+        self.writer
+            .send(WriteCmd::Search(SearchWriteCmd::Rebuild { reply: tx }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        rx.recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
     }
 }
 
@@ -168,8 +71,7 @@ impl SearchRepository for SqliteSearchRepository {
 // Read-path helpers (pool variant)
 // ---------------------------------------------------------------------------
 
-/// SELECT body for [`SearchRepository::search`], shared between
-/// `WriterPool` and `Legacy` arms.
+/// SELECT body for [`SearchRepository::search`].
 ///
 /// V007: `search_content` has `(rowid, blake3_hash, relative_path, ...)`
 /// but [`perima_core::SearchHit`] requires `volume_id` which lives only
@@ -214,82 +116,15 @@ fn search_impl(conn: &Connection, query: &str, limit: u32) -> Result<Vec<SearchH
     Ok(hits)
 }
 
-// ---------------------------------------------------------------------------
-// Write-path helpers (legacy arm only)
-// ---------------------------------------------------------------------------
-
-/// Rebuild implementation for the `Legacy` arm — runs directly on the
-/// `Mutex<Connection>` path without going through the writer actor.
-///
-/// WHY kept: the `Legacy` arm still exists to keep pre-Task-7 callers
-/// compiling (CLI, desktop, app-crate tests). Once Task 7 removes the
-/// `Legacy` arm, this function disappears too.
-///
-/// Semantics are identical to [`crate::writer::search::rebuild_impl`];
-/// they share the same SQL body — no HLC binding, no event emission.
-fn rebuild_legacy_impl(conn: &mut Connection) -> Result<(), CoreError> {
-    let tx = conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(Error::from)?;
-
-    // V007 rebuild: wipe search_content, then repopulate from joined
-    // live state. The search_content AFTER-INSERT/DELETE triggers keep
-    // search_index in sync row-by-row — no explicit FTS5 'rebuild'
-    // needed here.
-    //
-    // WHY not 'INSERT INTO search_index(search_index) VALUES('rebuild')':
-    // that primitive is an external-content resync from search_content,
-    // but the DELETE + INSERT path above already drives FTS via triggers.
-    // Calling 'rebuild' would be redundant (and defensive for a case
-    // that doesn't exist here: search_content-out-of-sync-with-index).
-    tx.execute_batch("DELETE FROM search_content;")
-        .map_err(Error::from)?;
-
-    // Populate search_content: one representative location per hash,
-    // joined with metadata + tags. Mirrors V007 migration bulk-insert.
-    // WHY filename = relative_path: SQLite has no built-in REVERSE() for
-    // basename extraction; the unicode61 tokenizer splits on '/' and '.'
-    // so basenames are discoverable via token match on relative_path.
-    tx.execute_batch(
-        "INSERT INTO search_content
-             (blake3_hash, filename, relative_path, mime_type, camera_model, captured_at, tags)
-         SELECT fl.blake3_hash,
-                fl.relative_path,
-                fl.relative_path,
-                COALESCE(m.mime_type, ''),
-                COALESCE(m.camera_model, ''),
-                COALESCE(m.captured_at, ''),
-                COALESCE((
-                    SELECT GROUP_CONCAT(t.name, ' ')
-                    FROM file_tags ft
-                    JOIN tags t ON t.id = ft.tag_id
-                    WHERE ft.blake3_hash = fl.blake3_hash
-                      AND ft.deleted_at IS NULL
-                      AND t.deleted_at IS NULL
-                ), '')
-         FROM file_locations fl
-         LEFT JOIN file_metadata m ON m.blake3_hash = fl.blake3_hash
-                                   AND m.deleted_at IS NULL
-         WHERE fl.deleted_at IS NULL
-           AND fl.id = (
-               SELECT id FROM file_locations
-               WHERE blake3_hash = fl.blake3_hash AND deleted_at IS NULL
-               ORDER BY first_seen ASC, id ASC LIMIT 1
-           );",
-    )
-    .map_err(Error::from)?;
-
-    tx.commit().map_err(Error::from)?;
-    Ok(())
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::path::Path;
     use std::sync::Arc;
 
     use super::*;
     use perima_core::{DeviceId, EventBus, FileEvent, TagRepository};
+    use tempfile::TempDir;
 
     use crate::pool::ReadPool;
     use crate::tag_repo::SqliteTagRepository;
@@ -298,6 +133,13 @@ mod tests {
     const DEV: &str = "dev";
     const TS: &str = "2026-01-01T00:00:00Z";
 
+    struct NoopBus;
+    impl EventBus for NoopBus {
+        fn emit(&self, _: &FileEvent) -> Result<(), perima_core::CoreError> {
+            Ok(())
+        }
+    }
+
     /// Produce a deterministic 64-hex-char hash from a small integer.
     fn hash_n(n: u8) -> String {
         // WHY format: first two chars encode `n`; remaining 62 are '0'.
@@ -305,18 +147,27 @@ mod tests {
         format!("{:02x}{}", n, "0".repeat(62))
     }
 
-    /// Build a legacy-shaped [`SqliteSearchRepository`] for tests that
-    /// need raw `conn` access (trigger + proptest harnesses).
+    /// Build a tempfile-on-disk DB, writer actor, read pool, and search repo.
     ///
-    /// WHY `new_legacy`: these tests seed SQL rows directly through
-    /// `repo.conn()`, which is only available on the `Legacy` arm.
-    /// Post-Task-7 all of these will be replaced with a writer+pool
-    /// harness; for now `new_legacy` keeps them compiling unchanged.
-    #[allow(deprecated)]
-    fn test_db() -> (tempfile::TempDir, SqliteSearchRepository) {
+    /// WHY tempfile-on-disk (not in-memory): writer + pool must share
+    /// the same DB file; `:memory:` is per-connection private.
+    ///
+    /// Returns `(TempDir, db_path, SqliteSearchRepository, SqliteWriterHandle)`.
+    /// Keep the `TempDir` alive for the test duration; the `db_path` is needed
+    /// by seeding helpers that open a direct raw connection.
+    fn test_db() -> (
+        TempDir,
+        std::path::PathBuf,
+        SqliteSearchRepository,
+        SqliteWriterHandle,
+    ) {
         let td = tempfile::tempdir().expect("tempdir");
-        let conn = crate::connection::open_and_migrate(&td.path().join("test.db")).expect("open");
-        (td, SqliteSearchRepository::new_legacy(conn))
+        let db_path = td.path().join("test.db");
+        let bus: Arc<dyn EventBus> = Arc::new(NoopBus);
+        let writer = SqliteWriter::start(&db_path, bus).expect("writer start");
+        let reads = ReadPool::open(&db_path).expect("pool open");
+        let repo = SqliteSearchRepository::new(writer.sender(), reads);
+        (td, db_path, repo, writer)
     }
 
     /// Harness for search + tag tests.
@@ -325,40 +176,38 @@ mod tests {
     /// `SqliteTagRepository` holds `(flume::Sender<WriteCmd>, ReadPool)`.
     /// Tests must keep the writer handle alive so the writer thread
     /// outlives the tag repo.
-    ///
-    /// WHY search still uses `new_legacy`: search tests need raw `conn`
-    /// access (trigger harnesses, proptest seeding). Task 7 will migrate
-    /// these to the writer+pool shape.
-    #[allow(deprecated)]
     fn test_db_with_tag_repo() -> (
-        tempfile::TempDir,
+        TempDir,
+        std::path::PathBuf,
         SqliteSearchRepository,
         SqliteTagRepository,
         SqliteWriterHandle,
     ) {
-        struct NoopBus;
-        impl EventBus for NoopBus {
-            fn emit(&self, _: &FileEvent) -> Result<(), perima_core::CoreError> {
-                Ok(())
-            }
-        }
-
         let td = tempfile::tempdir().expect("tempdir");
-        let db = td.path().join("test.db");
+        let db_path = td.path().join("test.db");
 
-        // Writer runs the migration sweep. WAL mode lets the two
-        // connections coexist.
+        // Writer runs the migration sweep. WAL mode lets the two connections coexist.
         let bus: Arc<dyn EventBus> = Arc::new(NoopBus);
-        let writer = SqliteWriter::start(&db, bus).expect("writer start");
-        let reads = ReadPool::open(&db).expect("pool open");
-        let search_conn = crate::connection::open_and_migrate(&db).expect("open search");
+        let writer = SqliteWriter::start(&db_path, bus).expect("writer start");
+        let reads = ReadPool::open(&db_path).expect("pool open");
 
         (
             td,
-            SqliteSearchRepository::new_legacy(search_conn),
+            db_path,
+            SqliteSearchRepository::new(writer.sender(), reads.clone()),
             SqliteTagRepository::new(writer.sender(), reads),
             writer,
         )
+    }
+
+    /// Open a direct raw connection for seeding raw SQL in tests.
+    ///
+    /// WHY raw connection: test seeding inserts rows directly (bypassing
+    /// the writer actor) to exercise `SQLite` triggers in isolation. The
+    /// writer actor is idle (blocked on `flume` channel) while tests seed,
+    /// so a second connection in WAL mode does not conflict.
+    fn seed_conn(db_path: &Path) -> Connection {
+        Connection::open(db_path).expect("seed conn open")
     }
 
     fn device() -> DeviceId {
@@ -408,16 +257,16 @@ mod tests {
 
     #[test]
     fn search_empty_index_returns_empty() {
-        let (_td, repo) = test_db();
+        let (_td, _db, repo, _writer) = test_db();
         let hits = repo.search("vacation", 50).expect("search");
         assert!(hits.is_empty());
     }
 
     #[test]
     fn search_finds_by_filename() {
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, HASH_A, VOL, "photos/sunset.jpg");
             insert_metadata(&conn, HASH_A, "image/jpeg", "", "");
         }
@@ -429,9 +278,9 @@ mod tests {
 
     #[test]
     fn search_finds_by_mime_type() {
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, HASH_A, VOL, "doc.pdf");
             insert_metadata(&conn, HASH_A, "application/pdf", "", "");
         }
@@ -443,9 +292,9 @@ mod tests {
 
     #[test]
     fn search_finds_by_camera_model() {
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, HASH_A, VOL, "img.jpg");
             insert_metadata(&conn, HASH_A, "image/jpeg", "Canon EOS R5", "");
         }
@@ -456,9 +305,9 @@ mod tests {
 
     #[test]
     fn search_finds_by_tag() {
-        let (_td, repo, tag_repo, _writer) = test_db_with_tag_repo();
+        let (_td, db, repo, tag_repo, _writer) = test_db_with_tag_repo();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, HASH_A, VOL, "beach.jpg");
             insert_metadata(&conn, HASH_A, "image/jpeg", "", "");
         }
@@ -475,9 +324,9 @@ mod tests {
 
     #[test]
     fn rebuild_is_idempotent() {
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, HASH_A, VOL, "a.jpg");
             insert_metadata(&conn, HASH_A, "image/jpeg", "", "");
         }
@@ -488,7 +337,7 @@ mod tests {
         assert!(!hits.is_empty());
         // Exactly one doc (idempotent — no duplicates from double rebuild).
         let count: i64 = {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             conn.query_row("SELECT COUNT(*) FROM search_content", [], |r| r.get(0))
                 .expect("count")
         };
@@ -497,9 +346,9 @@ mod tests {
 
     #[test]
     fn trigger_sync_on_metadata_insert() {
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, HASH_A, VOL, "photos/trigger_test.jpg");
             // Inserting metadata fires search_after_metadata_insert trigger.
             insert_metadata(&conn, HASH_A, "image/jpeg", "", "");
@@ -511,9 +360,9 @@ mod tests {
 
     #[test]
     fn trigger_sync_on_tag_attach() {
-        let (_td, repo, tag_repo, _writer) = test_db_with_tag_repo();
+        let (_td, db, repo, tag_repo, _writer) = test_db_with_tag_repo();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, HASH_A, VOL, "img.jpg");
             insert_metadata(&conn, HASH_A, "image/jpeg", "", "");
         }
@@ -529,9 +378,9 @@ mod tests {
 
     #[test]
     fn search_limit_is_respected() {
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             for i in 0..5u8 {
                 let hash = format!("{:0<64}", format!("{i:x}"));
                 insert_file(&conn, &hash, VOL, &format!("file{i}.jpg"));
@@ -546,9 +395,9 @@ mod tests {
 
     #[test]
     fn search_no_results_for_unknown_term() {
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, HASH_A, VOL, "alpha.txt");
             insert_metadata(&conn, HASH_A, "text/plain", "", "");
         }
@@ -569,9 +418,9 @@ mod tests {
         // match (SQLite convention; default `rank` returns negative BM25
         // score, smaller = better).
         const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let (_td, repo, tag_repo, _writer) = test_db_with_tag_repo();
+        let (_td, db, repo, tag_repo, _writer) = test_db_with_tag_repo();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, HASH_A, VOL, "vacation_tagged.jpg");
             insert_metadata(&conn, HASH_A, "image/jpeg", "", "");
             insert_file(&conn, HASH_B, VOL, "vacation_only.jpg");
@@ -603,9 +452,9 @@ mod tests {
 
     #[test]
     fn filename_without_slash_is_indexed_correctly() {
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             // Root-level file: no '/' in path.
             insert_file(&conn, HASH_A, VOL, "rootfile.jpg");
             insert_metadata(&conn, HASH_A, "image/jpeg", "", "");
@@ -664,15 +513,15 @@ mod tests {
     fn test_T40_metadata_update_removes_stale_tokens() {
         let hash_owned = hash_n(1);
         let HASH = hash_owned.as_str();
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, HASH, VOL, "cam.jpg");
             insert_metadata(&conn, HASH, "image/jpeg", "Canon EOS R5", "");
         }
         // Trigger: UPDATE file_metadata fires search_after_metadata_update.
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             conn.execute(
                 "UPDATE file_metadata SET camera_model = ?1 WHERE blake3_hash = ?2",
                 rusqlite::params!["Nikon Zf", HASH],
@@ -695,9 +544,9 @@ mod tests {
     fn test_T41_tag_attach_on_metadata_less_file() {
         let hash_owned = hash_n(2);
         let HASH = hash_owned.as_str();
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, HASH, VOL, "plain.txt"); // NO metadata row
             attach_tag_raw(&conn, HASH, "beach");
         }
@@ -719,16 +568,16 @@ mod tests {
     fn test_T22_rename_updates_indexed_path() {
         let hash_owned = hash_n(3);
         let HASH = hash_owned.as_str();
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, HASH, VOL, "oldname_22.jpg");
             insert_metadata(&conn, HASH, "image/jpeg", "", "");
         }
         // Rename: same hash, new path. V006 has no UPDATE trigger on
         // file_locations, so FTS index is not updated.
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             update_path(&conn, HASH, "oldname_22.jpg", "newname_22.jpg");
         }
         let old_hits = repo.search("oldname_22", 50).expect("search old");
@@ -754,16 +603,16 @@ mod tests {
         let hash_new_owned = hash_n(5);
         let HASH_OLD = hash_old_owned.as_str();
         let HASH_NEW = hash_new_owned.as_str();
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, HASH_OLD, VOL, "cam.jpg");
             insert_metadata(&conn, HASH_OLD, "image/jpeg", "Canon EOS R5", "");
         }
         // Replace hash in-place (file content changed at same path).
         // V006 has no trigger on file_locations.blake3_hash change.
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             conn.execute(
                 "INSERT OR IGNORE INTO files
                      (blake3_hash, file_size, first_seen, updated_at, device_id)
@@ -777,7 +626,6 @@ mod tests {
             )
             .expect("update hash");
             insert_metadata(&conn, HASH_NEW, "image/jpeg", "Nikon Zf", "");
-            drop(conn);
         }
         // V006 bug: old FTS doc not retired — "Canon" still matches.
         let hits = repo.search("Canon", 50).expect("search");
@@ -812,11 +660,6 @@ mod tests {
     /// existing `files` hash. Unlike [`insert_file`] this does NOT INSERT into
     /// `files` — caller has already seeded that row via `insert_file` for the
     /// representative location.
-    ///
-    /// WHY helper: the I4 test needs two locations for the same hash on
-    /// different volumes; `insert_file` alone insists on `INSERT OR IGNORE`
-    /// into `files` which is fine, but the location insert benefits from an
-    /// explicit volume-aware helper.
     fn insert_file_at_volume(conn: &Connection, hash: &str, path: &str, volume: &str) {
         conn.execute(
             "INSERT OR IGNORE INTO files
@@ -843,9 +686,7 @@ mod tests {
     }
 
     /// Volume-scoped rename helper: UPDATE `file_locations.relative_path` for
-    /// a specific `(hash, volume_id, old_path)` triple. Needed when two
-    /// locations share the same `relative_path` on different volumes and the
-    /// caller wants to rename exactly one.
+    /// a specific `(hash, volume_id, old_path)` triple.
     fn update_path_at_volume(
         conn: &Connection,
         hash: &str,
@@ -874,27 +715,21 @@ mod tests {
     /// the rename trigger — the file remains findable via its current
     /// representative-path tokens across both a non-representative rename
     /// (no-op on FTS) and a representative rename (updates FTS).
-    ///
-    /// WHY not "secondary location's path is separately searchable": the spec
-    /// explicitly scopes that as out-of-scope multi-volume awareness; the
-    /// representative is authoritative.
     #[test]
     fn test_multi_location_rename_preserves_findability() {
         let hash = hash_n(10);
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             // Representative (first-seen) location on VOL.
             insert_file(&conn, &hash, VOL, "shared_mlr.jpg");
             // Second location on VOL2, same relative_path.
             insert_file_at_volume(&conn, &hash, "shared_mlr.jpg", VOL2);
         }
 
-        // Rename the non-representative (VOL2) location. Trigger 2b is gated
-        // on NEW being the representative, so the rename should NOT affect
-        // search_content; the representative's "shared_mlr" token still matches.
+        // Rename the non-representative (VOL2) location.
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             update_path_at_volume(&conn, &hash, "shared_mlr.jpg", "renamed_mlr.jpg", VOL2);
         }
         assert_eq!(
@@ -904,9 +739,9 @@ mod tests {
         );
 
         // Rename the representative (VOL) location. Trigger 2b fires and
-        // updates search_content.relative_path + filename.
+        // updates search_content.
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             update_path_at_volume(&conn, &hash, "shared_mlr.jpg", "alpha_mlr.jpg", VOL);
         }
         assert_eq!(
@@ -923,16 +758,12 @@ mod tests {
 
     /// C1: soft-deleting the representative location of a two-location file
     /// must re-point `search_content` to the surviving sibling, not retire the doc.
-    ///
-    /// After the delete:
-    /// - search("vol1") → 0 (representative was on vol1; path retired)
-    /// - search("vol2") → 1 (surviving sibling on vol2 is now indexed)
     #[test]
     fn test_representative_location_soft_delete_repoints() {
         let hash = hash_n(11);
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             // First (representative) location on VOL / vol1 path.
             insert_file(&conn, &hash, VOL, "vol1/repfile_c1.jpg");
             // Second location on VOL2 / vol2 path — same hash.
@@ -961,17 +792,15 @@ mod tests {
         }
         // Soft-delete the first (representative) location.
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             soft_delete_location(&conn, &hash, "vol1/repfile_c1.jpg");
         }
-        // vol1 token must no longer match (representative retired from index).
         let vol1_hits = repo.search("vol1", 50).expect("search vol1");
         assert_eq!(
             vol1_hits.len(),
             0,
             "C1: search on deleted representative's path must return zero"
         );
-        // vol2 token must still match (search_content re-pointed to sibling).
         let vol2_hits = repo.search("vol2", 50).expect("search vol2");
         assert_eq!(
             vol2_hits.len(),
@@ -983,39 +812,31 @@ mod tests {
 
     /// Soft-deleting the *only* location of a file must retire both the
     /// `search_content` row and the FTS doc.
-    ///
-    /// After the delete:
-    /// - `search_content` row count for this hash → 0
-    /// - `search_index` query for any term → 0 results for this hash
     #[test]
     fn test_last_location_soft_delete_retires_doc() {
         let hash = hash_n(12);
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, &hash, VOL, "solo_retire_lsd.jpg");
             insert_metadata(&conn, &hash, "image/jpeg", "RetireCamera", "");
         }
-        // Trigger must have indexed via metadata insert; verify first.
         let pre = repo.search("RetireCamera", 50).expect("pre-search");
         assert_eq!(pre.len(), 1, "file must be indexed before soft-delete");
 
-        // Soft-delete the only location.
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             soft_delete_location(&conn, &hash, "solo_retire_lsd.jpg");
         }
 
-        // FTS search must return empty.
         let hits = repo.search("RetireCamera", 50).expect("post-search");
         assert!(
             hits.is_empty(),
             "last-location soft-delete must remove the file from FTS search"
         );
 
-        // search_content row must be gone.
         let sc_count: i64 = {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             conn.query_row(
                 "SELECT COUNT(*) FROM search_content WHERE blake3_hash = ?1",
                 rusqlite::params![hash],
@@ -1031,15 +852,11 @@ mod tests {
 
     /// I5: calling `SearchRepository::rebuild()` twice produces an identical
     /// result set; no row-count drift in `search_content`.
-    ///
-    /// Stricter than the earlier `rebuild_is_idempotent` test: asserts the
-    /// exact `search_content` row count is stable across two rebuilds, not
-    /// just that searches still return results.
     #[test]
     fn test_rebuild_idempotence_post_v007() {
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             for i in 20u8..23u8 {
                 let h = hash_n(i);
                 insert_file(&conn, &h, VOL, &format!("idempotent_{i}.jpg"));
@@ -1048,14 +865,14 @@ mod tests {
         }
         repo.rebuild().expect("rebuild 1");
         let count_after_first: i64 = {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             conn.query_row("SELECT COUNT(*) FROM search_content", [], |r| r.get(0))
                 .expect("count after first rebuild")
         };
 
         repo.rebuild().expect("rebuild 2");
         let count_after_second: i64 = {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             conn.query_row("SELECT COUNT(*) FROM search_content", [], |r| r.get(0))
                 .expect("count after second rebuild")
         };
@@ -1069,7 +886,6 @@ mod tests {
             "I5: exactly 3 rows expected (one per file)"
         );
 
-        // FTS search results must also be identical in content.
         let hits_first = repo
             .search("idempotent", 50)
             .expect("search after rebuild 2");
@@ -1083,48 +899,38 @@ mod tests {
     /// I6: a single `BEGIN…COMMIT` updating `file_metadata.camera_model` +
     /// attaching a new tag + renaming `file_locations.relative_path` must
     /// produce FTS docs that reflect ALL three changes after commit.
-    ///
-    /// WHY fire-order independence: the three business triggers (2b, 3b, 4a)
-    /// all update `search_content` from joined live state, so regardless of
-    /// `SQLite`'s trigger-fire order the final `search_content` row converges.
     #[test]
     fn test_combined_transaction_update() {
         let hash = hash_n(13);
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, &hash, VOL, "combined_old_ctx.jpg");
             insert_metadata(&conn, &hash, "image/jpeg", "OldCamera", "");
         }
 
-        // Pre-condition: old tokens indexed.
         let pre = repo.search("OldCamera", 50).expect("pre OldCamera");
         assert_eq!(pre.len(), 1, "pre-condition: OldCamera must be indexed");
 
-        // Execute all three mutations in one transaction.
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             conn.execute_batch("BEGIN;").expect("begin");
-            // 1. Rename the location (trigger 2b if it is the representative).
             conn.execute(
                 "UPDATE file_locations SET relative_path = 'combined_new_ctx.jpg'
                  WHERE blake3_hash = ?1 AND relative_path = 'combined_old_ctx.jpg'",
                 rusqlite::params![hash],
             )
             .expect("rename");
-            // 2. Update camera_model (trigger 3b).
             conn.execute(
                 "UPDATE file_metadata SET camera_model = 'NewCamera'
                  WHERE blake3_hash = ?1",
                 rusqlite::params![hash],
             )
             .expect("update metadata");
-            // 3. Attach a new tag (trigger 4a).
             attach_tag_raw(&conn, &hash, "combined_tag_ctx");
             conn.execute_batch("COMMIT;").expect("commit");
         }
 
-        // FTS must reflect NEW camera_model.
         let new_cam = repo.search("NewCamera", 50).expect("NewCamera");
         assert_eq!(
             new_cam.len(),
@@ -1132,18 +938,15 @@ mod tests {
             "I6: NewCamera must be indexed post-commit"
         );
 
-        // FTS must no longer contain OLD camera_model.
         let old_cam = repo.search("OldCamera", 50).expect("OldCamera after");
         assert!(
             old_cam.is_empty(),
             "I6: OldCamera must not appear after metadata update in combined tx"
         );
 
-        // FTS must reflect the new tag.
         let tag_hits = repo.search("combined_tag_ctx", 50).expect("tag");
         assert_eq!(tag_hits.len(), 1, "I6: new tag must be indexed post-commit");
 
-        // FTS must reflect the new path token.
         let new_path = repo.search("combined_new_ctx", 50).expect("new path");
         assert_eq!(
             new_path.len(),
@@ -1151,7 +954,6 @@ mod tests {
             "I6: new relative_path token must be indexed post-commit"
         );
 
-        // FTS must no longer match the old path token.
         let old_path = repo.search("combined_old_ctx", 50).expect("old path");
         assert!(
             old_path.is_empty(),
@@ -1192,21 +994,17 @@ mod tests {
     }
 
     /// T43 (#1): soft-deleting a tag must remove its tokens from FTS.
-    /// Bug in V007: no trigger on `tags.deleted_at`; aggregation queries
-    /// filter `ft.deleted_at IS NULL` but never `t.deleted_at IS NULL`,
-    /// so tokens of a soft-deleted tag remain indexed forever.
     #[test]
     #[allow(non_snake_case)]
     fn test_T43_tag_soft_delete_removes_tokens_from_fts() {
         let hash_owned = hash_n(43);
         let hash_s = hash_owned.as_str();
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, hash_s, VOL, "cabin_43.jpg");
             attach_tag_raw(&conn, hash_s, "vacation_43");
         }
-        // Pre-condition: tag indexed.
         assert_eq!(
             search_count(&repo, "vacation_43"),
             1,
@@ -1214,18 +1012,16 @@ mod tests {
         );
 
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             soft_delete_tag_raw(&conn, "vacation_43");
         }
 
-        // V007 bug: token still matches after soft-delete.
         assert_eq!(
             search_count(&repo, "vacation_43"),
             0,
             "#1: soft-deleted tag token must NOT match (V007 bug: no tag-soft-delete trigger)"
         );
 
-        // rebuild() must also drop the leaked token (aggregation filter fix).
         repo.rebuild().expect("rebuild");
         assert_eq!(
             search_count(&repo, "vacation_43"),
@@ -1237,10 +1033,6 @@ mod tests {
     /// T44 (#2): `search_after_location_hash_change` must NOT overwrite an
     /// existing representative's indexed path with NEW.* when NEW is not
     /// the first-seen active location for its target hash.
-    ///
-    /// Bug in V007 trigger 2a (lines 186-200): the UPDATE unconditionally sets
-    /// `filename = NEW.relative_path`, violating the "`first_seen` ASC, id ASC
-    /// representative" rule codex found at lines 94-97 of V007.
     #[test]
     #[allow(non_snake_case)]
     fn test_T44_hash_change_preserves_representative_path() {
@@ -1248,25 +1040,20 @@ mod tests {
         let hash_b = hash_n(45);
         let a_s = hash_a.as_str();
         let b_s = hash_b.as_str();
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
-            // HASH_A's representative location: earlier_44.jpg (first_seen=TS).
+            let conn = seed_conn(&db);
             insert_file(&conn, a_s, VOL, "earlier_44.jpg");
-            // HASH_B's only location: later_44.jpg (first_seen=TS+1 via second row).
             insert_file(&conn, b_s, VOL, "later_44.jpg");
         }
-        // Pre-condition: searching "earlier_44" hits HASH_A's doc.
         assert_eq!(
             search_count(&repo, "earlier_44"),
             1,
             "pre: representative path for HASH_A must match"
         );
 
-        // Change later_44.jpg's hash from HASH_B to HASH_A (file content changed
-        // at that path to match HASH_A). Trigger 2a fires for the hash change.
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             conn.execute(
                 "UPDATE file_locations SET blake3_hash = ?1
                  WHERE blake3_hash = ?2 AND relative_path = 'later_44.jpg'",
@@ -1275,8 +1062,6 @@ mod tests {
             .expect("hash change");
         }
 
-        // V007 bug: trigger 2a's UPDATE overwrote search_content(HASH_A) with
-        // later_44.jpg, clobbering the representative path earlier_44.jpg.
         assert_eq!(
             search_count(&repo, "earlier_44"),
             1,
@@ -1286,9 +1071,6 @@ mod tests {
 
     /// T45a (#3a): combined UPDATE of `blake3_hash` + `deleted_at` must NOT seed
     /// a `search_content` row for the NEW (tombstoned) hash.
-    ///
-    /// Bug in V007 trigger 2a: no `NEW.deleted_at IS NULL` guard — fires even
-    /// when the updated row is simultaneously tombstoned.
     #[test]
     #[allow(non_snake_case)]
     fn test_T45a_soft_delete_with_hash_change_skips_fts_insert() {
@@ -1296,9 +1078,9 @@ mod tests {
         let hash_new = hash_n(47);
         let old_s = hash_old.as_str();
         let new_s = hash_new.as_str();
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, old_s, VOL, "combined_45.jpg");
             conn.execute(
                 "INSERT OR IGNORE INTO files
@@ -1309,9 +1091,8 @@ mod tests {
             .expect("insert new files row");
         }
 
-        // Combined: blake3_hash change + deleted_at set in one UPDATE.
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             conn.execute(
                 "UPDATE file_locations SET blake3_hash = ?1, deleted_at = ?2
                  WHERE blake3_hash = ?3 AND relative_path = 'combined_45.jpg'",
@@ -1320,10 +1101,11 @@ mod tests {
             .expect("hash change + soft-delete");
         }
 
-        // Verify no search_content row exists for hash_new (tombstoned
-        // simultaneously — trigger 2a must not insert).
+        // Avoid unused variable warning — the repo must stay alive to keep the writer sender alive.
+        let _ = &repo;
+
         let sc_count_new: i64 = {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             conn.query_row(
                 "SELECT COUNT(*) FROM search_content WHERE blake3_hash = ?1",
                 rusqlite::params![new_s],
@@ -1339,27 +1121,20 @@ mod tests {
 
     /// T45b (#3b): restoring a soft-deleted sole-location row must recreate
     /// the FTS doc.
-    ///
-    /// Bug in V007: trigger 2c handles soft-delete (`OLD.deleted_at IS NULL
-    /// AND NEW.deleted_at IS NOT NULL`) but there is no inverse trigger for
-    /// restore. After restore the row's representative-selection value is
-    /// back in play but `search_content` is still empty.
     #[test]
     #[allow(non_snake_case)]
     fn test_T45b_location_restore_recreates_fts_doc() {
         let hash = hash_n(48);
         let hash_s = hash.as_str();
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, hash_s, VOL, "restore_45_token.jpg");
         }
-        // Pre: indexed.
         assert_eq!(search_count(&repo, "restore_45_token"), 1, "pre: indexed");
 
-        // Soft-delete the only location.
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             soft_delete_location(&conn, hash_s, "restore_45_token.jpg");
         }
         assert_eq!(
@@ -1368,13 +1143,11 @@ mod tests {
             "after soft-delete: retired"
         );
 
-        // Restore by clearing deleted_at.
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             restore_location(&conn, hash_s, "restore_45_token.jpg");
         }
 
-        // V007 bug: no restore trigger → FTS doc never recreated.
         assert_eq!(
             search_count(&repo, "restore_45_token"),
             1,
@@ -1384,19 +1157,14 @@ mod tests {
 
     /// T46 (#4): soft-deleting a `file_metadata` row must clear its tokens
     /// from FTS.
-    ///
-    /// Bug in V007 trigger 3b (lines 269-276): blindly copies `NEW.mime_type`
-    /// etc. with no `deleted_at` filter, and there is no dedicated soft-delete
-    /// trigger — so MIME/camera/capture tokens of a tombstoned metadata row
-    /// stay indexed.
     #[test]
     #[allow(non_snake_case)]
     fn test_T46_metadata_soft_delete_clears_tokens() {
         let hash = hash_n(49);
         let hash_s = hash.as_str();
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, hash_s, VOL, "meta_soft_46.jpg");
             insert_metadata(&conn, hash_s, "image/jpeg", "CanonGone46", "");
         }
@@ -1407,11 +1175,10 @@ mod tests {
         );
 
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             soft_delete_metadata(&conn, hash_s);
         }
 
-        // V007 bug: tokens remain after metadata soft-delete.
         assert_eq!(
             search_count(&repo, "CanonGone46"),
             0,
@@ -1420,23 +1187,16 @@ mod tests {
     }
 
     /// T47 (reviewer #2): `search_after_metadata_insert` must not seed FTS
-    /// tokens when the metadata row is already tombstoned (e.g. CRDT merge
-    /// of a row a peer already deleted).
-    ///
-    /// V007 bug: trigger at V007:252-266 has no `NEW.deleted_at IS NULL`
-    /// guard; blindly copies `NEW.mime_type` / `camera_model` / `captured_at`
-    /// into `search_content` even when NEW arrives soft-deleted.
+    /// tokens when the metadata row is already tombstoned.
     #[test]
     #[allow(non_snake_case)]
     fn test_T47_tombstoned_metadata_insert_skipped() {
         let hash = hash_n(50);
         let hash_s = hash.as_str();
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file(&conn, hash_s, VOL, "ghost_47.jpg");
-            // Directly INSERT metadata with deleted_at already set — simulates
-            // a CRDT merge from a peer that already soft-deleted the row.
             conn.execute(
                 "INSERT INTO file_metadata
                      (blake3_hash, mime_type, camera_model, captured_at,
@@ -1447,7 +1207,6 @@ mod tests {
             .expect("insert tombstoned metadata");
         }
 
-        // V007 bug: tokens indexed even though metadata arrived tombstoned.
         assert_eq!(
             search_count(&repo, "GhostCam47"),
             0,
@@ -1458,50 +1217,35 @@ mod tests {
     /// T48 (reviewer #3): `search_after_file_locations_insert` must aggregate
     /// tags + metadata with `deleted_at IS NULL` filters on BOTH the link
     /// table AND the joined entity.
-    ///
-    /// V007 bug: trigger at V007:132-151 filters `ft.deleted_at IS NULL` but
-    /// not `t.deleted_at IS NULL`, and LEFT JOINs `file_metadata` without
-    /// `m.deleted_at IS NULL`. A new location inserted after a
-    /// `search_content` row retirement re-seeds the doc with tokens from
-    /// tombstoned tags/metadata.
     #[test]
     #[allow(non_snake_case)]
     fn test_T48_fresh_location_seed_excludes_soft_deleted_tag_and_metadata() {
         let hash = hash_n(51);
         let hash_s = hash.as_str();
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         {
-            let conn = repo.conn();
-            // Seed: one location + attached tag + metadata — all live.
+            let conn = seed_conn(&db);
             insert_file(&conn, hash_s, VOL, "seed_48.jpg");
             attach_tag_raw(&conn, hash_s, "ghostag_48");
             insert_metadata(&conn, hash_s, "image/jpeg", "GhostCam48", "");
 
-            // Soft-delete the tag AND the metadata (tombstones only, not
-            // cascaded — file_tags rows remain with their original deleted_at).
             soft_delete_tag_raw(&conn, "ghostag_48");
             soft_delete_metadata(&conn, hash_s);
 
-            // Retire the search_content row by soft-deleting the sole location.
             soft_delete_location(&conn, hash_s, "seed_48.jpg");
         }
 
-        // Confirm FTS retired.
         assert_eq!(
             search_count(&repo, "ghostag_48"),
             0,
             "pre: tag token must be absent after soft-delete + retire"
         );
 
-        // Now insert a fresh location for the same hash on VOL2 —
-        // fires search_after_file_locations_insert which re-seeds
-        // search_content(hash) from the aggregations.
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             insert_file_at_volume(&conn, hash_s, "reseed_48.jpg", VOL2);
         }
 
-        // V007 bug: seed uses t/m-unfiltered JOINs, resurrecting tombstoned tokens.
         assert_eq!(
             search_count(&repo, "ghostag_48"),
             0,
@@ -1517,12 +1261,6 @@ mod tests {
     // ── Task 5: proptest — FTS5 invariant across tag churn ──────────────────
 
     /// Soft-delete a `file_tags` row by setting `deleted_at` (tag detach).
-    ///
-    /// WHY raw SQL: proptest body has only a single `Connection` from the
-    /// `SqliteSearchRepository`'s legacy mutex; using `SqliteTagRepository` would
-    /// require a second open connection and a `TempDir` with WAL on, which
-    /// adds noise without adding coverage. The trigger fires on the SQL UPDATE
-    /// regardless of which layer issues it.
     fn detach_tag_raw(conn: &Connection, hash: &str, tag_name: &str) {
         conn.execute(
             "UPDATE file_tags SET deleted_at = ?1, updated_at = ?1, device_id = ?2
@@ -1535,24 +1273,19 @@ mod tests {
     }
 
     /// Trigger 5: renaming a tag must update every `search_content` row that
-    /// references it. After `UPDATE tags SET name = 'holiday'` for the tag
-    /// previously named "vacation":
-    /// - search("vacation") → 0
-    /// - search("holiday")  → 3 (all files that had the tag attached)
+    /// references it.
     #[test]
     fn test_tag_name_rename_propagates() {
-        let (_td, repo) = test_db();
+        let (_td, db, repo, _writer) = test_db();
         let hashes: Vec<String> = (30u8..33u8).map(hash_n).collect();
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             for (i, h) in hashes.iter().enumerate() {
                 insert_file(&conn, h, VOL, &format!("trnp_{i}.jpg"));
-                // Attach tag "vacation" to all three files.
                 attach_tag_raw(&conn, h, "vacation");
             }
         }
 
-        // Pre-condition: all 3 files discoverable under "vacation".
         let pre = repo.search("vacation", 50).expect("pre-vacation");
         assert_eq!(
             pre.len(),
@@ -1560,9 +1293,8 @@ mod tests {
             "pre-condition: all 3 files must be indexed under 'vacation'"
         );
 
-        // Rename the tag — trigger 5 must update all three search_content rows.
         {
-            let conn = repo.conn();
+            let conn = seed_conn(&db);
             conn.execute(
                 "UPDATE tags SET name = 'holiday' WHERE name = 'vacation'",
                 [],
@@ -1570,7 +1302,6 @@ mod tests {
             .expect("rename tag");
         }
 
-        // Old name must yield zero results.
         let old_hits = repo.search("vacation", 50).expect("vacation after rename");
         assert_eq!(
             old_hits.len(),
@@ -1578,7 +1309,6 @@ mod tests {
             "trigger 5: 'vacation' must return zero after tag rename"
         );
 
-        // New name must match all three files.
         let new_hits = repo.search("holiday", 50).expect("holiday");
         assert_eq!(
             new_hits.len(),
@@ -1596,10 +1326,7 @@ mod tests {
         Detach(usize, usize),
     }
 
-    /// Small universe: 3 files × 3 tags — large enough to generate
-    /// interesting interactions, small enough that the invariant check
-    /// (O(files × tags) FTS queries) completes inside the default proptest
-    /// timeout.
+    /// Small universe: 3 files × 3 tags.
     const PROP_FILES: &[&str] = &[
         "7100000000000000000000000000000000000000000000000000000000000000",
         "7200000000000000000000000000000000000000000000000000000000000000",
@@ -1609,13 +1336,22 @@ mod tests {
     const PROP_VOL: &str = "00000000-0000-0000-0000-000000000099";
 
     proptest::proptest! {
+        // WHY cases=64 (down from the 256 default): post-Batch-C each proptest
+        // case creates a writer-actor thread + `r2d2` read pool + seed
+        // connection on a fresh tempdir DB — ~5x the per-case cost of the
+        // pre-Task-7 single-`Mutex<Connection>` fixture (#124). At 256 cases
+        // the cumulative overhead exceeds the 80s terminate-after window on
+        // VM filesystems even though no individual case contends for the
+        // write lock. 64 cases × up to 30 ops = ~1 920 ops per proptest,
+        // still strong combinatorial coverage for FTS trigger invariants.
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 64,
+            ..proptest::test_runner::Config::default()
+        })]
+
         /// **Invariant:** after every Attach / Detach operation, for every
         /// `(file, tag)` pair, `MATCH tag_name` returns the file iff
         /// `file_tags.deleted_at IS NULL` for that pair.
-        ///
-        /// WHY random sequences: fixed-input tests (Task 4) cover specific
-        /// triggers; randomised churn covers interaction effects — e.g.
-        /// double-attach, detach-never-attached, attach-after-detach-after-attach.
         #[test]
         fn fts_consistent_under_tag_churn(
             ops in proptest::collection::vec(
@@ -1633,52 +1369,44 @@ mod tests {
             ),
         ) {
             // Fresh DB per proptest case — each case is independent.
-            let (_td, repo) = test_db();
+            let (_td, db, repo, _writer) = test_db();
 
-            // Seed all three files (no metadata needed; trigger 4a covers
-            // metadata-less files, which T41 already pins as a fixed test).
-            {
-                let conn = repo.conn();
-                for (i, hash) in PROP_FILES.iter().enumerate() {
-                    insert_file(
-                        &conn,
-                        hash,
-                        PROP_VOL,
-                        &format!("prop_file_{i}.jpg"),
-                    );
-                }
+            // WHY single seed_conn hoisted to case scope: each `Connection::open`
+            // on a WAL file does several syscalls (open, SHARED lock, -shm/-wal
+            // handshake, header read). With 30 ops × 256 default cases × 2
+            // proptests = ~15k opens, that cost compounded to >80s on VM
+            // filesystems (#124). Reusing one connection per case keeps all
+            // writes as auto-commit statements — no transaction state crosses
+            // ops, so test semantics are identical to the per-op-scope version.
+            let conn = seed_conn(&db);
+
+            // Seed all three files.
+            for (i, hash) in PROP_FILES.iter().enumerate() {
+                insert_file(
+                    &conn,
+                    hash,
+                    PROP_VOL,
+                    &format!("prop_file_{i}.jpg"),
+                );
             }
 
-            // Shadow state: (file_idx, tag_idx) → currently attached?
             let mut attached: std::collections::HashMap<(usize, usize), bool> =
                 std::collections::HashMap::new();
 
             for op in &ops {
-                {
-                    let conn = repo.conn();
-                    match *op {
-                        TagOp::Attach(f, t) => {
-                            // attach_tag_raw is idempotent (INSERT OR IGNORE +
-                            // existing file_tags rows with deleted_at non-NULL
-                            // are ignored); re-attaching after a detach creates
-                            // a fresh row, so we unconditionally set attached=true.
-                            attach_tag_raw(&conn, PROP_FILES[f], PROP_TAGS[t]);
-                            attached.insert((f, t), true);
-                        }
-                        TagOp::Detach(f, t) => {
-                            // Only detach when the shadow state says the pair is
-                            // active; otherwise the UPDATE is a harmless no-op
-                            // and the shadow stays false.
-                            if *attached.get(&(f, t)).unwrap_or(&false) {
-                                detach_tag_raw(&conn, PROP_FILES[f], PROP_TAGS[t]);
-                                attached.insert((f, t), false);
-                            }
+                match *op {
+                    TagOp::Attach(f, t) => {
+                        attach_tag_raw(&conn, PROP_FILES[f], PROP_TAGS[t]);
+                        attached.insert((f, t), true);
+                    }
+                    TagOp::Detach(f, t) => {
+                        if *attached.get(&(f, t)).unwrap_or(&false) {
+                            detach_tag_raw(&conn, PROP_FILES[f], PROP_TAGS[t]);
+                            attached.insert((f, t), false);
                         }
                     }
-                } // mutex guard dropped before the invariant queries below.
+                }
 
-                // Invariant check: for every (file, tag) pair the FTS result
-                // must agree with the shadow state.
                 for (f_idx, &file_hash) in PROP_FILES.iter().enumerate() {
                     for (t_idx, &tag_name) in PROP_TAGS.iter().enumerate() {
                         let is_attached =
@@ -1706,14 +1434,6 @@ mod tests {
     }
 
     // ── v0.6.4 proptest — ground-truth invariant over full soft-delete op universe ──
-    //
-    // Codex finding #9 observed that the tag-churn proptest above could not
-    // catch #1-#4 because its op universe is narrow and its invariant reads
-    // only `file_tags.deleted_at`. This sibling proptest extends coverage to
-    // EVERY mutable surface that affects search_content + checks an
-    // INDEPENDENT ground-truth (not the `rebuild()` SQL — a different shape
-    // assembled per-field in this module, so a future bug re-entering both
-    // trigger and rebuild paths is still caught here).
 
     #[derive(Debug, Clone)]
     enum SoftOp {
@@ -1728,7 +1448,7 @@ mod tests {
         RestoreLocation(usize),
     }
 
-    /// Restore a soft-deleted tag (mirrors what a CRDT merge or operator fix would do).
+    /// Restore a soft-deleted tag.
     fn restore_tag_raw(conn: &Connection, tag_name: &str) {
         conn.execute(
             "UPDATE tags SET deleted_at = NULL, updated_at = ?1
@@ -1749,8 +1469,7 @@ mod tests {
     }
 
     /// Insert or replace a metadata row for `hash` with a deterministic camera
-    /// token derived from `variant`. Used to exercise metadata-update triggers
-    /// with distinguishable tokens across rounds.
+    /// token derived from `variant`.
     fn set_metadata_variant(conn: &Connection, hash: &str, variant: u8) {
         let cam = format!("cam_{variant}");
         let mime = format!("image/type{variant}");
@@ -1769,8 +1488,7 @@ mod tests {
         .expect("set_metadata_variant");
     }
 
-    /// A single expected `search_content` row computed from joined live state,
-    /// using per-field subqueries independent of `rebuild()`'s SQL shape.
+    /// A single expected `search_content` row computed from joined live state.
     #[derive(Debug, PartialEq, Eq, Hash, Clone)]
     struct GroundTruthRow {
         blake3_hash: String,
@@ -1782,9 +1500,6 @@ mod tests {
     }
 
     /// Compute expected `search_content` from joined live state.
-    /// Per-hash: one row iff an active `file_location` exists. Fields populated
-    /// from first-seen active location (path) + active metadata (mime/camera/
-    /// capture) + `GROUP_CONCAT` of active (`file_tags` × tags) names (tags).
     fn compute_ground_truth(conn: &Connection) -> Vec<GroundTruthRow> {
         let mut stmt = conn
             .prepare(
@@ -1822,8 +1537,6 @@ mod tests {
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .unwrap_or_else(|_| (String::new(), String::new(), String::new()));
-            // GROUP_CONCAT isn't deterministic across SQLite builds; compute
-            // in Rust with sort-by-name for stable comparison.
             let mut tag_names: Vec<String> = {
                 let mut s = conn
                     .prepare(
@@ -1852,8 +1565,7 @@ mod tests {
         out
     }
 
-    /// Read actual `search_content` into the same shape, with `tags`
-    /// tokens sorted so the comparison is order-insensitive.
+    /// Read actual `search_content` into the same shape.
     fn read_search_content(conn: &Connection) -> Vec<GroundTruthRow> {
         let mut stmt = conn
             .prepare(
@@ -1888,14 +1600,20 @@ mod tests {
     const SOFT_VOL: &str = "00000000-0000-0000-0000-0000000000aa";
 
     proptest::proptest! {
+        // See `fts_consistent_under_tag_churn` for the cases-reduction
+        // rationale (#124). This proptest is set to cases=32 (half the other
+        // one) because each op runs `compute_ground_truth` — up to 8
+        // per-hash SELECTs plus a `read_search_content` scan — on top of the
+        // mutation. With 25 ops × 9 queries ≈ 225 DB ops per case, the
+        // per-case cost is ~2x the tag-churn proptest.
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 32,
+            ..proptest::test_runner::Config::default()
+        })]
+
         /// **Invariant:** after EVERY op, search_content rows (incrementally
         /// maintained by triggers) must equal the ground-truth rows computed
         /// directly from joined live state via independent per-field subqueries.
-        ///
-        /// WHY independent ground truth: if a future migration reintroduces a
-        /// shared bug into both `rebuild()` and the triggers, an invariant that
-        /// compares trigger-path ⟷ rebuild-path would pass; per-field subqueries
-        /// in this test are a second source.
         #[test]
         fn fts_matches_ground_truth_under_soft_delete_churn(
             ops in proptest::collection::vec(
@@ -1940,60 +1658,59 @@ mod tests {
                 0..25,
             ),
         ) {
-            let (_td, repo) = test_db();
-            {
-                let conn = repo.conn();
-                for (i, h) in SOFT_FILES.iter().enumerate() {
-                    insert_file(&conn, h, SOFT_VOL, &format!("soft_{i}.jpg"));
-                }
+            let (_td, db, _repo, _writer) = test_db();
+
+            // See `fts_consistent_under_tag_churn` for the rationale — one
+            // seed_conn per case instead of per-op avoids ~15k extra
+            // `Connection::open` calls on the WAL-mode DB file (#124).
+            let conn = seed_conn(&db);
+            for (i, h) in SOFT_FILES.iter().enumerate() {
+                insert_file(&conn, h, SOFT_VOL, &format!("soft_{i}.jpg"));
             }
 
             for op in &ops {
-                {
-                    let conn = repo.conn();
-                    match *op {
-                        SoftOp::AttachTag(f, t) => {
-                            attach_tag_raw(&conn, SOFT_FILES[f], SOFT_TAGS[t]);
-                        }
-                        SoftOp::DetachTag(f, t) => {
-                            detach_tag_raw(&conn, SOFT_FILES[f], SOFT_TAGS[t]);
-                        }
-                        SoftOp::SoftDeleteTag(t) => {
-                            soft_delete_tag_raw(&conn, SOFT_TAGS[t]);
-                        }
-                        SoftOp::RestoreTag(t) => {
-                            restore_tag_raw(&conn, SOFT_TAGS[t]);
-                        }
-                        SoftOp::SetMetadata(f, v) => {
-                            set_metadata_variant(&conn, SOFT_FILES[f], v);
-                        }
-                        SoftOp::SoftDeleteMetadata(f) => {
-                            soft_delete_metadata(&conn, SOFT_FILES[f]);
-                        }
-                        SoftOp::RestoreMetadata(f) => {
-                            restore_metadata_raw(&conn, SOFT_FILES[f]);
-                        }
-                        SoftOp::SoftDeleteLocation(f) => {
-                            soft_delete_location(
-                                &conn,
-                                SOFT_FILES[f],
-                                &format!("soft_{f}.jpg"),
-                            );
-                        }
-                        SoftOp::RestoreLocation(f) => {
-                            restore_location(
-                                &conn,
-                                SOFT_FILES[f],
-                                &format!("soft_{f}.jpg"),
-                            );
-                        }
+                match *op {
+                    SoftOp::AttachTag(f, t) => {
+                        attach_tag_raw(&conn, SOFT_FILES[f], SOFT_TAGS[t]);
+                    }
+                    SoftOp::DetachTag(f, t) => {
+                        detach_tag_raw(&conn, SOFT_FILES[f], SOFT_TAGS[t]);
+                    }
+                    SoftOp::SoftDeleteTag(t) => {
+                        soft_delete_tag_raw(&conn, SOFT_TAGS[t]);
+                    }
+                    SoftOp::RestoreTag(t) => {
+                        restore_tag_raw(&conn, SOFT_TAGS[t]);
+                    }
+                    SoftOp::SetMetadata(f, v) => {
+                        set_metadata_variant(&conn, SOFT_FILES[f], v);
+                    }
+                    SoftOp::SoftDeleteMetadata(f) => {
+                        soft_delete_metadata(&conn, SOFT_FILES[f]);
+                    }
+                    SoftOp::RestoreMetadata(f) => {
+                        restore_metadata_raw(&conn, SOFT_FILES[f]);
+                    }
+                    SoftOp::SoftDeleteLocation(f) => {
+                        soft_delete_location(
+                            &conn,
+                            SOFT_FILES[f],
+                            &format!("soft_{f}.jpg"),
+                        );
+                    }
+                    SoftOp::RestoreLocation(f) => {
+                        restore_location(
+                            &conn,
+                            SOFT_FILES[f],
+                            &format!("soft_{f}.jpg"),
+                        );
                     }
                 }
 
-                let (actual, expected) = {
-                    let conn = repo.conn();
-                    (read_search_content(&conn), compute_ground_truth(&conn))
-                };
+                let (actual, expected) = (
+                    read_search_content(&conn),
+                    compute_ground_truth(&conn),
+                );
                 proptest::prop_assert_eq!(
                     actual,
                     expected,

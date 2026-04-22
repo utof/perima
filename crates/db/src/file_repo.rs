@@ -1,17 +1,14 @@
 //! `FileRepository` adapter — writer-actor + read-pool backed.
 //!
-//! Post-Batch-C Task 5. The struct holds two cheap-to-clone handles:
+//! Post-Batch-C Task 7. The struct holds two cheap-to-clone handles:
 //! a [`flume::Sender<WriteCmd>`] connected to the single writer actor
 //! (spec §3.1) and a [`ReadPool`] of read-only `r2d2_sqlite`
 //! connections (spec §3.4). Writes build a [`FileWriteCmd`] variant with
 //! a `flume::bounded(1)` reply channel and block on the reply. Reads
 //! run SQL directly against a pooled connection.
 //!
-//! No `Mutex<Connection>`. The legacy `::new(conn)` constructor is
-//! deprecated and will be removed in Batch C Task 7 once all callers
-//! are updated to supply `(writer_sender, read_pool)`.
-
-use std::sync::Mutex;
+//! No `Mutex<Connection>`. Every caller now supplies
+//! `(writer_sender, read_pool)` via `SqliteFileRepository::new`.
 
 use flume::Sender;
 use perima_core::{
@@ -19,10 +16,6 @@ use perima_core::{
     LocationStatus, MediaPath, UpsertOutcome, VolumeId,
 };
 use rusqlite::Connection;
-// WHY: OptionalExtension adds `.optional()` to query_row results, converting
-// QueryReturnedNoRows into Ok(None) for our two-statement SELECT-then-upsert
-// pattern (read path).
-use rusqlite::OptionalExtension;
 
 use crate::cmd::{FileWriteCmd, WriteCmd};
 use crate::errors::Error;
@@ -32,46 +25,16 @@ use crate::pool::ReadPool;
 ///
 /// Cheap to [`Clone`]: both fields (`flume::Sender`, `ReadPool`) are
 /// internally refcounted.
-///
-/// The deprecated `Mutex<Connection>`-based shape still compiles for
-/// Task-7 callsites; it will be removed once those are updated.
 #[derive(Clone)]
 pub struct SqliteFileRepository {
-    inner: Inner,
-}
-
-/// Internal state: either the new writer+pool shape (post-Task-5) or
-/// the legacy `Mutex<Connection>` shape (pre-Task-7 callsites).
-///
-/// WHY enum: tasks 5 and 7 are separate commits; this bridge keeps
-/// existing callers compiling while the migration lands incrementally.
-/// Task 7 deletes the `Legacy` arm and the enum itself, leaving only
-/// a plain `writer + reads` pair on the struct.
-#[derive(Clone)]
-enum Inner {
-    /// Post-Batch-C Task 5 shape.
-    WriterPool {
-        writer: Sender<WriteCmd>,
-        reads: ReadPool,
-    },
-    /// Pre-Batch-C Task 5 legacy shape; deprecated — Task 7 removes.
-    #[deprecated(note = "Use SqliteFileRepository::new(writer, reads) (Task 7 cleanup)")]
-    Legacy(std::sync::Arc<Mutex<Connection>>),
+    writer: Sender<WriteCmd>,
+    reads: ReadPool,
 }
 
 impl std::fmt::Debug for SqliteFileRepository {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.inner {
-            Inner::WriterPool { .. } => f
-                .debug_struct("SqliteFileRepository")
-                .field("shape", &"writer+pool")
-                .finish_non_exhaustive(),
-            #[allow(deprecated)]
-            Inner::Legacy(_) => f
-                .debug_struct("SqliteFileRepository")
-                .field("shape", &"legacy(Mutex<Connection>)")
-                .finish_non_exhaustive(),
-        }
+        f.debug_struct("SqliteFileRepository")
+            .finish_non_exhaustive()
     }
 }
 
@@ -83,27 +46,7 @@ impl SqliteFileRepository {
     /// (spec §3.6). The read pool is opened after migrations complete.
     #[must_use]
     pub const fn new(writer: Sender<WriteCmd>, reads: ReadPool) -> Self {
-        Self {
-            inner: Inner::WriterPool { writer, reads },
-        }
-    }
-
-    /// Wrap an existing connection. **Deprecated** — use
-    /// `SqliteFileRepository::new(writer, reads)` instead.
-    ///
-    /// WHY kept: Batch C Task 7 migrates all callsites to the
-    /// `new(writer, reads)` constructor. Until that commit lands the
-    /// legacy callers (CLI, desktop, test helpers outside this module)
-    /// still compile via this constructor. Task 7 deletes it.
-    ///
-    /// The caller must have run migrations before constructing this.
-    #[must_use]
-    #[deprecated(note = "Use SqliteFileRepository::new(writer, reads) (Task 7 cleanup)")]
-    pub fn new_legacy(conn: Connection) -> Self {
-        #[allow(deprecated)]
-        Self {
-            inner: Inner::Legacy(std::sync::Arc::new(Mutex::new(conn))),
-        }
+        Self { writer, reads }
     }
 }
 
@@ -131,33 +74,6 @@ fn limit_to_i64(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
 }
 
-/// Convert a `FileSize` (`u64`) to the `i64` that `SQLite` stores.
-///
-/// WHY: `SQLite` integers are signed 64-bit. A file larger than `i64::MAX`
-/// (~8 EiB) cannot exist on current hardware; we propagate as `Internal`
-/// rather than silently wrapping.
-fn size_to_i64(size: FileSize) -> Result<i64, CoreError> {
-    i64::try_from(size.0)
-        .map_err(|_| CoreError::Internal(format!("file size {} overflows i64", size.0)))
-}
-
-/// Convert a `LocationStatus` to its DB string representation.
-///
-/// WHY: status values are stored as lowercase strings so they are human-readable
-/// in `SQLite` tooling and stable across future Rust refactors.
-const fn status_to_str(status: LocationStatus) -> &'static str {
-    match status {
-        LocationStatus::Active => "active",
-        LocationStatus::Missing => "missing",
-        LocationStatus::Moved => "moved",
-        LocationStatus::Stale => "stale",
-    }
-}
-
-fn now_iso() -> String {
-    chrono::Utc::now().to_rfc3339()
-}
-
 // ---------------------------------------------------------------------------
 // Inherent methods (writer-actor shim variants)
 // ---------------------------------------------------------------------------
@@ -183,44 +99,18 @@ impl SqliteFileRepository {
         real_volume: VolumeId,
         device: DeviceId,
     ) -> Result<u64, CoreError> {
-        match &self.inner {
-            Inner::WriterPool { writer, .. } => {
-                let (reply_tx, reply_rx) = flume::bounded::<Result<u64, CoreError>>(1);
-                writer
-                    .send(WriteCmd::File(FileWriteCmd::MigrateSentinelRow {
-                        path: path.clone(),
-                        real_volume,
-                        device,
-                        reply: reply_tx,
-                    }))
-                    .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
-                reply_rx
-                    .recv()
-                    .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
-            }
-            #[allow(deprecated)]
-            Inner::Legacy(conn) => {
-                let conn = conn
-                    .lock()
-                    .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-                let now = now_iso();
-                let vol_str = real_volume.0.to_string();
-                let dev_str = device.0.to_string();
-                let path_str = path.as_str();
-                let n = conn
-                    .execute(
-                        "UPDATE file_locations
-                         SET volume_id = ?1, updated_at = ?2, device_id = ?3
-                         WHERE volume_id = '00000000-0000-0000-0000-000000000000'
-                           AND relative_path = ?4 AND deleted_at IS NULL",
-                        rusqlite::params![vol_str, now, dev_str, path_str],
-                    )
-                    .map_err(Error::from)?;
-                drop(conn);
-                #[allow(clippy::cast_possible_truncation)]
-                Ok(n as u64)
-            }
-        }
+        let (reply_tx, reply_rx) = flume::bounded::<Result<u64, CoreError>>(1);
+        self.writer
+            .send(WriteCmd::File(FileWriteCmd::MigrateSentinelRow {
+                path: path.clone(),
+                real_volume,
+                device,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
     }
 
     /// Update the status of a non-deleted file location identified by
@@ -238,45 +128,19 @@ impl SqliteFileRepository {
         status: LocationStatus,
         device: DeviceId,
     ) -> Result<u64, CoreError> {
-        match &self.inner {
-            Inner::WriterPool { writer, .. } => {
-                let (reply_tx, reply_rx) = flume::bounded::<Result<u64, CoreError>>(1);
-                writer
-                    .send(WriteCmd::File(FileWriteCmd::UpdateLocationStatus {
-                        volume,
-                        path: path.clone(),
-                        status,
-                        device,
-                        reply: reply_tx,
-                    }))
-                    .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
-                reply_rx
-                    .recv()
-                    .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
-            }
-            #[allow(deprecated)]
-            Inner::Legacy(conn) => {
-                let conn = conn
-                    .lock()
-                    .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-                let vol_str = volume.0.to_string();
-                let path_str = path.as_str();
-                let status_str = status_to_str(status);
-                let dev_str = device.0.to_string();
-                let now = now_iso();
-                let n = conn
-                    .execute(
-                        "UPDATE file_locations
-                         SET status = ?1, updated_at = ?2, device_id = ?3
-                         WHERE volume_id = ?4 AND relative_path = ?5 AND deleted_at IS NULL",
-                        rusqlite::params![status_str, now, dev_str, vol_str, path_str],
-                    )
-                    .map_err(Error::from)?;
-                drop(conn);
-                #[allow(clippy::cast_possible_truncation)]
-                Ok(n as u64)
-            }
-        }
+        let (reply_tx, reply_rx) = flume::bounded::<Result<u64, CoreError>>(1);
+        self.writer
+            .send(WriteCmd::File(FileWriteCmd::UpdateLocationStatus {
+                volume,
+                path: path.clone(),
+                status,
+                device,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
     }
 
     /// Update the relative path of a non-deleted file location and reset its
@@ -301,67 +165,19 @@ impl SqliteFileRepository {
         new_path: &MediaPath,
         device: DeviceId,
     ) -> Result<u64, CoreError> {
-        match &self.inner {
-            Inner::WriterPool { writer, .. } => {
-                let (reply_tx, reply_rx) = flume::bounded::<Result<u64, CoreError>>(1);
-                writer
-                    .send(WriteCmd::File(FileWriteCmd::UpdateLocationPath {
-                        volume,
-                        old_path: old_path.clone(),
-                        new_path: new_path.clone(),
-                        device,
-                        reply: reply_tx,
-                    }))
-                    .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
-                reply_rx
-                    .recv()
-                    .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
-            }
-            #[allow(deprecated)]
-            Inner::Legacy(conn) => {
-                let mut conn = conn
-                    .lock()
-                    .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-                let vol_str = volume.0.to_string();
-                let old_str = old_path.as_str();
-                let new_str = new_path.as_str();
-                let dev_str = device.0.to_string();
-                let now = now_iso();
-                let tx = conn
-                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                    .map_err(Error::from)?;
-                let collision: Option<String> = tx
-                    .query_row(
-                        "SELECT id FROM file_locations
-                         WHERE volume_id = ?1 AND relative_path = ?2 AND deleted_at IS NULL",
-                        rusqlite::params![vol_str, new_str],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(Error::from)?;
-                let n = if collision.is_some() {
-                    tx.execute(
-                        "UPDATE file_locations
-                             SET deleted_at = ?1, updated_at = ?1, device_id = ?2
-                             WHERE volume_id = ?3 AND relative_path = ?4 AND deleted_at IS NULL",
-                        rusqlite::params![now, dev_str, vol_str, old_str],
-                    )
-                    .map_err(Error::from)?
-                } else {
-                    tx.execute(
-                        "UPDATE file_locations
-                         SET relative_path = ?1, status = 'active', updated_at = ?2, device_id = ?3
-                         WHERE volume_id = ?4 AND relative_path = ?5 AND deleted_at IS NULL",
-                        rusqlite::params![new_str, now, dev_str, vol_str, old_str],
-                    )
-                    .map_err(Error::from)?
-                };
-                tx.commit().map_err(Error::from)?;
-                drop(conn);
-                #[allow(clippy::cast_possible_truncation)]
-                Ok(n as u64)
-            }
-        }
+        let (reply_tx, reply_rx) = flume::bounded::<Result<u64, CoreError>>(1);
+        self.writer
+            .send(WriteCmd::File(FileWriteCmd::UpdateLocationPath {
+                volume,
+                old_path: old_path.clone(),
+                new_path: new_path.clone(),
+                device,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
     }
 }
 
@@ -371,72 +187,20 @@ impl SqliteFileRepository {
 
 impl FileRepository for SqliteFileRepository {
     fn upsert_file(&self, file: &HashedFile, device: DeviceId) -> Result<UpsertOutcome, CoreError> {
-        match &self.inner {
-            Inner::WriterPool { writer, .. } => {
-                let (reply_tx, reply_rx) = flume::bounded::<Result<UpsertOutcome, CoreError>>(1);
-                // WHY clone `file`: the command crosses a thread boundary via
-                // `flume::Sender::send`, which requires `'static`. `HashedFile`
-                // is `Clone` (shallow: hash + path + size).
-                writer
-                    .send(WriteCmd::File(FileWriteCmd::UpsertFile {
-                        file: file.clone(),
-                        device,
-                        reply: reply_tx,
-                    }))
-                    .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
-                reply_rx
-                    .recv()
-                    .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
-            }
-            #[allow(deprecated)]
-            Inner::Legacy(conn) => {
-                // WHY: PoisonError can only occur if a thread panicked while holding
-                // the lock. In that case the DB state is unknown; propagate as Internal.
-                let conn = conn
-                    .lock()
-                    .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-                let hash_hex = file.hash.to_hex();
-                let now = now_iso();
-                let dev_str = device.0.to_string();
-                let size_i64 = size_to_i64(file.discovered.size)?;
-                let existing: Option<(i64, String)> = conn
-                    .query_row(
-                        "SELECT file_size, device_id FROM files WHERE blake3_hash = ?1",
-                        [&hash_hex],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()
-                    .map_err(Error::from)?;
-                let outcome = match existing {
-                    None => {
-                        conn.execute(
-                            "INSERT INTO files
-                             (blake3_hash, file_size, first_seen, updated_at, device_id)
-                             VALUES (?1, ?2, ?3, ?3, ?4)",
-                            rusqlite::params![hash_hex, size_i64, now, dev_str],
-                        )
-                        .map_err(Error::from)?;
-                        UpsertOutcome::Inserted
-                    }
-                    Some((existing_size, ref existing_dev))
-                        if existing_size == size_i64 && *existing_dev == dev_str =>
-                    {
-                        UpsertOutcome::Unchanged
-                    }
-                    Some(_) => {
-                        conn.execute(
-                            "UPDATE files SET file_size = ?1, updated_at = ?2, device_id = ?3
-                             WHERE blake3_hash = ?4",
-                            rusqlite::params![size_i64, now, dev_str, hash_hex],
-                        )
-                        .map_err(Error::from)?;
-                        UpsertOutcome::Updated
-                    }
-                };
-                drop(conn);
-                Ok(outcome)
-            }
-        }
+        let (reply_tx, reply_rx) = flume::bounded::<Result<UpsertOutcome, CoreError>>(1);
+        // WHY clone `file`: the command crosses a thread boundary via
+        // `flume::Sender::send`, which requires `'static`. `HashedFile`
+        // is `Clone` (shallow: hash + path + size).
+        self.writer
+            .send(WriteCmd::File(FileWriteCmd::UpsertFile {
+                file: file.clone(),
+                device,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
     }
 
     fn upsert_location(
@@ -446,78 +210,19 @@ impl FileRepository for SqliteFileRepository {
         path: &MediaPath,
         device: DeviceId,
     ) -> Result<UpsertOutcome, CoreError> {
-        match &self.inner {
-            Inner::WriterPool { writer, .. } => {
-                let (reply_tx, reply_rx) = flume::bounded::<Result<UpsertOutcome, CoreError>>(1);
-                writer
-                    .send(WriteCmd::File(FileWriteCmd::UpsertLocation {
-                        hash: *hash,
-                        volume,
-                        path: path.clone(),
-                        device,
-                        reply: reply_tx,
-                    }))
-                    .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
-                reply_rx
-                    .recv()
-                    .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
-            }
-            #[allow(deprecated)]
-            Inner::Legacy(conn) => {
-                let mut conn = conn
-                    .lock()
-                    .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-                let hash_hex = hash.to_hex();
-                let vol_str = volume.0.to_string();
-                let path_str = path.as_str();
-                let dev_str = device.0.to_string();
-                let now = now_iso();
-                let tx = conn
-                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                    .map_err(Error::from)?;
-                let existing: Option<(String, String, String)> = tx
-                    .query_row(
-                        "SELECT id, blake3_hash, device_id FROM file_locations
-                         WHERE volume_id = ?1 AND relative_path = ?2 AND deleted_at IS NULL",
-                        rusqlite::params![vol_str, path_str],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .optional()
-                    .map_err(Error::from)?;
-                let outcome = match existing {
-                    None => {
-                        let id = perima_core::ids::new_id().to_string();
-                        tx.execute(
-                            "INSERT INTO file_locations
-                             (id, blake3_hash, volume_id, relative_path, status,
-                              first_seen, updated_at, device_id)
-                             VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5, ?6)",
-                            rusqlite::params![id, hash_hex, vol_str, path_str, now, dev_str],
-                        )
-                        .map_err(Error::from)?;
-                        UpsertOutcome::Inserted
-                    }
-                    Some((_, ref existing_hash, ref existing_dev))
-                        if *existing_hash == hash_hex && *existing_dev == dev_str =>
-                    {
-                        UpsertOutcome::Unchanged
-                    }
-                    Some((ref row_id, _, _)) => {
-                        tx.execute(
-                            "UPDATE file_locations
-                             SET blake3_hash = ?1, updated_at = ?2, device_id = ?3
-                             WHERE id = ?4",
-                            rusqlite::params![hash_hex, now, dev_str, row_id],
-                        )
-                        .map_err(Error::from)?;
-                        UpsertOutcome::Updated
-                    }
-                };
-                tx.commit().map_err(Error::from)?;
-                drop(conn);
-                Ok(outcome)
-            }
-        }
+        let (reply_tx, reply_rx) = flume::bounded::<Result<UpsertOutcome, CoreError>>(1);
+        self.writer
+            .send(WriteCmd::File(FileWriteCmd::UpsertLocation {
+                hash: *hash,
+                volume,
+                path: path.clone(),
+                device,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
     }
 
     fn list_file_locations(
@@ -530,31 +235,14 @@ impl FileRepository for SqliteFileRepository {
         // (spec §3.5). `PooledConnection` derefs to
         // `rusqlite::Connection`, so the SQL body is lifted verbatim
         // from the pre-Batch-C impl.
-        match &self.inner {
-            Inner::WriterPool { reads, .. } => {
-                let conn = reads.get()?;
-                list_file_locations_sql(&conn, limit, volume)
-            }
-            #[allow(deprecated)]
-            Inner::Legacy(conn) => {
-                // WHY allow(significant_drop_tightening): the Mutex guard
-                // must outlive `stmt` and `rows` because they borrow
-                // through the guard.
-                #[allow(clippy::significant_drop_tightening)]
-                let conn = conn
-                    .lock()
-                    .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-                list_file_locations_sql(&conn, limit, volume)
-            }
-        }
+        let conn = self.reads.get()?;
+        list_file_locations_sql(&conn, limit, volume)
     }
 }
 
 /// Shared SELECT body for `list_file_locations`.
 ///
-/// WHY separate function: both the writer+pool path and the legacy
-/// `Mutex<Connection>` path execute identical SQL; factoring it out
-/// avoids duplication while keeping the `Inner` dispatch clean.
+/// WHY separate function: factored out for clarity and potential reuse.
 fn list_file_locations_sql(
     conn: &Connection,
     limit: usize,

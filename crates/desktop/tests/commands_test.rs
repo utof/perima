@@ -15,7 +15,6 @@ use perima_core::{
 };
 use perima_db::{
     ReadPool, SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository, SqliteWriter,
-    open_and_migrate,
 };
 use perima_desktop::commands::{
     attach_tag_inner, detach_tag_inner, list_files_inner, list_files_with_metadata_inner,
@@ -450,9 +449,20 @@ async fn search_returns_hit_after_scan_and_rebuild() {
         .expect("scan");
 
     let db_path = data_dir.join("perima.db");
-    let search_conn = open_and_migrate(&db_path).expect("open search conn");
-    #[allow(deprecated)]
-    let search_repo = SqliteSearchRepository::new_legacy(search_conn);
+    // WHY writer+pool: SqliteSearchRepository::new_legacy was removed in
+    // Batch C Task 7. Use writer+pool; the writer handle is dropped after
+    // construction since the repo's sender keeps the thread alive.
+    struct NoopBus;
+    impl EventBus for NoopBus {
+        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+    let search_writer = SqliteWriter::start(&db_path, Arc::new(NoopBus) as Arc<dyn EventBus>)
+        .expect("search writer");
+    let search_reads = ReadPool::open(&db_path).expect("search pool");
+    let search_repo = SqliteSearchRepository::new(search_writer.sender(), search_reads);
+    drop(search_writer);
     search_repo.rebuild().expect("rebuild index");
 
     // `alpha.txt` is one of the mk_fixture files; unicode61 splits on

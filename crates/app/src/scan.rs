@@ -590,7 +590,7 @@ mod tests {
     use perima_core::{FileEvent, FileLocationRecord, MediaMetadata};
     use perima_db::{
         ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteVolumeRepository,
-        SqliteWriter, SqliteWriterHandle, open_and_migrate,
+        SqliteWriter, SqliteWriterHandle,
     };
     use perima_fs::WalkdirScanner;
     use perima_hash::Blake3Service;
@@ -683,19 +683,11 @@ mod tests {
         mk_fixture(fixture.path());
 
         let db_path = db_tmp.path().join("perima.db");
-        // WHY mixed opens: post-Batch-C Task 4 Volume + Metadata use
-        // writer+pool; File still takes an owned Connection until
-        // Task 5 migrates it. `SqliteWriter::start` runs migrations
-        // once on the writer's own Connection, so File can open on a
-        // fully-migrated schema without duplicating migration work.
         let writer = SqliteWriter::start(&db_path, Arc::new(NullBus)).unwrap();
         let reads = ReadPool::open(&db_path).unwrap();
-        let file_conn = open_and_migrate(&db_path).unwrap();
 
-        // WHY new_legacy: Task 5 adds the writer+pool constructor; this test
-        // fixture migrates in Task 7 once the production callsites are updated.
-        #[allow(deprecated)]
-        let files: Arc<dyn FileRepository> = Arc::new(SqliteFileRepository::new_legacy(file_conn));
+        let files: Arc<dyn FileRepository> =
+            Arc::new(SqliteFileRepository::new(writer.sender(), reads.clone()));
         let volumes: Arc<dyn VolumeRepository> =
             Arc::new(SqliteVolumeRepository::new(writer.sender(), reads.clone()));
         // Use the real metadata repo for the DB so persistence tests

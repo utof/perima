@@ -25,9 +25,7 @@ use perima_core::{
     CoreError, DeviceId, EventBus, FileEvent, LocationStatus, MetadataExtractor,
     MetadataRepository, SearchRepository, TagRepository, VolumeId,
 };
-use perima_db::{
-    ReadPool, SqliteFileRepository, SqliteVolumeRepository, SqliteWriter, open_and_migrate,
-};
+use perima_db::{ReadPool, SqliteFileRepository, SqliteVolumeRepository, SqliteWriter};
 use perima_fs::{DebouncedWatcher, WalkdirScanner};
 use perima_hash::Blake3Service;
 use perima_media::{
@@ -383,7 +381,8 @@ pub async fn run_scan_inner_with_metadata(
     // production peer (the `#[tauri::command] scan` handler) delegates
     // to `AppContainer.volume` via `state.container`. The writer
     // handle is dropped at end of scope — its `Sender` is held via
-    // `vol_repo` for the duration of this function call.
+    // `vol_repo` + `file_repo` + `sentinel_repo` for the duration of
+    // this function call.
     struct NoopBus;
     impl EventBus for NoopBus {
         fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
@@ -393,12 +392,11 @@ pub async fn run_scan_inner_with_metadata(
     let writer = SqliteWriter::start(&db_path, Arc::new(NoopBus))?;
     let reads = ReadPool::open(&db_path)?;
 
-    let file_conn = open_and_migrate(&db_path)?;
-    let sentinel_conn = open_and_migrate(&db_path)?;
-
-    let file_repo = SqliteFileRepository::new(file_conn);
-    let vol_repo = SqliteVolumeRepository::new(writer.sender(), reads);
-    let sentinel_repo = SqliteFileRepository::new(sentinel_conn);
+    // WHY clone `reads` for each adapter: `ReadPool` is cheap to
+    // [`Clone`] (inner `r2d2::Pool` is `Arc`-backed).
+    let file_repo = SqliteFileRepository::new(writer.sender(), reads.clone());
+    let vol_repo = SqliteVolumeRepository::new(writer.sender(), reads.clone());
+    let sentinel_repo = SqliteFileRepository::new(writer.sender(), reads);
 
     let on_persist = |path: &perima_core::MediaPath, volume: VolumeId, dev: DeviceId| {
         if let Err(e) = sentinel_repo.migrate_sentinel_row(path, volume, dev) {
@@ -502,8 +500,22 @@ pub fn list_files_inner(
     volume_id: Option<VolumeId>,
 ) -> Result<Vec<FileEntry>, perima_core::CoreError> {
     let db_path = data_dir.join("perima.db");
-    let conn = open_and_migrate(&db_path)?;
-    let repo = SqliteFileRepository::new(conn);
+    // WHY local writer+pool: this helper is a test-seam; it does not have
+    // access to the AppContainer / Tauri state. The writer is dropped at
+    // end of scope; the read pool keeps its connection alive until after
+    // the query completes.
+    struct NoopBus;
+    impl EventBus for NoopBus {
+        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+    let writer = SqliteWriter::start(&db_path, Arc::new(NoopBus))?;
+    let reads = ReadPool::open(&db_path)?;
+    let repo = SqliteFileRepository::new(writer.sender(), reads);
+    // WHY explicit drop: close the writer sender before returning so
+    // the writer thread can exit cleanly if no other senders exist.
+    drop(writer);
     let records =
         perima_core::FileRepository::list_file_locations(&repo, limit as usize, volume_id)?;
     Ok(records.into_iter().map(FileEntry::from).collect())

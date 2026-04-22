@@ -636,21 +636,19 @@ mod tests {
     #[test]
     fn list_with_metadata_joins_null() {
         // Arrange: insert a file + location WITHOUT a metadata row.
-        let (td, repo, _writer) = metadata_repo();
+        let (td, repo, writer) = metadata_repo();
         let db_path = td.path().join("test.db");
         let dev = device();
         let vol = VolumeId::new();
         let f = sample_hashed_file(b"joinsnull", "no_meta.txt");
 
-        // WHY new_legacy: Task 5 adds the writer+pool constructor for
-        // SqliteFileRepository. This test fixture uses the legacy constructor
-        // (deprecated, Task 7 migrates it). Seeding via open_and_migrate on
-        // the same DB file works because migrations already ran in
-        // SqliteWriter::start.
+        // WHY reuse the writer handle's sender: `writer.sender()` gives
+        // a cloned `flume::Sender<WriteCmd>` for the same writer thread
+        // that backs `repo`, so file writes are serialised through the
+        // same actor without opening a second writer connection.
         {
-            let conn = open_and_migrate(&db_path).expect("open");
-            #[allow(deprecated)]
-            let file_repo = SqliteFileRepository::new_legacy(conn);
+            let seed_reads = ReadPool::open(&db_path).expect("seed pool");
+            let file_repo = SqliteFileRepository::new(writer.sender(), seed_reads);
             file_repo.upsert_file(&f, dev).expect("upsert file");
             file_repo
                 .upsert_location(&f.hash, vol, &f.discovered.relative_path, dev)
@@ -676,7 +674,7 @@ mod tests {
     #[test]
     fn list_with_metadata_joins_populated() {
         // Arrange: insert file + location AND a metadata row for it.
-        let (td, repo, _writer) = metadata_repo();
+        let (td, repo, writer) = metadata_repo();
         let db_path = td.path().join("test.db");
         let dev = device();
         let vol = VolumeId::new();
@@ -684,9 +682,8 @@ mod tests {
         let meta = sample_metadata(f.hash);
 
         {
-            let conn = open_and_migrate(&db_path).expect("open");
-            #[allow(deprecated)]
-            let file_repo = SqliteFileRepository::new_legacy(conn);
+            let seed_reads = ReadPool::open(&db_path).expect("seed pool");
+            let file_repo = SqliteFileRepository::new(writer.sender(), seed_reads);
             file_repo.upsert_file(&f, dev).expect("upsert file");
             file_repo
                 .upsert_location(&f.hash, vol, &f.discovered.relative_path, dev)

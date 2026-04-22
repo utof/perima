@@ -13,10 +13,8 @@ use std::time::{Duration, Instant};
 
 use perima_app::AppContainer;
 use perima_core::{
-    CoreError, DeviceId, FileLocationRecord, FileRepository, MediaMetadata, MetadataExtractor,
-    MetadataRepository,
+    CoreError, DeviceId, FileLocationRecord, MediaMetadata, MetadataExtractor, MetadataRepository,
 };
-use perima_db::{SqliteFileRepository, open_and_migrate};
 use perima_media::{
     CompositeExtractor, ImageExtractor, MetadataQueue, ThumbnailGenerator, VideoExtractor,
 };
@@ -65,8 +63,6 @@ pub(crate) async fn run(
         .ok_or_else(|| CoreError::InvalidPath(format!("no parent: {}", absolute_path.display())))?;
     let detected = perima_fs::detect_volume(parent)?;
 
-    let db_path = data_dir.join("perima.db");
-
     // WHY delegate to `container.volumes` post-Batch-C Task 2: the
     // writer actor owns the sole writable connection; opening a second
     // one just for `find_or_create` would require a second writer
@@ -75,19 +71,11 @@ pub(crate) async fn run(
         .volumes
         .find_or_create(&detected.identifiers, device)?;
 
-    // WHY new_legacy: Task 5 adds the writer+pool constructor.
-    // This callsite migrates to container.files_repo in Task 7.
-    #[allow(deprecated)]
-    let file_repo = SqliteFileRepository::new_legacy(open_and_migrate(&db_path)?);
-    // WHY metadata via container (post-Batch-C Task 4): the writer actor
-    // owns the sole writable connection. Cloning the `Arc<dyn
-    // MetadataRepository>` from the container shares the same writer
-    // sender + read pool used by every other call site; opening a new
-    // adapter here would either require a second writer (spec §3.1
-    // forbids) or force the callers to thread another `(writer, pool)`
-    // pair through. `MetadataQueue::spawn` expects an
-    // `Arc<dyn MetadataRepository>`, which `container.metadata_repo`
-    // satisfies.
+    // WHY via container.metadata_repo + container.files_repo (post-Batch-C
+    // Task 7): the writer actor owns the sole writable connection. Using
+    // the shared adapters from the container avoids opening a second
+    // writer here. `migrate_sentinel_row` is not needed here (no sentinel
+    // seam in the metadata command).
     let metadata_repo: Arc<dyn MetadataRepository> = Arc::clone(&container.metadata_repo);
 
     // WHY suffix match on the absolute path: `scan` walker stores
@@ -101,7 +89,9 @@ pub(crate) async fn run(
     let absolute_str = absolute_path.to_str().ok_or_else(|| {
         CoreError::InvalidPath(format!("non-UTF8 path: {}", absolute_path.display()))
     })?;
-    let records = file_repo.list_file_locations(usize::MAX, Some(volume_id))?;
+    let records = container
+        .files_repo
+        .list_file_locations(usize::MAX, Some(volume_id))?;
     let Some(record) = find_by_absolute_suffix(&records, absolute_str) else {
         return Err(CoreError::InvalidPath(format!(
             "not indexed: {} (run `perima scan` first)",

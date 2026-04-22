@@ -29,7 +29,7 @@ use perima_core::{
 };
 use perima_db::{
     ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository,
-    SqliteTagRepository, SqliteVolumeRepository, SqliteWriter, open_and_migrate,
+    SqliteTagRepository, SqliteVolumeRepository, SqliteWriter,
 };
 use perima_fs::WalkdirScanner;
 use perima_hash::Blake3Service;
@@ -213,32 +213,15 @@ async fn main() -> ExitCode {
 /// [`AppContainer::new`]. The `watch` dispatcher uses this to inject its
 /// `DbEventHandler` so that filesystem events can mutate location rows via the
 /// shared bus without constructing a second `CompositeEventBus` in the shell.
-///
-/// WHY hybrid state post-Batch-C Task 4: Volume + Tag + Metadata migrated
-/// to writer+pool; File/Search still take an owned `Connection`.
-/// Tasks 5-6 will migrate the remaining two repos; until then
-/// `build_container` runs ONE migration sweep via `SqliteWriter::start`
-/// (which is also the sole production caller of `open_and_migrate`
-/// for the writer itself) and then opens legacy connections for the
-/// not-yet-migrated repos. The `SqliteWriter` handle is intentionally
-/// dropped at the end of `build_container` — the writer thread keeps
-/// running as long as any `flume::Sender<WriteCmd>` lives, which is
-/// held inside the `SqliteVolumeRepository` + `SqliteTagRepository` +
-/// `SqliteMetadataRepository` embedded in `AppContainer`. The thread
-/// reaps at process exit when all senders drop.
 fn build_container(
     db_path: &Path,
     extra_handlers: Vec<Arc<dyn EventBus>>,
 ) -> Result<Arc<AppContainer>, perima_core::CoreError> {
-    // WHY a `NoopBus` passed to the writer in Task 2: the writer's
-    // after-COMMIT emission path is scaffolded but NO command emits
-    // events today — volume register + mount-recording are not on the
-    // `FileEvent` bus surface. Tasks 3-6 introduce commands that DO
-    // emit (`File::Upsert` → `FileEvent::Created` etc.); at that point
-    // we re-plumb the writer bus through `AppContainer::events` once
-    // Batch E's `async-broadcast` replaces `CompositeEventBus` (the
-    // current single-construction-site invariant forbids building a
-    // second composite here). Spec §§3.3 + 4.8 (A4.8 first bullet).
+    // WHY a `NoopBus` passed to the writer: the writer's after-COMMIT
+    // emission path is scaffolded but file-event emission is handled by
+    // the composite bus wired into `AppContainer`. Batch E's
+    // `async-broadcast` will re-plumb this once the single-construction-site
+    // invariant is relaxed. Spec §§3.3 + 4.8 (A4.8 first bullet).
     struct NoopBus;
     impl EventBus for NoopBus {
         fn emit(&self, _: &perima_core::FileEvent) -> Result<(), perima_core::CoreError> {
@@ -250,38 +233,28 @@ fn build_container(
     let writer = SqliteWriter::start(db_path, writer_bus)?;
     let reads = ReadPool::open(db_path)?;
 
-    // WHY new_legacy: Task 5 adds the writer+pool constructor; this
-    // production callsite migrates to `SqliteFileRepository::new(writer.sender(),
-    // reads)` in Task 7. Legacy constructor is deprecated and compiles.
-    #[allow(deprecated)]
+    // WHY clone `reads` for each adapter: `ReadPool` is cheap to
+    // [`Clone`] (inner `r2d2::Pool` is `Arc`-backed).
     let files: Arc<dyn FileRepository> =
-        Arc::new(SqliteFileRepository::new_legacy(open_and_migrate(db_path)?));
-    // WHY clone `reads` for each writer+pool-backed adapter: `ReadPool`
-    // is cheap to [`Clone`] (inner `r2d2::Pool` is `Arc`-backed). File/Search
-    // migrate to writer+pool in Tasks 5-6 respectively; Task 7 wires them up.
+        Arc::new(SqliteFileRepository::new(writer.sender(), reads.clone()));
     let volumes: Arc<dyn VolumeRepository> =
         Arc::new(SqliteVolumeRepository::new(writer.sender(), reads.clone()));
     let tags: Arc<dyn TagRepository> =
         Arc::new(SqliteTagRepository::new(writer.sender(), reads.clone()));
-    let metadata: Arc<dyn MetadataRepository> =
-        Arc::new(SqliteMetadataRepository::new(writer.sender(), reads));
-    // WHY new_legacy: Task 7 migrates this to SqliteSearchRepository::new(writer, reads).
-    #[allow(deprecated)]
-    let search: Arc<dyn SearchRepository> = Arc::new(SqliteSearchRepository::new_legacy(
-        open_and_migrate(db_path)?,
+    let metadata: Arc<dyn MetadataRepository> = Arc::new(SqliteMetadataRepository::new(
+        writer.sender(),
+        reads.clone(),
     ));
+    let search: Arc<dyn SearchRepository> =
+        Arc::new(SqliteSearchRepository::new(writer.sender(), reads));
     let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
     let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());
-    // WHY no explicit `writer` keep-alive: `volumes` + `tags` +
-    // `metadata` above each hold a cloned `flume::Sender<WriteCmd>` via
-    // `writer.sender()`. When `build_container` returns, the local
-    // `writer` handle drops and its `JoinHandle` is lost (the thread
-    // detaches), but the sender clones inside the repos — riding into
-    // the returned container — keep the writer thread running for the
-    // container's lifetime. At CLI process exit, all senders drop and
-    // the thread observes `Disconnected` + returns. Tasks 5-6 will
-    // replace this with a container-owned writer handle that supports
-    // explicit join.
+    // WHY no explicit `writer` keep-alive: every adapter above holds a
+    // cloned `flume::Sender<WriteCmd>` via `writer.sender()`. When
+    // `build_container` returns, the local `writer` handle drops, but the
+    // sender clones inside the repos keep the writer thread running for
+    // the container's lifetime. At CLI process exit, all senders drop and
+    // the thread observes `Disconnected` + returns.
 
     // WHY the thumbnailer is chosen at container-build time: the container
     // is constructed once per command dispatch (via `build_container`),
@@ -322,17 +295,28 @@ fn build_container(
 /// before calling `build_container` so it can be passed as an `extra_handler`.
 /// Extracting it here keeps `dispatch_watch` focused on control-flow and makes
 /// the single-connection justification easy to find.
+///
+/// WHY a fresh writer+pool pair here: `dispatch_watch` builds the
+/// `DbEventHandler` BEFORE calling `build_container`, so the handler's
+/// `SqliteFileRepository` must own its own sender. Both senders ride
+/// into the `CompositeEventBus` via `extra_handlers` and the container
+/// respectively — the writer thread keeps running while any sender lives.
 fn build_watch_db_handler(
     db_path: &Path,
     device_id: perima_core::DeviceId,
 ) -> Result<Arc<dyn EventBus>, perima_core::CoreError> {
-    // WHY a fresh connection: `watch` needs its own `SqliteFileRepository`
-    // to mutate location rows as filesystem events arrive. Under WAL mode
-    // opening an additional connection is cheap and safe.
-    // WHY new_legacy: Task 7 migrates this to writer+pool via container.files_repo.
-    let file_conn = open_and_migrate(db_path)?;
-    #[allow(deprecated)]
-    let file_repo = Arc::new(SqliteFileRepository::new_legacy(file_conn));
+    struct NoopBus;
+    impl EventBus for NoopBus {
+        fn emit(&self, _: &perima_core::FileEvent) -> Result<(), perima_core::CoreError> {
+            Ok(())
+        }
+    }
+    let writer = SqliteWriter::start(db_path, Arc::new(NoopBus) as Arc<dyn EventBus>)?;
+    let reads = ReadPool::open(db_path)?;
+    let file_repo = Arc::new(SqliteFileRepository::new(writer.sender(), reads));
+    // WHY writer handle dropped here: the sender inside `file_repo` keeps
+    // the writer thread alive; the extra handle is not needed for join.
+    drop(writer);
     Ok(crate::cmd::watch::make_db_event_handler(
         file_repo, device_id,
     ))
@@ -385,20 +369,47 @@ async fn dispatch_scan(
     // an impl-specific method on `SqliteFileRepository`. The UseCase
     // accepts an opaque `OnPersist = Arc<dyn Fn + Send + Sync>` hook,
     // and the CLI constructs one here with its own short-lived
-    // `SqliteFileRepository`.
+    // `SqliteFileRepository` backed by a dedicated writer+pool pair.
+    //
+    // WHY a separate writer for the sentinel (not sharing container's
+    // writer): `migrate_sentinel_row` is an inherent method on the
+    // concrete `SqliteFileRepository`, not on the `FileRepository` trait;
+    // calling it requires an `Arc<SqliteFileRepository>`, not
+    // `Arc<dyn FileRepository>`. Constructing a fresh writer+pool pair
+    // here is cheap (WAL mode; migrations already ran) and is the only
+    // path that avoids either widening the port trait or leaking concrete
+    // types through the container.
     let on_persist: cmd::scan::OnPersistFactory = if dry_run {
         None
     } else {
-        let sentinel_conn = match open_and_migrate(&db_path) {
-            Ok(c) => c,
+        struct NoopBus;
+        impl EventBus for NoopBus {
+            fn emit(&self, _: &perima_core::FileEvent) -> Result<(), perima_core::CoreError> {
+                Ok(())
+            }
+        }
+        let sentinel_writer =
+            match SqliteWriter::start(&db_path, Arc::new(NoopBus) as Arc<dyn EventBus>) {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("perima: database (sentinel migration): {e}");
+                    return ExitCode::from(1);
+                }
+            };
+        let sentinel_reads = match ReadPool::open(&db_path) {
+            Ok(p) => p,
             Err(e) => {
-                eprintln!("perima: database (sentinel migration): {e}");
+                eprintln!("perima: database (sentinel pool): {e}");
                 return ExitCode::from(1);
             }
         };
-        // WHY new_legacy: Task 7 migrates sentinel_repo to use the shared writer.
-        #[allow(deprecated)]
-        let sentinel_repo = Arc::new(SqliteFileRepository::new_legacy(sentinel_conn));
+        let sentinel_repo = Arc::new(SqliteFileRepository::new(
+            sentinel_writer.sender(),
+            sentinel_reads,
+        ));
+        // WHY drop the handle: the sender inside sentinel_repo keeps the
+        // thread alive; the handle is not needed for join.
+        drop(sentinel_writer);
         Some(Arc::new(
             move |path: &perima_core::MediaPath,
                   volume: perima_core::VolumeId,

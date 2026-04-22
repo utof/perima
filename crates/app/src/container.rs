@@ -186,6 +186,17 @@ pub struct AppContainer {
     /// site shares one adapter handle via this field. Same pattern /
     /// rationale as `volumes` + `tags` above.
     pub metadata_repo: Arc<dyn MetadataRepository>,
+    /// Direct handle to the file repository port.
+    ///
+    /// WHY exposed (post-Batch-C Task 7): CLI `tag add/rm` and
+    /// `metadata <path>` resolve a filesystem path to a `BlakeHash` by
+    /// calling `FileRepository::list_file_locations`. Those paths operate
+    /// outside the `UseCase` surface. Before Task 7, each callsite opened a
+    /// short-lived `SqliteFileRepository::new_legacy(conn)`; with the
+    /// writer actor owning the sole writable connection every shell site
+    /// must share one adapter handle via this field. Same pattern /
+    /// rationale as `volumes`, `tags`, `metadata_repo` above.
+    pub files_repo: Arc<dyn FileRepository>,
 }
 
 impl std::fmt::Debug for AppContainer {
@@ -261,6 +272,11 @@ impl AppContainer {
         // worker; re-extraction is not exposed by `MetadataUseCase`.
         // Arc::clone is refcount-only.
         let metadata_repo = Arc::clone(&deps.metadata);
+        // WHY same treatment for files_repo: CLI `tag add/rm` +
+        // `metadata <path>` resolve a filesystem path → BlakeHash via
+        // `FileRepository::list_file_locations`. Not exposed by any
+        // UseCase. Arc::clone is refcount-only.
+        let files_repo = Arc::clone(&deps.files);
 
         Arc::new(Self {
             scan,
@@ -272,6 +288,7 @@ impl AppContainer {
             volumes,
             tags,
             metadata_repo,
+            files_repo,
         })
     }
 }
@@ -289,7 +306,6 @@ mod tests {
     use perima_db::{
         ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository,
         SqliteTagRepository, SqliteVolumeRepository, SqliteWriter, SqliteWriterHandle,
-        open_and_migrate,
     };
     use perima_fs::WalkdirScanner;
     use perima_hash::Blake3Service;
@@ -389,29 +405,21 @@ mod tests {
         let db_tmp = tempfile::tempdir().unwrap();
         let db_path = db_tmp.path().join("perima.db");
 
-        // WHY mixed opens: Task 4 hybrid — Volume + Tag + Metadata use
-        // writer+pool; File/Search still take an owned Connection
-        // until Tasks 5-6 migrate them. Migrations run once inside
-        // `SqliteWriter::start`, so later legacy opens skip the
-        // migration sniff.
         let writer = SqliteWriter::start(&db_path, Arc::new(TestNoopBus)).unwrap();
         let reads = ReadPool::open(&db_path).unwrap();
-        let file_conn = open_and_migrate(&db_path).unwrap();
-        let search_conn = open_and_migrate(&db_path).unwrap();
 
-        // WHY new_legacy: Task 7 migrates this to SqliteFileRepository::new(writer, reads).
-        #[allow(deprecated)]
-        let files: Arc<dyn FileRepository> = Arc::new(SqliteFileRepository::new_legacy(file_conn));
+        let files: Arc<dyn FileRepository> =
+            Arc::new(SqliteFileRepository::new(writer.sender(), reads.clone()));
         let volumes: Arc<dyn VolumeRepository> =
             Arc::new(SqliteVolumeRepository::new(writer.sender(), reads.clone()));
         let tags: Arc<dyn TagRepository> =
             Arc::new(SqliteTagRepository::new(writer.sender(), reads.clone()));
-        let metadata: Arc<dyn MetadataRepository> =
-            Arc::new(SqliteMetadataRepository::new(writer.sender(), reads));
-        // WHY new_legacy: Task 7 migrates this to SqliteSearchRepository::new(writer, reads).
-        #[allow(deprecated)]
+        let metadata: Arc<dyn MetadataRepository> = Arc::new(SqliteMetadataRepository::new(
+            writer.sender(),
+            reads.clone(),
+        ));
         let search: Arc<dyn SearchRepository> =
-            Arc::new(SqliteSearchRepository::new_legacy(search_conn));
+            Arc::new(SqliteSearchRepository::new(writer.sender(), reads));
         let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
         let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());
         let thumbnailer: Arc<ThumbnailGenerator> = Arc::new(ThumbnailGenerator::disabled());
