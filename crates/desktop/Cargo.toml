@@ -16,7 +16,7 @@ name = "perima_desktop"
 
 [dependencies]
 perima-app   = { workspace = true }
-perima-core  = { path = "../core" }
+perima-core  = { path = "../core", features = ["specta"] }
 perima-db    = { path = "../db" }
 perima-fs    = { path = "../fs" }
 perima-hash  = { path = "../hash" }
@@ -50,6 +50,13 @@ tokio.workspace    = true
 # the same job but drifts out of sync with the image crate's decoder;
 # regenerating at test time keeps the fixture in lockstep.
 image.workspace    = true
+
+[features]
+default = []
+# WHY: gates the bindings.ts emission so CI can opt in without conflating
+# release-build behaviour with debug_assertions. Consumed by lib.rs::run in
+# Task 7 (replaces the existing #[cfg(debug_assertions)] guard).
+specta-export = []
 
 [lints]
 workspace = true
