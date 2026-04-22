@@ -113,7 +113,7 @@ pub trait EventBus: Send + Sync {
     /// async `EventHandler` tasks spawned by `AppContainer::new`.
     ///
     /// # Errors
-    /// Returns `CoreError` if the publish fails. The production [`Bus`]
+    /// Returns `CoreError` if the publish fails. The production `Bus`
     /// (in `crates/app::bus`) returns `Ok(())` on capacity-Full (logs
     /// a warning instead) and on Closed (shutdown path).
     fn emit(&self, event: &AppEvent) -> Result<(), CoreError>;

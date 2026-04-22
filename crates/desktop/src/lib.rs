@@ -146,7 +146,7 @@ pub fn run() -> Result<(), RunError> {
             // has been invoked.
             struct WatchNoopBus;
             impl EventBus for WatchNoopBus {
-                fn emit(&self, _: &perima_core::FileEvent) -> Result<(), perima_core::CoreError> {
+                fn emit(&self, _: &perima_core::AppEvent) -> Result<(), perima_core::CoreError> {
                     Ok(())
                 }
             }
@@ -229,7 +229,7 @@ fn build_container(
     // relaxed. Spec §§3.3 + 4.8 (A4.8 first bullet).
     struct NoopBus;
     impl EventBus for NoopBus {
-        fn emit(&self, _: &perima_core::FileEvent) -> Result<(), perima_core::CoreError> {
+        fn emit(&self, _: &perima_core::AppEvent) -> Result<(), perima_core::CoreError> {
             Ok(())
         }
     }
