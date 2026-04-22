@@ -1,4 +1,4 @@
-import type { FileWithTags } from "../types";
+import type { FileWithTagsPayload } from "../bindings";
 
 /**
  * Search-related pure functions. No React imports; test directly.
@@ -94,7 +94,7 @@ function stripUnsafe(s: string): string {
  *
  * Unordered; callers sort if display order matters.
  */
-export function computeFacets(files: FileWithTags[]): Record<string, number> {
+export function computeFacets(files: FileWithTagsPayload[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const f of files) {
     for (const t of f.tags) {
@@ -117,10 +117,10 @@ export function computeFacets(files: FileWithTags[]): Record<string, number> {
  * is the INTERSECTION, not one overriding the other.
  */
 export function composeVisible(
-  files: FileWithTags[],
+  files: FileWithTagsPayload[],
   selectedTagId: string | null,
   searchHits: Set<string> | null,
-): FileWithTags[] {
+): FileWithTagsPayload[] {
   return files.filter((f) => {
     if (selectedTagId !== null && !f.tags.some((t) => t.id === selectedTagId)) {
       return false;
@@ -140,11 +140,11 @@ export function composeVisible(
  * non-null), so the fallback only fires on defensive misuse.
  */
 export function sortByRank(
-  files: FileWithTags[],
+  files: FileWithTagsPayload[],
   hitRanks: Map<string, number>,
-): FileWithTags[] {
-  const ranked: Array<{ file: FileWithTags; rank: number }> = [];
-  const unranked: FileWithTags[] = [];
+): FileWithTagsPayload[] {
+  const ranked: Array<{ file: FileWithTagsPayload; rank: number }> = [];
+  const unranked: FileWithTagsPayload[] = [];
   for (const f of files) {
     const r = hitRanks.get(f.hash);
     if (r === undefined) unranked.push(f);

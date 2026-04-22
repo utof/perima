@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import * as api from "../api";
 import { buildFtsQuery } from "../lib/search";
-import type { SearchHit } from "../types";
+import type { SearchHit } from "../bindings";
 
 /** Milliseconds to wait after the user stops typing before firing a search. */
 const DEBOUNCE_MS = 300;

@@ -2,7 +2,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { okAsync } from "neverthrow";
 import ScanButton from "../components/ScanButton";
-import type { ScanResult } from "../types";
+import type { ScanReport } from "../bindings";
 
 // WHY: api module calls invoke internally; mock it at the module level so
 // tests never touch the real Tauri runtime.
@@ -17,7 +17,16 @@ import * as api from "../api";
 const mockOpen = vi.mocked(dialogOpen);
 const mockScan = vi.mocked(api.scan);
 
-const mockResult: ScanResult = { total: 10, new: 3, existing: 7, errors: 0 };
+const mockResult: ScanReport = {
+  files_seen: 10,
+  files_new: 3,
+  files_updated: 7,
+  files_errored: 0,
+  bytes_hashed: 1024,
+  duration_ms: 42,
+  interrupted: false,
+  volume_label: null,
+};
 
 beforeEach(() => {
   vi.clearAllMocks();

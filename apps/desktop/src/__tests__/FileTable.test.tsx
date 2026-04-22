@@ -1,9 +1,9 @@
 import { render, screen } from "@testing-library/react";
 import { describe, it, expect } from "vitest";
 import FileTable from "../components/FileTable";
-import type { FileWithTags } from "../types";
+import type { FileWithTagsPayload } from "../bindings";
 
-const makeEntry = (n: number): FileWithTags => ({
+const makeEntry = (n: number): FileWithTagsPayload => ({
   hash: "a".repeat(62) + String(n).padStart(2, "0"),
   size: 1024 * n,
   volume_id: "00000000-0000-0000-0000-00000000000" + n,
@@ -25,7 +25,7 @@ const makeEntry = (n: number): FileWithTags => ({
 });
 
 describe("FileTable", () => {
-  it("renders a row for each FileWithTags", () => {
+  it("renders a row for each FileWithTagsPayload", () => {
     const files = [makeEntry(1), makeEntry(2), makeEntry(3)];
     render(<FileTable files={files} loading={false} />);
 

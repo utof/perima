@@ -1,20 +1,30 @@
 import { render, screen } from "@testing-library/react";
 import { describe, it, expect } from "vitest";
 import StatusBar from "../components/StatusBar";
-import type { ScanResult } from "../types";
+import type { ScanReport, CoreError } from "../bindings";
 
-const mockResult: ScanResult = { total: 42, new: 5, existing: 37, errors: 0 };
+const mockResult: ScanReport = {
+  files_seen: 42,
+  files_new: 5,
+  files_updated: 37,
+  files_errored: 0,
+  bytes_hashed: 4096,
+  duration_ms: 100,
+  interrupted: false,
+  volume_label: null,
+};
 
 describe("StatusBar", () => {
   it("shows scan summary when scanResult is present", () => {
     render(<StatusBar scanResult={mockResult} error={null} />);
     expect(screen.getByText(/scanned 42 files/i)).toBeInTheDocument();
     expect(screen.getByText(/5 new/i)).toBeInTheDocument();
-    expect(screen.getByText(/37 existing/i)).toBeInTheDocument();
+    expect(screen.getByText(/37 updated/i)).toBeInTheDocument();
   });
 
   it("shows error string when error is present", () => {
-    render(<StatusBar scanResult={null} error="disk read failure" />);
+    const err: CoreError = { kind: "Internal", data: "disk read failure" };
+    render(<StatusBar scanResult={null} error={err} />);
     const errEl = screen.getByText(/disk read failure/i);
     expect(errEl).toBeInTheDocument();
     // WHY: error text must be visually distinct (red) — check for a red class.

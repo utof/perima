@@ -1,14 +1,14 @@
 import { render, screen } from "@testing-library/react";
 import { describe, it, expect } from "vitest";
 import FileGrid from "../components/FileGrid";
-import type { FileWithTags } from "../types";
+import type { FileWithTagsPayload } from "../bindings";
 
 /**
- * Build a {@link FileWithTags} with every non-relevant field zeroed
+ * Build a {@link FileWithTagsPayload} with every non-relevant field zeroed
  * out. Only the caller-supplied overrides (hash + thumbnail state) matter
  * for these assertions.
  */
-function makeFile(overrides: Partial<FileWithTags>): FileWithTags {
+function makeFile(overrides: Partial<FileWithTagsPayload>): FileWithTagsPayload {
   return {
     hash: "0".repeat(64),
     size: 1024,
@@ -34,7 +34,7 @@ function makeFile(overrides: Partial<FileWithTags>): FileWithTags {
 
 describe("FileGrid", () => {
   it("renders an <img> for ready tiles and placeholders for others", () => {
-    const files: FileWithTags[] = [
+    const files: FileWithTagsPayload[] = [
       makeFile({
         hash: "a".repeat(64),
         relative_path: "photos/ready.jpg",

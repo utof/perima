@@ -9,7 +9,7 @@ import StatusBar from "./components/StatusBar";
 import TagSidebar from "./components/TagSidebar";
 import WatcherBanner from "./components/WatcherBanner";
 import { composeVisible, computeFacets, sortByRank } from "./lib/search";
-import type { FileWithTags, ScanResult, SearchHit, Tag } from "./types";
+import type { CoreError, FileWithTagsPayload, ScanReport, SearchHit, Tag } from "./bindings";
 
 /**
  * Which rendering mode the main file list uses.
@@ -29,15 +29,15 @@ type ViewMode = "table" | "grid";
  * consumers grows beyond 2–3 components.
  */
 export default function App() {
-  const [files, setFiles] = useState<FileWithTags[]>([]);
+  const [files, setFiles] = useState<FileWithTagsPayload[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
   // WHY string | null (not Set<string>): spec models multi-select as Set<string>
   // but v0.5.1 ships single-select only. Using null for "All" is simpler and
   // avoids converting Set → serializable state. Upgrade to Set when multi-select lands.
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
-  const [scanResult, setScanResult] = useState<ScanResult | null>(null);
+  const [scanResult, setScanResult] = useState<ScanReport | null>(null);
   const [scanning, setScanning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<CoreError | null>(null);
   const [loading, setLoading] = useState(true);
   // WHY: Watcher failures are non-blocking (the table is still accurate,
   // just not live-updating). Surface them via a dismissible banner rather
@@ -136,7 +136,7 @@ export default function App() {
     setError(null);
   }
 
-  function handleScanComplete(result: ScanResult, path: string) {
+  function handleScanComplete(result: ScanReport, path: string) {
     setScanResult(result);
     setScanning(false);
     // Refresh file list and tags after a successful scan.
@@ -156,7 +156,10 @@ export default function App() {
     // complete.
     void api.startWatch(path).match(
       () => { setWatcherError(null); },
-      (err) => { setWatcherError(`Failed to start watcher: ${err}`); },
+      (err) => {
+        const msg = typeof err.data === "string" ? err.data : JSON.stringify(err.data);
+        setWatcherError(`Failed to start watcher [${err.kind}]: ${msg}`);
+      },
     );
   }
 

@@ -1,6 +1,6 @@
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import * as api from "../api";
-import type { ScanResult } from "../types";
+import type { ScanReport } from "../bindings";
 
 /** Props for {@link ScanButton}. */
 interface ScanButtonProps {
@@ -11,7 +11,7 @@ interface ScanButtonProps {
    * WHY path is passed: the parent needs it to auto-start the filesystem
    * watcher on the folder that was just scanned (phase 3b).
    */
-  onScanComplete: (result: ScanResult, path: string) => void;
+  onScanComplete: (result: ScanReport, path: string) => void;
   /** Called immediately before the scan starts (use to set loading state). */
   onScanStart: () => void;
   /** When true, show the disabled "Scanning..." state. */
@@ -37,7 +37,9 @@ export default function ScanButton({
     onScanStart();
     void api.scan(selected, false).match(
       (result) => { onScanComplete(result, selected); },
-      (err) => { window.alert(`Scan failed: ${err}`); },
+      // WHY err.data: CoreError is a discriminated union { kind, data };
+      // Task 11 will add a proper switch(err.kind) pattern here.
+      (err) => { window.alert(`Scan failed [${err.kind}]: ${typeof err.data === "string" ? err.data : JSON.stringify(err.data)}`); },
     );
   }
 
