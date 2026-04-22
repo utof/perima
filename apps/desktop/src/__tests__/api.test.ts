@@ -59,7 +59,7 @@ describe("parseCoreError", () => {
     });
   });
 
-  it("passes through all 8 known variant kinds", () => {
+  it("passes through all 8 known variant kinds (7 string-data + 1 struct-data Io)", () => {
     const kinds: Array<CoreError["kind"]> = [
       "NotFound",
       "Duplicate",
