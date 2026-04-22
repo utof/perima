@@ -90,7 +90,6 @@ pub enum AppEvent {
 /// `TanStack` Query lands and profiling shows surgical invalidation pays.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
-#[serde(tag = "reason")]
 pub enum InvalidationReason {
     /// Tag attach/detach.
     TagsChanged,

@@ -301,20 +301,14 @@ fn app_event_scan_completed_serializes_with_named_fields() {
 
 #[test]
 fn app_event_index_invalidated_serializes_with_reason() {
-    // WHY: InvalidationReason uses #[serde(tag = "reason")] (unit-variant
-    // tag-only), so the inner object serializes as {"reason": "TagsChanged"}.
-    // AppEvent::IndexInvalidated { reason } has a field named "reason" that
-    // holds the InvalidationReason object; with tag="kind" content="data",
-    // the full shape is:
-    //   {"kind":"IndexInvalidated","data":{"reason":{"reason":"TagsChanged"}}}.
-    // v["data"]["reason"] is the InvalidationReason object; its "reason" key
-    // carries the variant name string.
+    // WHY: InvalidationReason uses default serde enum serialization (no tag
+    // attribute), so unit variants serialize as bare strings ("TagsChanged").
+    // AppEvent::IndexInvalidated { reason } with tag="kind" content="data"
+    // produces: {"kind":"IndexInvalidated","data":{"reason":"TagsChanged"}}.
     let event = AppEvent::IndexInvalidated {
         reason: InvalidationReason::TagsChanged,
     };
     let v: serde_json::Value = serde_json::to_value(&event).expect("serialize");
     assert_eq!(v["kind"], "IndexInvalidated");
-    // The "reason" field on IndexInvalidated serializes the InvalidationReason
-    // enum (which itself has tag="reason"), producing a nested object.
-    assert_eq!(v["data"]["reason"]["reason"], "TagsChanged");
+    assert_eq!(v["data"]["reason"], "TagsChanged");
 }

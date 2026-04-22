@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use perima_core::{
-    CoreError, DeviceId, EventBus, FileEvent, MediaMetadata, MetadataRepository, SearchRepository,
+    AppEvent, CoreError, DeviceId, EventBus, MediaMetadata, MetadataRepository, SearchRepository,
 };
 use perima_db::{
     ReadPool, SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository, SqliteWriter,
@@ -159,7 +159,7 @@ async fn list_files_with_metadata_returns_rows() {
     // coexist).
     struct TestNoopBus;
     impl EventBus for TestNoopBus {
-        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
             Ok(())
         }
     }
@@ -255,7 +255,7 @@ async fn desktop_scan_populates_metadata_and_thumbnails() {
     // coexist).
     struct MetaTestNoopBus;
     impl EventBus for MetaTestNoopBus {
-        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
             Ok(())
         }
     }
@@ -357,7 +357,7 @@ async fn list_files_with_tags_returns_tagged_rows() {
 
     struct TestNoopBus;
     impl EventBus for TestNoopBus {
-        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
             Ok(())
         }
     }
@@ -490,7 +490,7 @@ async fn search_returns_hit_after_scan_and_rebuild() {
     // and lets the writer thread exit.
     struct NoopBus;
     impl EventBus for NoopBus {
-        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
             Ok(())
         }
     }
