@@ -58,14 +58,15 @@ pub type RunError = Box<dyn std::error::Error + Send + Sync>;
 ///
 /// # Errors
 /// Returns a [`RunError`] if config resolution fails, if TypeScript binding
-/// export fails in debug builds, or if the Tauri event loop exits with an
-/// error. No panic paths remain; all previously `.expect()`-ed sites now
-/// propagate via `?`.
+/// export fails when the `specta-export` feature is enabled, or if the Tauri
+/// event loop exits with an error. No panic paths remain; all previously
+/// `.expect()`-ed sites now propagate via `?`.
 pub fn run() -> Result<(), RunError> {
     // WHY: tauri-specta Builder collects #[specta::specta]-annotated commands
-    // and generates TypeScript bindings at build time (debug only). The invoke
-    // handler is then wired into tauri::Builder so the frontend can call typed
-    // `invoke("scan", ...)` etc.
+    // and generates TypeScript bindings when the `specta-export` feature is
+    // enabled (CI only; not release builds). The invoke handler is then wired
+    // into tauri::Builder so the frontend can call typed `invoke("scan", ...)`
+    // etc.
     let specta_builder = Builder::<tauri::Wry>::new().commands(collect_commands![
         commands::scan,
         commands::list_files,
@@ -82,8 +83,10 @@ pub fn run() -> Result<(), RunError> {
         commands::search_rebuild,
     ]);
 
-    // Export TypeScript bindings in debug builds only.
-    #[cfg(debug_assertions)]
+    // Export TypeScript bindings when the `specta-export` feature is
+    // enabled. CI runs with this feature; release builds do NOT (no
+    // surprise filesystem writes into the frontend source tree).
+    #[cfg(feature = "specta-export")]
     specta_builder.export(
         specta_typescript::Typescript::default(),
         "../../apps/desktop/src/bindings.ts",
