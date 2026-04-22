@@ -21,12 +21,11 @@ use tauri_specta::{Builder, collect_commands};
 
 use perima_desktop::commands;
 
-/// Verifies that the tauri-specta builder accepts all 13 IPC commands
-/// and produces a non-empty TypeScript file without panicking or
-/// erroring. This is the baseline: derives compile, exporter succeeds.
-#[test]
-fn tauri_specta_builder_exports_to_string_without_error() {
-    let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
+/// Builds the same 13-command tauri-specta `Builder` that `lib.rs::run`
+/// constructs. Centralised so future handler renames or additions are
+/// caught loudly at compile time in exactly one place.
+fn build_test_builder() -> Builder<tauri::Wry> {
+    Builder::<tauri::Wry>::new().commands(collect_commands![
         commands::scan,
         commands::list_files,
         commands::list_files_with_metadata,
@@ -40,10 +39,23 @@ fn tauri_specta_builder_exports_to_string_without_error() {
         commands::list_files_with_tags,
         commands::search,
         commands::search_rebuild,
-    ]);
+    ])
+}
 
+/// Verifies that the tauri-specta builder accepts all 13 IPC commands
+/// and produces a non-empty TypeScript file containing every core
+/// domain type that crosses the IPC boundary post-Batch-D.
+///
+/// Coverage rationale: `CoreError` (Result error on every handler);
+/// `ScanReport` (scan handler return); `FileLocationRecord` /
+/// `VolumeRecord` / `Tag` / `SearchHit` (handler returns); `FileEvent`
+/// (emitted via `TauriEventEmitter`); `BlakeHash` (transitive field
+/// of `FileLocationRecord`); composite payloads `FileWithMetadataPayload`
+/// + `FileWithTagsPayload` (retained per spec §8 #6).
+#[test]
+fn tauri_specta_builder_exports_full_ipc_type_graph() {
     let tmp = tempfile::NamedTempFile::new().expect("create tempfile for bindings export");
-    builder
+    build_test_builder()
         .export(Typescript::default(), tmp.path())
         .expect("specta TypeScript export to tempfile must not fail");
 
@@ -54,80 +66,31 @@ fn tauri_specta_builder_exports_to_string_without_error() {
         "generated TypeScript bindings must be non-empty"
     );
 
-    // Post-Task-8: the 1:1 wire-mirror types (ScanResult, FileEntry,
-    // VolumeEntry, SearchHitPayload) are deleted; the core domain types
-    // appear directly. Verify the core types that every handler now
-    // uses or returns.
-    assert!(ts.contains("CoreError"), "CoreError missing from bindings");
-    assert!(
-        ts.contains("ScanReport"),
-        "ScanReport missing from bindings"
-    );
-    assert!(
-        ts.contains("FileLocationRecord"),
-        "FileLocationRecord missing from bindings"
-    );
-    assert!(
-        ts.contains("VolumeRecord"),
-        "VolumeRecord missing from bindings"
-    );
-    assert!(ts.contains("Tag"), "Tag missing from bindings");
-    assert!(ts.contains("SearchHit"), "SearchHit missing from bindings");
-    // Composite payloads retained (flat composites with no core analogue).
-    assert!(
-        ts.contains("FileWithMetadataPayload"),
-        "FileWithMetadataPayload missing from bindings"
-    );
-    assert!(
-        ts.contains("FileWithTagsPayload"),
-        "FileWithTagsPayload missing from bindings"
-    );
-}
+    // Core types on the wire: error variant + handler returns + emitted
+    // event payload + transitive fields.
+    for ty in [
+        "CoreError",
+        "ScanReport",
+        "FileLocationRecord",
+        "VolumeRecord",
+        "SearchHit",
+        "FileEvent",
+        "BlakeHash",
+    ] {
+        assert!(ts.contains(ty), "{ty} missing from bindings");
+    }
 
-/// Verifies that the core domain types — `CoreError`, `FileLocationRecord`,
-/// `Tag`, `SearchHit`, `FileEvent`, `BlakeHash` — appear in the generated
-/// TypeScript after Task 8 flips all 13 handlers to `Result<T, CoreError>`
-/// and deletes the 1:1 wire-mirror structs.
-///
-/// WHY `#[ignore]` is removed (Task 8 complete): all 13 handlers now return
-/// `Result<T, CoreError>` and the domain types are reachable from handler
-/// return types. The previous `#[ignore]` was a pre-Task-8 sentinel.
-#[test]
-fn bindings_contain_core_domain_types() {
-    let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
-        commands::scan,
-        commands::list_files,
-        commands::list_files_with_metadata,
-        commands::list_volumes,
-        commands::start_watch,
-        commands::stop_watch,
-        commands::is_watching,
-        commands::list_tags,
-        commands::attach_tag,
-        commands::detach_tag,
-        commands::list_files_with_tags,
-        commands::search,
-        commands::search_rebuild,
-    ]);
-
-    let tmp = tempfile::NamedTempFile::new().expect("create tempfile for bindings export");
-    builder
-        .export(Typescript::default(), tmp.path())
-        .expect("specta TypeScript export to tempfile must not fail");
-
-    let ts = std::fs::read_to_string(tmp.path()).expect("read generated TypeScript from tempfile");
-
-    // All of these appear transitively via CoreError (error variant on every
-    // handler) and the domain-typed return values.
-    assert!(ts.contains("CoreError"), "CoreError missing from bindings");
+    // WHY tightened "Tag" check: bare substring matches `TagOutput`,
+    // `Tagged`, `FileWithTagsPayload` etc. — pin to a top-level TS
+    // declaration boundary so a missing core `Tag` re-export is caught.
     assert!(
-        ts.contains("FileLocationRecord"),
-        "FileLocationRecord missing from bindings"
+        ts.contains("type Tag ") || ts.contains("type Tag\n") || ts.contains("interface Tag "),
+        "Tag missing from bindings (top-level declaration)"
     );
-    // WHY substring "Tag" (not exact): `tauri-specta` rc.24 may mangle or
-    // prefix type names. A substring match is sufficient to confirm the
-    // type is reachable.
-    assert!(ts.contains("Tag"), "Tag missing from bindings");
-    assert!(ts.contains("SearchHit"), "SearchHit missing from bindings");
-    assert!(ts.contains("BlakeHash"), "BlakeHash missing from bindings");
+
+    // Composite payloads retained (deliberate flat composites with no
+    // clean 1:1 core analogue, per spec §8 #6).
+    for ty in ["FileWithMetadataPayload", "FileWithTagsPayload"] {
+        assert!(ts.contains(ty), "{ty} missing from bindings");
+    }
 }

@@ -46,6 +46,25 @@ use tokio_util::sync::CancellationToken;
 use crate::payloads::{FileWithMetadataPayload, FileWithTagsPayload};
 use crate::state::{AppState, WatcherState};
 
+/// Parses a string into a `VolumeId`, wrapping a `Uuid` parse failure
+/// as `CoreError::Internal`.
+///
+/// WHY a typed `CoreError::InvalidId` would be cleaner — that's the
+/// post-Batch-D follow-up tracked in the spec §10 #1 list. `Internal`
+/// is the pragmatic v1 shape.
+fn parse_volume_id(s: &str) -> Result<VolumeId, CoreError> {
+    uuid::Uuid::parse_str(s)
+        .map(VolumeId)
+        .map_err(|e| CoreError::Internal(format!("bad volume UUID: {e}")))
+}
+
+/// Parses a string into a tag `Uuid`, wrapping a parse failure as
+/// `CoreError::Internal`. See [`parse_volume_id`] for the typing
+/// rationale.
+fn parse_tag_id(s: &str) -> Result<uuid::Uuid, CoreError> {
+    uuid::Uuid::parse_str(s).map_err(|e| CoreError::Internal(format!("bad tag UUID: {e}")))
+}
+
 /// Maximum time `scan` waits for the metadata worker to drain after
 /// the walk loop completes.
 ///
@@ -376,13 +395,7 @@ pub async fn list_files(
     volume: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<FileLocationRecord>, CoreError> {
-    let volume_id = volume
-        .map(|v| {
-            uuid::Uuid::parse_str(&v)
-                .map(VolumeId)
-                .map_err(|e| CoreError::Internal(format!("bad volume UUID: {e}")))
-        })
-        .transpose()?;
+    let volume_id = volume.as_deref().map(parse_volume_id).transpose()?;
 
     let out = state
         .container
@@ -460,13 +473,7 @@ pub async fn list_files_with_metadata(
     volume: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<FileWithMetadataPayload>, CoreError> {
-    let volume_id = volume
-        .map(|v| {
-            uuid::Uuid::parse_str(&v)
-                .map(VolumeId)
-                .map_err(|e| CoreError::Internal(format!("bad volume UUID: {e}")))
-        })
-        .transpose()?;
+    let volume_id = volume.as_deref().map(parse_volume_id).transpose()?;
 
     let out = state
         .container
@@ -603,8 +610,10 @@ pub async fn start_watch(
 ) -> Result<(), CoreError> {
     let root = PathBuf::from(&path);
     validate_root(&root)?;
-    let canonical_root = perima_fs::platform_path::canonicalize(&root)
-        .map_err(|e| CoreError::Internal(format!("canonicalize: {e}")))?;
+    // WHY direct ?: From<io::Error> for CoreError lowers to the typed
+    // Io { kind, message } variant, preserving io::ErrorKind for the
+    // frontend pattern-match path (E11).
+    let canonical_root = perima_fs::platform_path::canonicalize(&root)?;
 
     // Resolve or create the volume record for this mount.
     //
@@ -847,8 +856,7 @@ pub async fn detach_tag(
     // `state.tag_repo` handle. A future "Detach by id" variant on the
     // UseCase obsoletes this lookup.
     let parsed_hash = perima_core::BlakeHash::parse_hex(&hash)?;
-    let parsed_id = uuid::Uuid::parse_str(&tag_id)
-        .map_err(|e| CoreError::Internal(format!("bad tag UUID: {e}")))?;
+    let parsed_id = parse_tag_id(&tag_id)?;
 
     let tags = state.tag_repo.list_tags()?;
     let tag_name = tags
@@ -886,8 +894,7 @@ pub fn detach_tag_inner<T: TagRepository + ?Sized>(
     // WHY `Internal` wrap on `Uuid::parse_str`: `CoreError` has no
     // dedicated UUID variant; `Internal` is the pragmatic fallback
     // until a validation-error variant is introduced.
-    let tag_id = uuid::Uuid::parse_str(tag_id_str)
-        .map_err(|e| perima_core::CoreError::Internal(format!("bad tag UUID: {e}")))?;
+    let tag_id = parse_tag_id(tag_id_str)?;
     tag_repo.detach(&hash, tag_id, device)?;
     Ok(())
 }
@@ -908,13 +915,7 @@ pub async fn list_files_with_tags(
     volume: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<FileWithTagsPayload>, CoreError> {
-    let volume_id = volume
-        .map(|v| {
-            uuid::Uuid::parse_str(&v)
-                .map(VolumeId)
-                .map_err(|e| CoreError::Internal(format!("bad volume UUID: {e}")))
-        })
-        .transpose()?;
+    let volume_id = volume.as_deref().map(parse_volume_id).transpose()?;
 
     let out = state
         .container
