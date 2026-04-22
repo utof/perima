@@ -1074,10 +1074,17 @@ mod tests {
             .map(|h| h.join().expect("thread"))
             .collect();
 
-        // One Inserted, one Unchanged (writer serializes them).
+        // Writer serializes: first caller Inserted, second caller sees
+        // the same (hash, device) row and returns Unchanged. If the
+        // second ever returned Updated that'd mean the app-level
+        // uniqueness guard skipped a check — regression we want to catch.
         assert!(
             results.contains(&UpsertOutcome::Inserted),
             "at least one Inserted"
+        );
+        assert!(
+            results.contains(&UpsertOutcome::Unchanged),
+            "at least one Unchanged (second caller must dedup)"
         );
         // Cross-check via list: exactly one active row.
         let rows = repo.list_file_locations(10, Some(vol)).expect("list");

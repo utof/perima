@@ -26,7 +26,7 @@
 //! - The `Unchanged` arm in `UpsertFile` and `UpsertLocation` skips
 //!   every write; no `hlc` is consumed and the prior value is preserved
 //!   (same logical event did not fire).
-//! - `UpsertLocation` collision path (soft-delete source row when
+//! - `UpdateLocationPath` collision path (soft-delete source row when
 //!   destination already exists): binds `file_locations.hlc` on the
 //!   soft-delete UPDATE.
 //! - `volume_mounts` has no `hlc` column per V009 (device-local) — NOT
@@ -250,10 +250,11 @@ fn upsert_file_impl(
 /// from the pre-Batch-C `SqliteFileRepository::upsert_location` impl with
 /// `hlc = ?` bound on the INSERT and UPDATE paths.
 ///
-/// The collision path (active row already exists at `new_path` when
-/// trying to INSERT) soft-deletes the existing row — `hlc` IS bound on
-/// that soft-delete UPDATE, since the soft-delete is a distinct logical
-/// write event.
+/// Three arms: None → INSERT (destination wins at app level), hash+device
+/// match → `Unchanged` (skip write, preserve prior `hlc`), else → UPDATE
+/// the existing row by id. No collision-soft-delete here — that only
+/// fires in [`update_location_path_impl`] when an explicit rename would
+/// introduce a duplicate active (volume, path).
 fn upsert_location_impl(
     conn: &mut Connection,
     hash: &BlakeHash,
