@@ -23,6 +23,11 @@ use crate::errors::CoreError;
 /// impl serializes as a 64-char hex string (not a raw byte array)
 /// so JSON consumers see `"a1b2c3..."` instead of `[161, 178, ...]`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+// WHY specta(type = String): the custom Serialize impl emits a hex string,
+// not a byte array, so specta must be told the TypeScript type is `string`
+// rather than inferring `number[]` from the inner `[u8; 32]`.
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", specta(type = String))]
 pub struct BlakeHash([u8; 32]);
 
 impl Serialize for BlakeHash {
@@ -110,6 +115,7 @@ const fn parse_nibble(b: u8) -> Option<u8> {
 
 /// File size in bytes. Newtype to prevent arithmetic with other u64s.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct FileSize(pub u64);
 
 /// Path relative to a volume root. Forward-slash, no leading slash.
@@ -132,7 +138,11 @@ pub struct FileSize(pub u64);
 /// `MediaPaths` from user-typed strings (rare in production; this
 /// type is typically machine-derived from canonicalized walk output)
 /// accept the byte-exact-match contract.
+// WHY specta(transparent): inner field is a `String`, so the TypeScript
+// type should be `string` rather than `{ "0": string }`.
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", specta(transparent))]
 pub struct MediaPath(String);
 
 impl MediaPath {
@@ -157,7 +167,11 @@ impl MediaPath {
 use std::path::PathBuf;
 
 /// `UUIDv7` volume identifier.
+// WHY specta(transparent): `uuid::Uuid` maps to `string` in specta's
+// built-in type map, so the TS binding should be `string`, not `{ "0": string }`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", specta(transparent))]
 pub struct VolumeId(pub uuid::Uuid);
 
 impl VolumeId {
@@ -176,6 +190,8 @@ impl Default for VolumeId {
 
 /// `UUIDv7` device identifier.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", specta(transparent))]
 pub struct DeviceId(pub uuid::Uuid);
 
 impl DeviceId {
@@ -219,6 +235,7 @@ pub struct HashedFile {
 
 /// Status of a file location row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub enum LocationStatus {
     /// Visible on the expected volume at the expected path.
     Active,
@@ -244,6 +261,7 @@ pub enum UpsertOutcome {
 
 /// Row returned by `FileRepository::list_file_locations`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct FileLocationRecord {
     /// Content hash of the underlying file.
     pub hash: BlakeHash,
@@ -275,7 +293,8 @@ pub struct VolumeIdentifiers {
 }
 
 /// Row returned by `VolumeRepository::list`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct VolumeRecord {
     /// Volume id.
     pub id: VolumeId,
