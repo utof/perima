@@ -263,12 +263,13 @@ fn build_container(
         Arc::new(SqliteVolumeRepository::new(writer.sender(), reads.clone()));
     let tags: Arc<dyn TagRepository> =
         Arc::new(SqliteTagRepository::new(writer.sender(), reads.clone()));
-    // WHY Task 4 line: migrated to writer actor + read pool. File,
-    // Search still use `open_and_migrate` until Tasks 5-6.
     let metadata: Arc<dyn MetadataRepository> =
         Arc::new(SqliteMetadataRepository::new(writer.sender(), reads));
-    let search: Arc<dyn SearchRepository> =
-        Arc::new(SqliteSearchRepository::new(open_and_migrate(db_path)?));
+    // WHY new_legacy: Task 7 migrates this to SqliteSearchRepository::new(writer, reads).
+    #[allow(deprecated)]
+    let search: Arc<dyn SearchRepository> = Arc::new(SqliteSearchRepository::new_legacy(
+        open_and_migrate(db_path)?,
+    ));
     let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
     let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());
     // WHY no explicit `writer` keep-alive: `volumes` + `tags` +

@@ -1,154 +1,290 @@
 //! `SearchRepository` implementation backed by rusqlite FTS5.
+//!
+//! Post-Batch-C Task 6. The struct holds two cheap-to-clone handles:
+//! a [`flume::Sender<WriteCmd>`] connected to the single writer actor
+//! (spec §3.1) and a [`ReadPool`] of read-only `r2d2_sqlite`
+//! connections (spec §3.4). Writes build a [`SearchWriteCmd`] variant
+//! with a `flume::bounded(1)` reply channel and block on the reply.
+//! Reads run SQL directly against a pooled connection.
+//!
+//! No `Mutex<Connection>`. The legacy `::new(conn)` constructor is
+//! deprecated and will be removed in Batch C Task 7 once all callers
+//! are updated to supply `(writer_sender, read_pool)`.
 
-use std::sync::Mutex;
+#[cfg(test)]
+use std::sync::MutexGuard;
+use std::sync::{Arc, Mutex};
 
+use flume::Sender;
 use perima_core::{CoreError, SearchHit, SearchRepository};
 use rusqlite::Connection;
 
+use crate::cmd::{SearchWriteCmd, WriteCmd};
 use crate::errors::Error;
+use crate::pool::ReadPool;
 
-/// Rusqlite-backed full-text search repository.
+/// Writer-actor + read-pool backed full-text search repository.
 ///
-/// WHY `Mutex<Connection>`: same rationale as `SqliteTagRepository` —
-/// `Connection` is `Send` but not `Sync`; wrapping satisfies the
-/// `Send + Sync` bound required by the `SearchRepository` trait without
-/// `unsafe`.
+/// Cheap to [`Clone`]: both fields (`flume::Sender`, `ReadPool`) are
+/// internally refcounted.
+///
+/// The deprecated `Mutex<Connection>`-based shape still compiles for
+/// Task-7 callsites; it will be removed once those are updated.
+#[derive(Clone)]
 pub struct SqliteSearchRepository {
-    conn: Mutex<Connection>,
+    inner: Inner,
+}
+
+/// Internal state: either the new writer+pool shape (post-Task-6) or
+/// the legacy `Mutex<Connection>` shape (pre-Task-7 callsites).
+///
+/// WHY enum: tasks 6 and 7 are separate commits; this bridge keeps
+/// existing callers compiling while the migration lands incrementally.
+/// Task 7 deletes the `Legacy` arm and the enum itself, leaving only
+/// a plain `writer + reads` pair on the struct.
+#[derive(Clone)]
+enum Inner {
+    /// Post-Batch-C Task 6 shape.
+    WriterPool {
+        writer: Sender<WriteCmd>,
+        reads: ReadPool,
+    },
+    /// Pre-Batch-C Task 6 legacy shape; deprecated — Task 7 removes.
+    #[deprecated(note = "Use SqliteSearchRepository::new(writer, reads) (Task 7 cleanup)")]
+    Legacy(Arc<Mutex<Connection>>),
 }
 
 impl std::fmt::Debug for SqliteSearchRepository {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SqliteSearchRepository")
-            .finish_non_exhaustive()
-    }
-}
-
-impl SqliteSearchRepository {
-    /// Wrap an existing connection. Caller must have run migrations
-    /// through V007 before constructing this.
-    pub const fn new(conn: Connection) -> Self {
-        Self {
-            conn: Mutex::new(conn),
+        match &self.inner {
+            Inner::WriterPool { .. } => f
+                .debug_struct("SqliteSearchRepository")
+                .field("shape", &"writer+pool")
+                .finish_non_exhaustive(),
+            #[allow(deprecated)]
+            Inner::Legacy(_) => f
+                .debug_struct("SqliteSearchRepository")
+                .field("shape", &"legacy(Mutex<Connection>)")
+                .finish_non_exhaustive(),
         }
     }
 }
 
-impl SearchRepository for SqliteSearchRepository {
-    #[allow(clippy::significant_drop_tightening)]
-    fn search(&self, query: &str, limit: u32) -> Result<Vec<SearchHit>, CoreError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-
-        // V007: search_content has (rowid, blake3_hash, relative_path, ...),
-        // but SearchHit requires volume_id which lives only on file_locations.
-        // WHY the LEFT JOIN + representative subquery: pick the first-seen
-        // active file_locations row per hash to populate volume_id. The
-        // subquery ordering (first_seen ASC, id ASC) mirrors the trigger
-        // representative-selection rule, so the volume_id returned here
-        // agrees with the path indexed in search_content.
-        let mut stmt = conn
-            .prepare(
-                "SELECT sc.blake3_hash,
-                        COALESCE((
-                            SELECT fl.volume_id FROM file_locations fl
-                            WHERE fl.blake3_hash = sc.blake3_hash
-                              AND fl.deleted_at IS NULL
-                            ORDER BY fl.first_seen ASC, fl.id ASC
-                            LIMIT 1
-                        ), ''),
-                        sc.relative_path,
-                        search_index.rank
-                 FROM search_index
-                 JOIN search_content sc ON sc.rowid = search_index.rowid
-                 WHERE search_index MATCH ?1
-                 ORDER BY search_index.rank
-                 LIMIT ?2",
-            )
-            .map_err(Error::from)?;
-
-        let hits = stmt
-            .query_map(rusqlite::params![query, limit], |row| {
-                Ok(SearchHit {
-                    blake3_hash: row.get(0)?,
-                    volume_id: row.get(1)?,
-                    relative_path: row.get(2)?,
-                    rank: row.get(3)?,
-                })
-            })
-            .map_err(Error::from)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(Error::from)?;
-
-        Ok(hits)
+impl SqliteSearchRepository {
+    /// Construct an adapter from a writer-command sender + a read pool.
+    ///
+    /// WHY no migration run here: migrations happen exactly once inside
+    /// [`crate::SqliteWriter::start`] BEFORE the writer thread spawns
+    /// (spec §3.6). The read pool is opened after migrations complete.
+    #[must_use]
+    pub const fn new(writer: Sender<WriteCmd>, reads: ReadPool) -> Self {
+        Self {
+            inner: Inner::WriterPool { writer, reads },
+        }
     }
 
-    #[allow(clippy::significant_drop_tightening)]
-    fn rebuild(&self) -> Result<(), CoreError> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
+    /// Wrap an existing connection. **Deprecated** — use
+    /// `SqliteSearchRepository::new(writer, reads)` instead.
+    ///
+    /// WHY kept: Batch C Task 7 migrates all callsites to the
+    /// `new(writer, reads)` constructor. Until that commit lands the
+    /// legacy callers (CLI, desktop, test helpers outside this module)
+    /// still compile via this constructor. Task 7 deletes it.
+    ///
+    /// The caller must have run migrations before constructing this.
+    #[must_use]
+    #[deprecated(note = "Use SqliteSearchRepository::new(writer, reads) (Task 7 cleanup)")]
+    pub fn new_legacy(conn: Connection) -> Self {
+        #[allow(deprecated)]
+        Self {
+            inner: Inner::Legacy(Arc::new(Mutex::new(conn))),
+        }
+    }
 
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(Error::from)?;
-
-        // V007 rebuild: wipe search_content, then repopulate from joined
-        // live state. The search_content AFTER-INSERT/DELETE triggers keep
-        // search_index in sync row-by-row — no explicit FTS5 'rebuild'
-        // needed here.
-        //
-        // WHY not 'INSERT INTO search_index(search_index) VALUES('rebuild')':
-        // that primitive is an external-content resync from search_content,
-        // but the DELETE + INSERT path above already drives FTS via triggers.
-        // Calling 'rebuild' would be redundant (and defensive for a case
-        // that doesn't exist here: search_content-out-of-sync-with-index).
-        tx.execute_batch("DELETE FROM search_content;")
-            .map_err(Error::from)?;
-
-        // Populate search_content: one representative location per hash,
-        // joined with metadata + tags. Mirrors V007 migration bulk-insert.
-        // WHY filename = relative_path: SQLite has no built-in REVERSE() for
-        // basename extraction; the unicode61 tokenizer splits on '/' and '.'
-        // so basenames are discoverable via token match on relative_path.
-        tx.execute_batch(
-            "INSERT INTO search_content
-                 (blake3_hash, filename, relative_path, mime_type, camera_model, captured_at, tags)
-             SELECT fl.blake3_hash,
-                    fl.relative_path,
-                    fl.relative_path,
-                    COALESCE(m.mime_type, ''),
-                    COALESCE(m.camera_model, ''),
-                    COALESCE(m.captured_at, ''),
-                    COALESCE((
-                        SELECT GROUP_CONCAT(t.name, ' ')
-                        FROM file_tags ft
-                        JOIN tags t ON t.id = ft.tag_id
-                        WHERE ft.blake3_hash = fl.blake3_hash
-                          AND ft.deleted_at IS NULL
-                          AND t.deleted_at IS NULL
-                    ), '')
-             FROM file_locations fl
-             LEFT JOIN file_metadata m ON m.blake3_hash = fl.blake3_hash
-                                       AND m.deleted_at IS NULL
-             WHERE fl.deleted_at IS NULL
-               AND fl.id = (
-                   SELECT id FROM file_locations
-                   WHERE blake3_hash = fl.blake3_hash AND deleted_at IS NULL
-                   ORDER BY first_seen ASC, id ASC LIMIT 1
-               );",
-        )
-        .map_err(Error::from)?;
-
-        tx.commit().map_err(Error::from)?;
-        Ok(())
+    /// Test-only access to the legacy `Mutex<Connection>`.
+    ///
+    /// WHY `#[cfg(test)]`: the lock is only needed by in-module test
+    /// helpers that seed raw SQL rows (trigger + proptest harnesses).
+    /// Post-Task-7 this disappears along with the `Legacy` arm.
+    ///
+    /// # Panics
+    /// Panics if called on the `WriterPool` variant (not available in
+    /// legacy-free shapes) or if the mutex is poisoned.
+    #[cfg(test)]
+    pub(crate) fn conn(&self) -> MutexGuard<'_, Connection> {
+        match &self.inner {
+            #[allow(deprecated)]
+            Inner::Legacy(arc) => arc.lock().expect("legacy mutex poisoned"),
+            Inner::WriterPool { .. } => {
+                panic!("conn() is only available on the Legacy shape (Task 7 cleanup)")
+            }
+        }
     }
 }
 
+// ---------------------------------------------------------------------------
+// SearchRepository trait impl
+// ---------------------------------------------------------------------------
+
+impl SearchRepository for SqliteSearchRepository {
+    fn search(&self, query: &str, limit: u32) -> Result<Vec<SearchHit>, CoreError> {
+        match &self.inner {
+            Inner::WriterPool { reads, .. } => {
+                let conn = reads.get()?;
+                search_impl(&conn, query, limit)
+            }
+            #[allow(deprecated)]
+            Inner::Legacy(arc) => {
+                let conn = arc
+                    .lock()
+                    .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
+                search_impl(&conn, query, limit)
+            }
+        }
+    }
+
+    fn rebuild(&self) -> Result<(), CoreError> {
+        match &self.inner {
+            Inner::WriterPool { writer, .. } => {
+                let (tx, rx) = flume::bounded::<Result<(), CoreError>>(1);
+                writer
+                    .send(WriteCmd::Search(SearchWriteCmd::Rebuild { reply: tx }))
+                    .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+                rx.recv()
+                    .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
+            }
+            #[allow(deprecated)]
+            Inner::Legacy(arc) => {
+                let mut conn = arc
+                    .lock()
+                    .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
+                rebuild_legacy_impl(&mut conn)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Read-path helpers (pool variant)
+// ---------------------------------------------------------------------------
+
+/// SELECT body for [`SearchRepository::search`], shared between
+/// `WriterPool` and `Legacy` arms.
+///
+/// V007: `search_content` has `(rowid, blake3_hash, relative_path, ...)`
+/// but [`perima_core::SearchHit`] requires `volume_id` which lives only
+/// on `file_locations`. Pick the first-seen active location per hash to
+/// populate `volume_id`. The subquery ordering (`first_seen ASC, id ASC`)
+/// mirrors the trigger representative-selection rule, so the `volume_id`
+/// returned here agrees with the path indexed in `search_content`.
+fn search_impl(conn: &Connection, query: &str, limit: u32) -> Result<Vec<SearchHit>, CoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT sc.blake3_hash,
+                    COALESCE((
+                        SELECT fl.volume_id FROM file_locations fl
+                        WHERE fl.blake3_hash = sc.blake3_hash
+                          AND fl.deleted_at IS NULL
+                        ORDER BY fl.first_seen ASC, fl.id ASC
+                        LIMIT 1
+                    ), ''),
+                    sc.relative_path,
+                    search_index.rank
+             FROM search_index
+             JOIN search_content sc ON sc.rowid = search_index.rowid
+             WHERE search_index MATCH ?1
+             ORDER BY search_index.rank
+             LIMIT ?2",
+        )
+        .map_err(Error::from)?;
+
+    let hits = stmt
+        .query_map(rusqlite::params![query, limit], |row| {
+            Ok(SearchHit {
+                blake3_hash: row.get(0)?,
+                volume_id: row.get(1)?,
+                relative_path: row.get(2)?,
+                rank: row.get(3)?,
+            })
+        })
+        .map_err(Error::from)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Error::from)?;
+
+    Ok(hits)
+}
+
+// ---------------------------------------------------------------------------
+// Write-path helpers (legacy arm only)
+// ---------------------------------------------------------------------------
+
+/// Rebuild implementation for the `Legacy` arm — runs directly on the
+/// `Mutex<Connection>` path without going through the writer actor.
+///
+/// WHY kept: the `Legacy` arm still exists to keep pre-Task-7 callers
+/// compiling (CLI, desktop, app-crate tests). Once Task 7 removes the
+/// `Legacy` arm, this function disappears too.
+///
+/// Semantics are identical to [`crate::writer::search::rebuild_impl`];
+/// they share the same SQL body — no HLC binding, no event emission.
+fn rebuild_legacy_impl(conn: &mut Connection) -> Result<(), CoreError> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(Error::from)?;
+
+    // V007 rebuild: wipe search_content, then repopulate from joined
+    // live state. The search_content AFTER-INSERT/DELETE triggers keep
+    // search_index in sync row-by-row — no explicit FTS5 'rebuild'
+    // needed here.
+    //
+    // WHY not 'INSERT INTO search_index(search_index) VALUES('rebuild')':
+    // that primitive is an external-content resync from search_content,
+    // but the DELETE + INSERT path above already drives FTS via triggers.
+    // Calling 'rebuild' would be redundant (and defensive for a case
+    // that doesn't exist here: search_content-out-of-sync-with-index).
+    tx.execute_batch("DELETE FROM search_content;")
+        .map_err(Error::from)?;
+
+    // Populate search_content: one representative location per hash,
+    // joined with metadata + tags. Mirrors V007 migration bulk-insert.
+    // WHY filename = relative_path: SQLite has no built-in REVERSE() for
+    // basename extraction; the unicode61 tokenizer splits on '/' and '.'
+    // so basenames are discoverable via token match on relative_path.
+    tx.execute_batch(
+        "INSERT INTO search_content
+             (blake3_hash, filename, relative_path, mime_type, camera_model, captured_at, tags)
+         SELECT fl.blake3_hash,
+                fl.relative_path,
+                fl.relative_path,
+                COALESCE(m.mime_type, ''),
+                COALESCE(m.camera_model, ''),
+                COALESCE(m.captured_at, ''),
+                COALESCE((
+                    SELECT GROUP_CONCAT(t.name, ' ')
+                    FROM file_tags ft
+                    JOIN tags t ON t.id = ft.tag_id
+                    WHERE ft.blake3_hash = fl.blake3_hash
+                      AND ft.deleted_at IS NULL
+                      AND t.deleted_at IS NULL
+                ), '')
+         FROM file_locations fl
+         LEFT JOIN file_metadata m ON m.blake3_hash = fl.blake3_hash
+                                   AND m.deleted_at IS NULL
+         WHERE fl.deleted_at IS NULL
+           AND fl.id = (
+               SELECT id FROM file_locations
+               WHERE blake3_hash = fl.blake3_hash AND deleted_at IS NULL
+               ORDER BY first_seen ASC, id ASC LIMIT 1
+           );",
+    )
+    .map_err(Error::from)?;
+
+    tx.commit().map_err(Error::from)?;
+    Ok(())
+}
+
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use std::sync::Arc;
 
@@ -169,10 +305,18 @@ mod tests {
         format!("{:02x}{}", n, "0".repeat(62))
     }
 
+    /// Build a legacy-shaped [`SqliteSearchRepository`] for tests that
+    /// need raw `conn` access (trigger + proptest harnesses).
+    ///
+    /// WHY `new_legacy`: these tests seed SQL rows directly through
+    /// `repo.conn()`, which is only available on the `Legacy` arm.
+    /// Post-Task-7 all of these will be replaced with a writer+pool
+    /// harness; for now `new_legacy` keeps them compiling unchanged.
+    #[allow(deprecated)]
     fn test_db() -> (tempfile::TempDir, SqliteSearchRepository) {
         let td = tempfile::tempdir().expect("tempdir");
         let conn = crate::connection::open_and_migrate(&td.path().join("test.db")).expect("open");
-        (td, SqliteSearchRepository::new(conn))
+        (td, SqliteSearchRepository::new_legacy(conn))
     }
 
     /// Harness for search + tag tests.
@@ -181,6 +325,11 @@ mod tests {
     /// `SqliteTagRepository` holds `(flume::Sender<WriteCmd>, ReadPool)`.
     /// Tests must keep the writer handle alive so the writer thread
     /// outlives the tag repo.
+    ///
+    /// WHY search still uses `new_legacy`: search tests need raw `conn`
+    /// access (trigger harnesses, proptest seeding). Task 7 will migrate
+    /// these to the writer+pool shape.
+    #[allow(deprecated)]
     fn test_db_with_tag_repo() -> (
         tempfile::TempDir,
         SqliteSearchRepository,
@@ -197,8 +346,7 @@ mod tests {
         let td = tempfile::tempdir().expect("tempdir");
         let db = td.path().join("test.db");
 
-        // Writer runs the migration sweep; search still takes an owned
-        // `Connection` (Task 6 will migrate it). WAL mode lets the two
+        // Writer runs the migration sweep. WAL mode lets the two
         // connections coexist.
         let bus: Arc<dyn EventBus> = Arc::new(NoopBus);
         let writer = SqliteWriter::start(&db, bus).expect("writer start");
@@ -207,7 +355,7 @@ mod tests {
 
         (
             td,
-            SqliteSearchRepository::new(search_conn),
+            SqliteSearchRepository::new_legacy(search_conn),
             SqliteTagRepository::new(writer.sender(), reads),
             writer,
         )
@@ -269,7 +417,7 @@ mod tests {
     fn search_finds_by_filename() {
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, HASH_A, VOL, "photos/sunset.jpg");
             insert_metadata(&conn, HASH_A, "image/jpeg", "", "");
         }
@@ -283,7 +431,7 @@ mod tests {
     fn search_finds_by_mime_type() {
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, HASH_A, VOL, "doc.pdf");
             insert_metadata(&conn, HASH_A, "application/pdf", "", "");
         }
@@ -297,7 +445,7 @@ mod tests {
     fn search_finds_by_camera_model() {
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, HASH_A, VOL, "img.jpg");
             insert_metadata(&conn, HASH_A, "image/jpeg", "Canon EOS R5", "");
         }
@@ -310,7 +458,7 @@ mod tests {
     fn search_finds_by_tag() {
         let (_td, repo, tag_repo, _writer) = test_db_with_tag_repo();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, HASH_A, VOL, "beach.jpg");
             insert_metadata(&conn, HASH_A, "image/jpeg", "", "");
         }
@@ -329,7 +477,7 @@ mod tests {
     fn rebuild_is_idempotent() {
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, HASH_A, VOL, "a.jpg");
             insert_metadata(&conn, HASH_A, "image/jpeg", "", "");
         }
@@ -340,7 +488,7 @@ mod tests {
         assert!(!hits.is_empty());
         // Exactly one doc (idempotent — no duplicates from double rebuild).
         let count: i64 = {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             conn.query_row("SELECT COUNT(*) FROM search_content", [], |r| r.get(0))
                 .expect("count")
         };
@@ -351,7 +499,7 @@ mod tests {
     fn trigger_sync_on_metadata_insert() {
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, HASH_A, VOL, "photos/trigger_test.jpg");
             // Inserting metadata fires search_after_metadata_insert trigger.
             insert_metadata(&conn, HASH_A, "image/jpeg", "", "");
@@ -365,7 +513,7 @@ mod tests {
     fn trigger_sync_on_tag_attach() {
         let (_td, repo, tag_repo, _writer) = test_db_with_tag_repo();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, HASH_A, VOL, "img.jpg");
             insert_metadata(&conn, HASH_A, "image/jpeg", "", "");
         }
@@ -383,7 +531,7 @@ mod tests {
     fn search_limit_is_respected() {
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             for i in 0..5u8 {
                 let hash = format!("{:0<64}", format!("{i:x}"));
                 insert_file(&conn, &hash, VOL, &format!("file{i}.jpg"));
@@ -400,7 +548,7 @@ mod tests {
     fn search_no_results_for_unknown_term() {
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, HASH_A, VOL, "alpha.txt");
             insert_metadata(&conn, HASH_A, "text/plain", "", "");
         }
@@ -423,7 +571,7 @@ mod tests {
         const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let (_td, repo, tag_repo, _writer) = test_db_with_tag_repo();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, HASH_A, VOL, "vacation_tagged.jpg");
             insert_metadata(&conn, HASH_A, "image/jpeg", "", "");
             insert_file(&conn, HASH_B, VOL, "vacation_only.jpg");
@@ -457,7 +605,7 @@ mod tests {
     fn filename_without_slash_is_indexed_correctly() {
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             // Root-level file: no '/' in path.
             insert_file(&conn, HASH_A, VOL, "rootfile.jpg");
             insert_metadata(&conn, HASH_A, "image/jpeg", "", "");
@@ -518,13 +666,13 @@ mod tests {
         let HASH = hash_owned.as_str();
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, HASH, VOL, "cam.jpg");
             insert_metadata(&conn, HASH, "image/jpeg", "Canon EOS R5", "");
         }
         // Trigger: UPDATE file_metadata fires search_after_metadata_update.
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             conn.execute(
                 "UPDATE file_metadata SET camera_model = ?1 WHERE blake3_hash = ?2",
                 rusqlite::params!["Nikon Zf", HASH],
@@ -549,7 +697,7 @@ mod tests {
         let HASH = hash_owned.as_str();
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, HASH, VOL, "plain.txt"); // NO metadata row
             attach_tag_raw(&conn, HASH, "beach");
         }
@@ -573,14 +721,14 @@ mod tests {
         let HASH = hash_owned.as_str();
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, HASH, VOL, "oldname_22.jpg");
             insert_metadata(&conn, HASH, "image/jpeg", "", "");
         }
         // Rename: same hash, new path. V006 has no UPDATE trigger on
         // file_locations, so FTS index is not updated.
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             update_path(&conn, HASH, "oldname_22.jpg", "newname_22.jpg");
         }
         let old_hits = repo.search("oldname_22", 50).expect("search old");
@@ -608,14 +756,14 @@ mod tests {
         let HASH_NEW = hash_new_owned.as_str();
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, HASH_OLD, VOL, "cam.jpg");
             insert_metadata(&conn, HASH_OLD, "image/jpeg", "Canon EOS R5", "");
         }
         // Replace hash in-place (file content changed at same path).
         // V006 has no trigger on file_locations.blake3_hash change.
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             conn.execute(
                 "INSERT OR IGNORE INTO files
                      (blake3_hash, file_size, first_seen, updated_at, device_id)
@@ -735,7 +883,7 @@ mod tests {
         let hash = hash_n(10);
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             // Representative (first-seen) location on VOL.
             insert_file(&conn, &hash, VOL, "shared_mlr.jpg");
             // Second location on VOL2, same relative_path.
@@ -746,7 +894,7 @@ mod tests {
         // on NEW being the representative, so the rename should NOT affect
         // search_content; the representative's "shared_mlr" token still matches.
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             update_path_at_volume(&conn, &hash, "shared_mlr.jpg", "renamed_mlr.jpg", VOL2);
         }
         assert_eq!(
@@ -758,7 +906,7 @@ mod tests {
         // Rename the representative (VOL) location. Trigger 2b fires and
         // updates search_content.relative_path + filename.
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             update_path_at_volume(&conn, &hash, "shared_mlr.jpg", "alpha_mlr.jpg", VOL);
         }
         assert_eq!(
@@ -784,7 +932,7 @@ mod tests {
         let hash = hash_n(11);
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             // First (representative) location on VOL / vol1 path.
             insert_file(&conn, &hash, VOL, "vol1/repfile_c1.jpg");
             // Second location on VOL2 / vol2 path — same hash.
@@ -813,7 +961,7 @@ mod tests {
         }
         // Soft-delete the first (representative) location.
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             soft_delete_location(&conn, &hash, "vol1/repfile_c1.jpg");
         }
         // vol1 token must no longer match (representative retired from index).
@@ -844,7 +992,7 @@ mod tests {
         let hash = hash_n(12);
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, &hash, VOL, "solo_retire_lsd.jpg");
             insert_metadata(&conn, &hash, "image/jpeg", "RetireCamera", "");
         }
@@ -854,7 +1002,7 @@ mod tests {
 
         // Soft-delete the only location.
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             soft_delete_location(&conn, &hash, "solo_retire_lsd.jpg");
         }
 
@@ -867,7 +1015,7 @@ mod tests {
 
         // search_content row must be gone.
         let sc_count: i64 = {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             conn.query_row(
                 "SELECT COUNT(*) FROM search_content WHERE blake3_hash = ?1",
                 rusqlite::params![hash],
@@ -891,7 +1039,7 @@ mod tests {
     fn test_rebuild_idempotence_post_v007() {
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             for i in 20u8..23u8 {
                 let h = hash_n(i);
                 insert_file(&conn, &h, VOL, &format!("idempotent_{i}.jpg"));
@@ -900,14 +1048,14 @@ mod tests {
         }
         repo.rebuild().expect("rebuild 1");
         let count_after_first: i64 = {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             conn.query_row("SELECT COUNT(*) FROM search_content", [], |r| r.get(0))
                 .expect("count after first rebuild")
         };
 
         repo.rebuild().expect("rebuild 2");
         let count_after_second: i64 = {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             conn.query_row("SELECT COUNT(*) FROM search_content", [], |r| r.get(0))
                 .expect("count after second rebuild")
         };
@@ -944,7 +1092,7 @@ mod tests {
         let hash = hash_n(13);
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, &hash, VOL, "combined_old_ctx.jpg");
             insert_metadata(&conn, &hash, "image/jpeg", "OldCamera", "");
         }
@@ -955,7 +1103,7 @@ mod tests {
 
         // Execute all three mutations in one transaction.
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             conn.execute_batch("BEGIN;").expect("begin");
             // 1. Rename the location (trigger 2b if it is the representative).
             conn.execute(
@@ -1054,7 +1202,7 @@ mod tests {
         let hash_s = hash_owned.as_str();
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, hash_s, VOL, "cabin_43.jpg");
             attach_tag_raw(&conn, hash_s, "vacation_43");
         }
@@ -1066,7 +1214,7 @@ mod tests {
         );
 
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             soft_delete_tag_raw(&conn, "vacation_43");
         }
 
@@ -1102,7 +1250,7 @@ mod tests {
         let b_s = hash_b.as_str();
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             // HASH_A's representative location: earlier_44.jpg (first_seen=TS).
             insert_file(&conn, a_s, VOL, "earlier_44.jpg");
             // HASH_B's only location: later_44.jpg (first_seen=TS+1 via second row).
@@ -1118,7 +1266,7 @@ mod tests {
         // Change later_44.jpg's hash from HASH_B to HASH_A (file content changed
         // at that path to match HASH_A). Trigger 2a fires for the hash change.
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             conn.execute(
                 "UPDATE file_locations SET blake3_hash = ?1
                  WHERE blake3_hash = ?2 AND relative_path = 'later_44.jpg'",
@@ -1150,7 +1298,7 @@ mod tests {
         let new_s = hash_new.as_str();
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, old_s, VOL, "combined_45.jpg");
             conn.execute(
                 "INSERT OR IGNORE INTO files
@@ -1163,7 +1311,7 @@ mod tests {
 
         // Combined: blake3_hash change + deleted_at set in one UPDATE.
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             conn.execute(
                 "UPDATE file_locations SET blake3_hash = ?1, deleted_at = ?2
                  WHERE blake3_hash = ?3 AND relative_path = 'combined_45.jpg'",
@@ -1175,7 +1323,7 @@ mod tests {
         // Verify no search_content row exists for hash_new (tombstoned
         // simultaneously — trigger 2a must not insert).
         let sc_count_new: i64 = {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             conn.query_row(
                 "SELECT COUNT(*) FROM search_content WHERE blake3_hash = ?1",
                 rusqlite::params![new_s],
@@ -1203,7 +1351,7 @@ mod tests {
         let hash_s = hash.as_str();
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, hash_s, VOL, "restore_45_token.jpg");
         }
         // Pre: indexed.
@@ -1211,7 +1359,7 @@ mod tests {
 
         // Soft-delete the only location.
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             soft_delete_location(&conn, hash_s, "restore_45_token.jpg");
         }
         assert_eq!(
@@ -1222,7 +1370,7 @@ mod tests {
 
         // Restore by clearing deleted_at.
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             restore_location(&conn, hash_s, "restore_45_token.jpg");
         }
 
@@ -1248,7 +1396,7 @@ mod tests {
         let hash_s = hash.as_str();
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, hash_s, VOL, "meta_soft_46.jpg");
             insert_metadata(&conn, hash_s, "image/jpeg", "CanonGone46", "");
         }
@@ -1259,7 +1407,7 @@ mod tests {
         );
 
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             soft_delete_metadata(&conn, hash_s);
         }
 
@@ -1285,7 +1433,7 @@ mod tests {
         let hash_s = hash.as_str();
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file(&conn, hash_s, VOL, "ghost_47.jpg");
             // Directly INSERT metadata with deleted_at already set — simulates
             // a CRDT merge from a peer that already soft-deleted the row.
@@ -1323,7 +1471,7 @@ mod tests {
         let hash_s = hash.as_str();
         let (_td, repo) = test_db();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             // Seed: one location + attached tag + metadata — all live.
             insert_file(&conn, hash_s, VOL, "seed_48.jpg");
             attach_tag_raw(&conn, hash_s, "ghostag_48");
@@ -1349,7 +1497,7 @@ mod tests {
         // fires search_after_file_locations_insert which re-seeds
         // search_content(hash) from the aggregations.
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             insert_file_at_volume(&conn, hash_s, "reseed_48.jpg", VOL2);
         }
 
@@ -1371,7 +1519,7 @@ mod tests {
     /// Soft-delete a `file_tags` row by setting `deleted_at` (tag detach).
     ///
     /// WHY raw SQL: proptest body has only a single `Connection` from the
-    /// `SqliteSearchRepository`'s mutex; using `SqliteTagRepository` would
+    /// `SqliteSearchRepository`'s legacy mutex; using `SqliteTagRepository` would
     /// require a second open connection and a `TempDir` with WAL on, which
     /// adds noise without adding coverage. The trigger fires on the SQL UPDATE
     /// regardless of which layer issues it.
@@ -1396,7 +1544,7 @@ mod tests {
         let (_td, repo) = test_db();
         let hashes: Vec<String> = (30u8..33u8).map(hash_n).collect();
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             for (i, h) in hashes.iter().enumerate() {
                 insert_file(&conn, h, VOL, &format!("trnp_{i}.jpg"));
                 // Attach tag "vacation" to all three files.
@@ -1414,7 +1562,7 @@ mod tests {
 
         // Rename the tag — trigger 5 must update all three search_content rows.
         {
-            let conn = repo.conn.lock().expect("lock");
+            let conn = repo.conn();
             conn.execute(
                 "UPDATE tags SET name = 'holiday' WHERE name = 'vacation'",
                 [],
@@ -1490,7 +1638,7 @@ mod tests {
             // Seed all three files (no metadata needed; trigger 4a covers
             // metadata-less files, which T41 already pins as a fixed test).
             {
-                let conn = repo.conn.lock().expect("lock");
+                let conn = repo.conn();
                 for (i, hash) in PROP_FILES.iter().enumerate() {
                     insert_file(
                         &conn,
@@ -1507,7 +1655,7 @@ mod tests {
 
             for op in &ops {
                 {
-                    let conn = repo.conn.lock().expect("lock");
+                    let conn = repo.conn();
                     match *op {
                         TagOp::Attach(f, t) => {
                             // attach_tag_raw is idempotent (INSERT OR IGNORE +
@@ -1794,7 +1942,7 @@ mod tests {
         ) {
             let (_td, repo) = test_db();
             {
-                let conn = repo.conn.lock().expect("lock seed");
+                let conn = repo.conn();
                 for (i, h) in SOFT_FILES.iter().enumerate() {
                     insert_file(&conn, h, SOFT_VOL, &format!("soft_{i}.jpg"));
                 }
@@ -1802,7 +1950,7 @@ mod tests {
 
             for op in &ops {
                 {
-                    let conn = repo.conn.lock().expect("lock op");
+                    let conn = repo.conn();
                     match *op {
                         SoftOp::AttachTag(f, t) => {
                             attach_tag_raw(&conn, SOFT_FILES[f], SOFT_TAGS[t]);
@@ -1843,7 +1991,7 @@ mod tests {
                 }
 
                 let (actual, expected) = {
-                    let conn = repo.conn.lock().expect("lock invariant");
+                    let conn = repo.conn();
                     (read_search_content(&conn), compute_ground_truth(&conn))
                 };
                 proptest::prop_assert_eq!(

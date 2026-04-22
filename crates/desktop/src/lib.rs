@@ -118,14 +118,13 @@ pub fn run() -> Result<(), RunError> {
             // WHY resolve db_path up-front: used for the writer actor,
             // the read pool, and the legacy search/file opens below.
             //
-            // WHY a third open for search (Task 4 hybrid): post-Batch-C
-            // Task 4 migrates `SqliteMetadataRepository` to writer+pool;
-            // `SqliteSearchRepository` still owns a `Mutex<Connection>`
-            // until Task 6 migrates it. Under WAL mode concurrent
-            // readers are never blocked by writers.
+            // WHY new_legacy for search: Task 7 migrates this to
+            // SqliteSearchRepository::new(writer, reads). Under WAL mode
+            // concurrent readers are never blocked by the writer.
             let db_path = cfg.data_dir.join("perima.db");
             let search_conn = open_and_migrate(&db_path)?;
-            let search_repo = Arc::new(SqliteSearchRepository::new(search_conn));
+            #[allow(deprecated)]
+            let search_repo = Arc::new(SqliteSearchRepository::new_legacy(search_conn));
 
             // WHY build the AppContainer here, not per-command: a single
             // container is reused across every Tauri command dispatch via

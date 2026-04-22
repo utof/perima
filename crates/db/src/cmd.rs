@@ -284,6 +284,23 @@ pub enum FileWriteCmd {
 }
 
 /// Search-repo write commands. Populated by Task 6.
+///
+/// WHY only one variant: `search` is read-only (pool); `rebuild` is the
+/// sole write path — wipe + reseed the FTS5 index from source rows.
+/// Per-row FTS maintenance runs via `SQLite` triggers on `file_metadata` /
+/// `file_tags` / `file_locations`; those fires are captured inside the
+/// respective Task 3-5 writer handlers. No additional write variants are
+/// needed for search.
 #[derive(Debug)]
-#[non_exhaustive]
-pub enum SearchWriteCmd {}
+pub enum SearchWriteCmd {
+    /// Drop + reseed the FTS5 index (`search_content` table) from scratch.
+    ///
+    /// WHY `ReplyTx<()>`: the caller blocks until the rebuild completes
+    /// (CLI `perima search --rebuild`; Desktop `search_rebuild` command).
+    /// The result carries no payload — either it succeeded (`Ok(())`) or
+    /// propagated a [`perima_core::CoreError`].
+    Rebuild {
+        /// Reply channel; writer sends `Ok(())` on success.
+        reply: ReplyTx<()>,
+    },
+}

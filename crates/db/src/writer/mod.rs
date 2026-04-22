@@ -47,6 +47,7 @@ use crate::connection::open_and_migrate;
 
 mod file;
 mod metadata;
+mod search;
 mod tag;
 mod volume;
 
@@ -227,21 +228,12 @@ fn dispatch(conn: &mut Connection, cmd: WriteCmd, bus: &Arc<dyn EventBus>) {
         WriteCmd::Tag(c) => tag::handle(conn, c, bus),
         WriteCmd::Metadata(c) => metadata::handle(conn, c, bus),
         WriteCmd::File(c) => handle_file(conn, c, bus),
-        WriteCmd::Search(c) => handle_search(conn, c, bus),
+        WriteCmd::Search(c) => search::handle(conn, c, bus),
     }
 }
 
 fn handle_file(conn: &mut Connection, cmd: crate::cmd::FileWriteCmd, bus: &Arc<dyn EventBus>) {
     file::handle(conn, cmd, bus);
-}
-
-#[allow(clippy::needless_pass_by_value)]
-fn handle_search(
-    _conn: &mut Connection,
-    cmd: crate::cmd::SearchWriteCmd,
-    _bus: &Arc<dyn EventBus>,
-) {
-    match cmd {}
 }
 
 #[cfg(test)]

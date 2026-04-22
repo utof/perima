@@ -408,7 +408,10 @@ mod tests {
             Arc::new(SqliteTagRepository::new(writer.sender(), reads.clone()));
         let metadata: Arc<dyn MetadataRepository> =
             Arc::new(SqliteMetadataRepository::new(writer.sender(), reads));
-        let search: Arc<dyn SearchRepository> = Arc::new(SqliteSearchRepository::new(search_conn));
+        // WHY new_legacy: Task 7 migrates this to SqliteSearchRepository::new(writer, reads).
+        #[allow(deprecated)]
+        let search: Arc<dyn SearchRepository> =
+            Arc::new(SqliteSearchRepository::new_legacy(search_conn));
         let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
         let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());
         let thumbnailer: Arc<ThumbnailGenerator> = Arc::new(ThumbnailGenerator::disabled());

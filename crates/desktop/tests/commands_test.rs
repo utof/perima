@@ -451,7 +451,8 @@ async fn search_returns_hit_after_scan_and_rebuild() {
 
     let db_path = data_dir.join("perima.db");
     let search_conn = open_and_migrate(&db_path).expect("open search conn");
-    let search_repo = SqliteSearchRepository::new(search_conn);
+    #[allow(deprecated)]
+    let search_repo = SqliteSearchRepository::new_legacy(search_conn);
     search_repo.rebuild().expect("rebuild index");
 
     // `alpha.txt` is one of the mk_fixture files; unicode61 splits on

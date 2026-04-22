@@ -143,11 +143,16 @@ mod tests {
     }
 
     /// Build a [`SearchUseCase`] backed by a real `SQLite` DB in a tempdir.
+    ///
+    /// WHY `new_legacy`: `SearchUseCase` tests are thin orchestration
+    /// tests that don't need writer+pool setup. Task 7 migrates these
+    /// to `SqliteSearchRepository::new(writer, reads)`.
     fn harness() -> (SearchUseCase, TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("perima.db");
         let conn = open_and_migrate(&db_path).unwrap();
-        let repo: Arc<dyn SearchRepository> = Arc::new(SqliteSearchRepository::new(conn));
+        #[allow(deprecated)]
+        let repo: Arc<dyn SearchRepository> = Arc::new(SqliteSearchRepository::new_legacy(conn));
         let events: Arc<dyn EventBus> = Arc::new(NullBus);
         (SearchUseCase::new(repo, events), tmp)
     }
@@ -180,7 +185,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("perima.db");
         let conn = open_and_migrate(&db_path).unwrap();
-        let repo: Arc<dyn SearchRepository> = Arc::new(SqliteSearchRepository::new(conn));
+        #[allow(deprecated)]
+        let repo: Arc<dyn SearchRepository> = Arc::new(SqliteSearchRepository::new_legacy(conn));
         let events: Arc<dyn EventBus> = Arc::new(NullBus);
         let uc = SearchUseCase::new(repo, events);
 
@@ -204,7 +210,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("perima.db");
         let conn = open_and_migrate(&db_path).unwrap();
-        let repo: Arc<dyn SearchRepository> = Arc::new(SqliteSearchRepository::new(conn));
+        #[allow(deprecated)]
+        let repo: Arc<dyn SearchRepository> = Arc::new(SqliteSearchRepository::new_legacy(conn));
         let events: Arc<dyn EventBus> = Arc::new(NullBus);
         let uc = SearchUseCase::new(repo, events);
 
