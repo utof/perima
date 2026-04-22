@@ -7,8 +7,8 @@
 //! frontend's `parseCoreError` matcher.
 
 use perima_core::{
-    BlakeHash, CoreError, FileLocationRecord, FileSize, LocationStatus, MediaPath, VolumeId,
-    VolumeRecord,
+    BlakeHash, CoreError, FileEvent, FileLocationRecord, FileSize, LocationStatus, MediaMetadata,
+    MediaPath, SearchHit, Tag, VolumeId, VolumeRecord,
 };
 
 #[test]
@@ -164,4 +164,104 @@ fn volume_record_serializes_with_object_shape() {
         "mounts_on_this_machine must serialize as array"
     );
     assert_eq!(v["last_seen"], serde_json::json!("2026-04-22T00:00:00Z"));
+}
+
+// ── E4: single-type file IPC shapes (4 types) ──────────────────────────────
+// WHY: MediaMetadata, Tag, SearchHit, FileEvent each live in their own file
+// and cross the IPC boundary. Pinning their wire shapes here catches field
+// renames and serde-tag changes before they silently break the frontend.
+
+#[test]
+fn media_metadata_serializes_as_object() {
+    let meta = MediaMetadata {
+        hash: BlakeHash::from_bytes([0u8; 32]),
+        width: Some(1920),
+        height: Some(1080),
+        duration_ms: None,
+        captured_at: Some("2026-04-22T12:00:00Z".to_owned()),
+        camera_make: None,
+        camera_model: None,
+        codec: None,
+        bitrate_bps: None,
+        mime_type: Some("image/jpeg".to_owned()),
+        thumbnail_path: None,
+        thumbnail_status: None,
+    };
+    let v = serde_json::to_value(&meta).expect("serialize MediaMetadata");
+    assert!(v.is_object(), "MediaMetadata JSON must be an object");
+    assert!(v["hash"].is_string(), "hash must serialize as string");
+    assert_eq!(v["width"], serde_json::json!(1920));
+    assert_eq!(v["height"], serde_json::json!(1080));
+    assert_eq!(v["duration_ms"], serde_json::Value::Null);
+    assert_eq!(v["captured_at"], serde_json::json!("2026-04-22T12:00:00Z"));
+    assert_eq!(v["mime_type"], serde_json::json!("image/jpeg"));
+}
+
+#[test]
+fn tag_serializes_with_id_name_first_seen() {
+    // WHY: Tag.first_seen (not created_at) — confirmed via MCP discovery.
+    let tag = Tag {
+        id: uuid::Uuid::nil(),
+        name: "nature".to_owned(),
+        first_seen: "2026-04-22T00:00:00Z".to_owned(),
+    };
+    let v = serde_json::to_value(&tag).expect("serialize Tag");
+    assert!(v.is_object(), "Tag JSON must be an object");
+    assert_eq!(
+        v["id"],
+        serde_json::json!("00000000-0000-0000-0000-000000000000")
+    );
+    assert_eq!(v["name"], serde_json::json!("nature"));
+    assert_eq!(v["first_seen"], serde_json::json!("2026-04-22T00:00:00Z"));
+}
+
+#[test]
+fn search_hit_serializes_with_blake3_hash_and_rank() {
+    let hit = SearchHit {
+        blake3_hash: "abc123".to_owned(),
+        volume_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+        relative_path: "photos/img.jpg".to_owned(),
+        rank: -1.5_f64,
+    };
+    let v = serde_json::to_value(&hit).expect("serialize SearchHit");
+    assert!(v.is_object(), "SearchHit JSON must be an object");
+    assert_eq!(v["blake3_hash"], serde_json::json!("abc123"));
+    assert_eq!(
+        v["volume_id"],
+        serde_json::json!("00000000-0000-0000-0000-000000000000")
+    );
+    assert_eq!(v["relative_path"], serde_json::json!("photos/img.jpg"));
+    assert_eq!(v["rank"], serde_json::json!(-1.5_f64));
+}
+
+#[test]
+fn file_event_created_serializes_with_kind_and_data() {
+    // WHY: FileEvent uses #[serde(tag = "type")] inline (no content key),
+    // matching the pre-Batch-D FileEventPayload mirror in desktop.
+    // This is DIFFERENT from CoreError (tag="kind", content="data").
+    let event = FileEvent::Created {
+        path: MediaPath::new("photos/img.jpg"),
+        volume: VolumeId(uuid::Uuid::nil()),
+    };
+    let v = serde_json::to_value(&event).expect("serialize FileEvent::Created");
+    assert!(v.is_object(), "FileEvent JSON must be an object");
+    assert_eq!(
+        v["type"],
+        serde_json::json!("Created"),
+        "FileEvent must serialize with 'type' discriminant key"
+    );
+    // Inline tag: path and volume live at the top level, no 'data' wrapper.
+    assert!(
+        v["path"].is_string(),
+        "path must be inlined at the top level"
+    );
+    assert_eq!(v["path"], serde_json::json!("photos/img.jpg"));
+    assert!(
+        v["volume"].is_string(),
+        "volume must be inlined at the top level"
+    );
+    assert_eq!(
+        v["volume"],
+        serde_json::json!("00000000-0000-0000-0000-000000000000")
+    );
 }

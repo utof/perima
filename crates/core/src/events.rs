@@ -5,7 +5,15 @@ use serde::Serialize;
 use crate::{CoreError, MediaPath, VolumeId};
 
 /// A filesystem event detected by the watcher.
+///
+/// WHY `tag = "type"` (inline, no content key): matches the pre-Batch-D
+/// `FileEventPayload` mirror in `crates/desktop/src/events.rs`, keeping the
+/// frontend's `'file-event'` channel listener byte-compatible. `CoreError` uses
+/// `tag = "kind", content = "data"` — a different shape intentionally, because
+/// `CoreError` is a Result error type while `FileEvent` is a v1-frozen channel payload.
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(tag = "type")]
 pub enum FileEvent {
     /// A new file appeared at this path.
     Created {

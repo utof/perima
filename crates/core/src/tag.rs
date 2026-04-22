@@ -21,6 +21,7 @@ pub const MAX_TAG_LEN: usize = 64;
 /// future FFI/HTTP adapters don't need it. Keeps the domain type
 /// minimal and stable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct Tag {
     /// `UUIDv7` primary key.
     pub id: Uuid,
