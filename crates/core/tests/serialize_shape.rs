@@ -25,7 +25,12 @@ fn core_error_io_serializes_as_struct_variant_with_kind_and_message() {
     let v: serde_json::Value = serde_json::from_str(&json).expect("parse");
     assert_eq!(v["kind"], "Io");
     assert_eq!(v["data"]["kind"], "PermissionDenied");
-    assert!(v["data"]["message"].as_str().unwrap().contains("denied"));
+    assert!(
+        v["data"]["message"]
+            .as_str()
+            .expect("message field present and string-typed")
+            .contains("denied")
+    );
 }
 
 #[test]
@@ -33,6 +38,8 @@ fn core_error_implements_clone() {
     // WHY: Lowering Io to a struct variant unblocks Clone, which is
     // useful for the bindings-compile test fixture and future
     // event-replay scenarios (Batch E).
-    let err = CoreError::Internal("reason".to_owned());
-    let _cloned = err.clone();
+    // WHY: compile-time proof is sufficient — a runtime .clone() would be flagged
+    // as redundant_clone by clippy since `err` is never used after the call.
+    fn _assert_clone<T: Clone>() {}
+    let _ = _assert_clone::<CoreError>;
 }

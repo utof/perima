@@ -360,7 +360,7 @@ pub async fn run_scan_inner_with_metadata(
     // WHY: routes through perima_fs::platform_path::canonicalize — the single
     // source of truth for the #[cfg(windows)] dunce / std fallback.
     let canonical_root =
-        perima_fs::platform_path::canonicalize(root).map_err(perima_core::CoreError::Io)?;
+        perima_fs::platform_path::canonicalize(root).map_err(perima_core::CoreError::from)?;
     let scanner = WalkdirScanner::new();
     let hasher = Blake3Service::new();
 
