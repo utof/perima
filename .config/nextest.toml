@@ -1,0 +1,12 @@
+# cargo-nextest configuration
+# https://nexte.st/docs/configuration/
+
+[profile.default]
+# Flag any test as "slow" after 60s and terminate after two slow periods
+# (120s total per test). Rationale: the slowest clean proptest in this
+# repo (fts_consistent_under_tag_churn) runs ~14s. Anything past ~60s is
+# a sign of lock contention or deadlock, not legitimate compute.
+# nextest 0.9.133 lacks a CLI `--slow-timeout` flag, but honors this
+# config key — keeps `timeout NNN cargo nextest ...` wrappers from
+# killing the whole suite on a single hang.
+slow-timeout = { period = "40s", terminate-after = 2 }
