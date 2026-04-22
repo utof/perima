@@ -25,6 +25,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bus;
 pub mod container;
 pub mod metadata;
 pub mod scan;
@@ -33,6 +34,7 @@ pub mod tag;
 pub mod telemetry;
 pub mod volume;
 
+pub use bus::Bus;
 pub use container::{AppContainer, AppDeps, CompositeEventBus};
 pub use metadata::{MetadataCommand, MetadataOutput, MetadataUseCase};
 pub use scan::{
