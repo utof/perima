@@ -196,7 +196,7 @@ mod tests {
     };
     use perima_db::{
         ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteVolumeRepository,
-        SqliteWriter, open_and_migrate,
+        SqliteWriter, SqliteWriterHandle, open_and_migrate,
     };
     use tempfile::TempDir;
 
@@ -215,28 +215,39 @@ mod tests {
     /// WHY single harness: every test uses this helper so setup is
     /// consistent and the `TempDir` lifetime is managed uniformly.
     /// Returns the use-case, the file repo (for seeding), the metadata
-    /// repo (for seeding), and the tempdir guard.
+    /// repo (for seeding), the tempdir guard, and the writer handle
+    /// (tests keep it alive so the writer thread outlives the adapter
+    /// senders — post-Batch-C Task 4 the metadata adapter holds a
+    /// sender tied to this writer).
     fn harness() -> (
         MetadataUseCase,
         Arc<SqliteFileRepository>,
         Arc<SqliteMetadataRepository>,
         TempDir,
+        SqliteWriterHandle,
     ) {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("perima.db");
+        // WHY writer + pool for metadata (Task 4):
+        // `SqliteMetadataRepository` now holds
+        // `(flume::Sender<WriteCmd>, ReadPool)`. `SqliteFileRepository`
+        // still takes an owned `Connection` until Task 5 — open a
+        // separate legacy connection for it (safe under WAL mode;
+        // migrations already ran via `SqliteWriter::start`).
+        let events: Arc<dyn EventBus> = Arc::new(NullBus);
+        let writer = SqliteWriter::start(&db_path, Arc::clone(&events)).unwrap();
+        let reads = ReadPool::open(&db_path).unwrap();
         let files: Arc<SqliteFileRepository> = Arc::new(SqliteFileRepository::new(
             open_and_migrate(&db_path).unwrap(),
         ));
-        let metadata: Arc<SqliteMetadataRepository> = Arc::new(SqliteMetadataRepository::new(
-            open_and_migrate(&db_path).unwrap(),
-        ));
-        let events: Arc<dyn EventBus> = Arc::new(NullBus);
+        let metadata: Arc<SqliteMetadataRepository> =
+            Arc::new(SqliteMetadataRepository::new(writer.sender(), reads));
         let uc = MetadataUseCase::new(
             Arc::clone(&files) as Arc<dyn FileRepository>,
             Arc::clone(&metadata) as Arc<dyn MetadataRepository>,
             events,
         );
-        (uc, files, metadata, tmp)
+        (uc, files, metadata, tmp, writer)
     }
 
     fn device() -> DeviceId {
@@ -318,7 +329,7 @@ mod tests {
     /// `ListFiles` returns seeded file-location records.
     #[tokio::test]
     async fn list_files_returns_seeded_records() {
-        let (uc, file_repo, _meta_repo, tmp) = harness();
+        let (uc, file_repo, _meta_repo, tmp, _writer) = harness();
         let dev = device();
         let vol_id = seed_volume(tmp.path().join("perima.db").as_path(), dev);
 
@@ -358,7 +369,7 @@ mod tests {
     async fn list_files_with_metadata_left_joins() {
         use perima_core::MetadataRepository;
 
-        let (uc, file_repo, meta_repo, tmp) = harness();
+        let (uc, file_repo, meta_repo, tmp, _writer) = harness();
         let dev = device();
         let vol_id = seed_volume(tmp.path().join("perima.db").as_path(), dev);
 

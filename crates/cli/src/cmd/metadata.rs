@@ -16,7 +16,7 @@ use perima_core::{
     CoreError, DeviceId, FileLocationRecord, FileRepository, MediaMetadata, MetadataExtractor,
     MetadataRepository,
 };
-use perima_db::{SqliteFileRepository, SqliteMetadataRepository, open_and_migrate};
+use perima_db::{SqliteFileRepository, open_and_migrate};
 use perima_media::{
     CompositeExtractor, ImageExtractor, MetadataQueue, ThumbnailGenerator, VideoExtractor,
 };
@@ -75,13 +75,20 @@ pub(crate) async fn run(
         .volumes
         .find_or_create(&detected.identifiers, device)?;
 
-    // WHY legacy `open_and_migrate` still here (Task 2 hybrid state):
-    // `SqliteFileRepository` + `SqliteMetadataRepository` still take
-    // an owned `Connection` — Tasks 5 + 4 migrate them to the writer
-    // actor. Keeping these opens until those tasks land keeps the
-    // Task-2 diff bounded; WAL mode makes the re-open cheap.
+    // WHY legacy `open_and_migrate` still here (Task 4 hybrid state):
+    // `SqliteFileRepository` still takes an owned `Connection` —
+    // Task 5 migrates it. WAL mode makes the re-open cheap.
     let file_repo = SqliteFileRepository::new(open_and_migrate(&db_path)?);
-    let metadata_repo = Arc::new(SqliteMetadataRepository::new(open_and_migrate(&db_path)?));
+    // WHY metadata via container (post-Batch-C Task 4): the writer actor
+    // owns the sole writable connection. Cloning the `Arc<dyn
+    // MetadataRepository>` from the container shares the same writer
+    // sender + read pool used by every other call site; opening a new
+    // adapter here would either require a second writer (spec §3.1
+    // forbids) or force the callers to thread another `(writer, pool)`
+    // pair through. `MetadataQueue::spawn` expects an
+    // `Arc<dyn MetadataRepository>`, which `container.metadata_repo`
+    // satisfies.
+    let metadata_repo: Arc<dyn MetadataRepository> = Arc::clone(&container.metadata_repo);
 
     // WHY suffix match on the absolute path: `scan` walker stores
     // paths relative to the *scan root* (see

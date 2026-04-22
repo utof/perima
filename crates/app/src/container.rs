@@ -172,6 +172,20 @@ pub struct AppContainer {
     /// adapter handle via this field. Same pattern / rationale as
     /// `volumes` above.
     pub tags: Arc<dyn TagRepository>,
+    /// Direct handle to the metadata repository port.
+    ///
+    /// WHY exposed (post-Batch-C Task 4): `perima metadata <path>`
+    /// spawns a [`perima_media::MetadataQueue`] and clones the
+    /// `Arc<dyn MetadataRepository>` into the background worker. The
+    /// `MetadataUseCase` deliberately exposes only list-style commands
+    /// (`ListFiles` / `ListFilesWithMetadata`) — the re-extraction flow
+    /// is interactive and stays outside the use-case surface. Before
+    /// Batch C, the CLI opened a short-lived
+    /// `SqliteMetadataRepository::new(conn)` for the worker; with the
+    /// writer actor owning the sole writable connection, every shell
+    /// site shares one adapter handle via this field. Same pattern /
+    /// rationale as `volumes` + `tags` above.
+    pub metadata_repo: Arc<dyn MetadataRepository>,
 }
 
 impl std::fmt::Debug for AppContainer {
@@ -242,6 +256,11 @@ impl AppContainer {
         // `count_files_for_tag` / `files_with_tag` directly — not
         // exposed by `TagUseCase`. Arc::clone is refcount-only.
         let tags = Arc::clone(&deps.tags);
+        // WHY same treatment for metadata_repo: CLI `perima metadata
+        // <path>` clones the adapter into a background `MetadataQueue`
+        // worker; re-extraction is not exposed by `MetadataUseCase`.
+        // Arc::clone is refcount-only.
+        let metadata_repo = Arc::clone(&deps.metadata);
 
         Arc::new(Self {
             scan,
@@ -252,6 +271,7 @@ impl AppContainer {
             events,
             volumes,
             tags,
+            metadata_repo,
         })
     }
 }
@@ -369,24 +389,23 @@ mod tests {
         let db_tmp = tempfile::tempdir().unwrap();
         let db_path = db_tmp.path().join("perima.db");
 
-        // WHY mixed opens: Task 3 hybrid — Volume + Tag use writer+pool;
-        // File/Metadata/Search still take an owned Connection until
-        // Tasks 4-6 migrate them. Migrations run once inside
+        // WHY mixed opens: Task 4 hybrid — Volume + Tag + Metadata use
+        // writer+pool; File/Search still take an owned Connection
+        // until Tasks 5-6 migrate them. Migrations run once inside
         // `SqliteWriter::start`, so later legacy opens skip the
         // migration sniff.
         let writer = SqliteWriter::start(&db_path, Arc::new(TestNoopBus)).unwrap();
         let reads = ReadPool::open(&db_path).unwrap();
         let file_conn = open_and_migrate(&db_path).unwrap();
-        let meta_conn = open_and_migrate(&db_path).unwrap();
         let search_conn = open_and_migrate(&db_path).unwrap();
 
         let files: Arc<dyn FileRepository> = Arc::new(SqliteFileRepository::new(file_conn));
         let volumes: Arc<dyn VolumeRepository> =
             Arc::new(SqliteVolumeRepository::new(writer.sender(), reads.clone()));
         let tags: Arc<dyn TagRepository> =
-            Arc::new(SqliteTagRepository::new(writer.sender(), reads));
+            Arc::new(SqliteTagRepository::new(writer.sender(), reads.clone()));
         let metadata: Arc<dyn MetadataRepository> =
-            Arc::new(SqliteMetadataRepository::new(meta_conn));
+            Arc::new(SqliteMetadataRepository::new(writer.sender(), reads));
         let search: Arc<dyn SearchRepository> = Arc::new(SqliteSearchRepository::new(search_conn));
         let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
         let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());

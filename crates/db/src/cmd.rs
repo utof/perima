@@ -14,7 +14,9 @@ use std::path::PathBuf;
 
 use flume::Sender;
 
-use perima_core::{BlakeHash, CoreError, DeviceId, Tag, VolumeId, VolumeIdentifiers};
+use perima_core::{
+    BlakeHash, CoreError, DeviceId, MediaMetadata, Tag, UpsertOutcome, VolumeId, VolumeIdentifiers,
+};
 use uuid::Uuid;
 
 /// Reply channel alias for writer-to-caller responses.
@@ -134,9 +136,53 @@ pub enum TagWriteCmd {
 }
 
 /// Metadata-repo write commands. Populated by Task 4.
+///
+/// WHY `UpdateThumbnail` sits alongside `UpsertMetadata` (rather than
+/// being folded into the latter): the thumbnail-worker path writes
+/// independently from the extractor path — same row, different logical
+/// event. `upsert_metadata`'s Unchanged/Updated equivalence proxy
+/// compares `device_id` + `mime_type` only, so a thumbnail status flip
+/// `pending → ready` would be classified Unchanged and lost. Mirror of
+/// the pre-Batch-C `MetadataRepository::update_thumbnail` rationale.
 #[derive(Debug)]
-#[non_exhaustive]
-pub enum MetadataWriteCmd {}
+pub enum MetadataWriteCmd {
+    /// Insert or update the metadata row keyed by `record.hash`.
+    ///
+    /// Thumbnail columns are deliberately NOT touched by this command —
+    /// see `crates/db/src/writer/metadata.rs::upsert_metadata_impl` for
+    /// the decoupling rationale (utof/perima#15 HIGH #4).
+    UpsertMetadata {
+        /// Metadata to persist. The `hash` field is the content-
+        /// addressed PK; every other field is nullable / optional.
+        record: MediaMetadata,
+        /// Device that initiated the upsert.
+        device: DeviceId,
+        /// Reply channel carrying the classification
+        /// (Inserted / Updated / Unchanged).
+        reply: ReplyTx<UpsertOutcome>,
+    },
+    /// Update the thumbnail columns on an existing `file_metadata` row.
+    ///
+    /// `path` is carried as `Option<String>` (nullable in SQL) —
+    /// thumbnail-failed rows store `path = NULL` with `status =
+    /// "failed"`. The writer transmits `Option<String>` rather than
+    /// `Option<&str>` because the command crosses a thread boundary
+    /// via `flume`; `'static` is the simplest lifetime contract.
+    UpdateThumbnail {
+        /// Content hash of the file whose thumbnail row to update.
+        hash: BlakeHash,
+        /// Thumbnail path (WebP under the thumbnail root) or `None`
+        /// when the generation failed.
+        path: Option<String>,
+        /// Status literal — one of `pending` / `ready` / `failed`.
+        status: String,
+        /// Device that initiated the update.
+        device: DeviceId,
+        /// Reply channel carrying `rows_changed` (0 if no metadata
+        /// row exists for `hash`; 1 otherwise).
+        reply: ReplyTx<u64>,
+    },
+}
 
 /// File-repo write commands. Populated by Task 5.
 #[derive(Debug)]

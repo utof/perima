@@ -115,19 +115,15 @@ pub fn run() -> Result<(), RunError> {
                 .map_err(|e| format!("resolve app_data_dir: {e}"))?;
             let cfg = config::resolve_with_app_data_dir(&app_data_dir)?;
 
-            // WHY eager open + Arc-wrap: `SqliteMetadataRepository` holds a
-            // `Mutex<Connection>` and is deliberately shared — commands
-            // clone the same `Arc` into the background `MetadataQueue`
-            // worker during scans. Running `open_and_migrate` here
-            // guarantees V001..V005 migrations run before the first
-            // command fires; WAL mode makes later re-opens free.
+            // WHY resolve db_path up-front: used for the writer actor,
+            // the read pool, and the legacy search/file opens below.
+            //
+            // WHY a third open for search (Task 4 hybrid): post-Batch-C
+            // Task 4 migrates `SqliteMetadataRepository` to writer+pool;
+            // `SqliteSearchRepository` still owns a `Mutex<Connection>`
+            // until Task 6 migrates it. Under WAL mode concurrent
+            // readers are never blocked by writers.
             let db_path = cfg.data_dir.join("perima.db");
-            let metadata_conn = open_and_migrate(&db_path)?;
-            let metadata_repo = Arc::new(SqliteMetadataRepository::new(metadata_conn));
-
-            // WHY third open: `SqliteSearchRepository` still owns a
-            // `Mutex<Connection>` until Task 6 migrates it. Under WAL
-            // mode concurrent readers are never blocked by writers.
             let search_conn = open_and_migrate(&db_path)?;
             let search_repo = Arc::new(SqliteSearchRepository::new(search_conn));
 
@@ -162,9 +158,8 @@ pub fn run() -> Result<(), RunError> {
             });
             let log_handler: Arc<dyn EventBus> = Arc::new(LogEventHandler);
 
-            let (container, writer_handle, tag_repo) = build_container(
+            let (container, writer_handle, tag_repo, metadata_repo) = build_container(
                 &db_path,
-                Arc::clone(&metadata_repo),
                 Arc::clone(&search_repo),
                 vec![log_handler, db_handler, tauri_emitter],
             )?;
@@ -172,11 +167,12 @@ pub fn run() -> Result<(), RunError> {
             // WHY `manage(writer_handle)`: the writer thread stays
             // alive as long as at least one `flume::Sender<WriteCmd>`
             // clone exists. Every sender today lives inside
-            // `SqliteVolumeRepository` + `SqliteTagRepository` on the
-            // container, which lives inside `AppState` — all kept
-            // alive by `manage(state)`. Storing the handle itself lets
-            // a future `shutdown` command call `handle.join()` explicitly
-            // rather than relying on drop order at process exit.
+            // `SqliteVolumeRepository` + `SqliteTagRepository` +
+            // `SqliteMetadataRepository` on the container, which lives
+            // inside `AppState` — all kept alive by `manage(state)`.
+            // Storing the handle itself lets a future `shutdown`
+            // command call `handle.join()` explicitly rather than
+            // relying on drop order at process exit.
             app.manage(writer_handle);
 
             let app_state = state::AppState::new(
@@ -202,15 +198,14 @@ pub fn run() -> Result<(), RunError> {
 /// plumbing in one place so the Tauri `.setup` closure stays focused on
 /// control-flow. Under WAL mode the extra per-repo opens below are cheap.
 ///
-/// WHY `tag_repo` is constructed here (not passed in like metadata /
-/// search): post-Batch-C Task 3, `SqliteTagRepository` requires the
+/// WHY `tag_repo` + `metadata_repo` are constructed here (not passed in
+/// like search): post-Batch-C Tasks 3 + 4, both adapters require the
 /// writer sender + read pool that this helper assembles. Returning the
-/// `Arc<SqliteTagRepository>` alongside the container lets `AppState`
-/// retain its `_inner` test-helper seam (same rationale as retaining
-/// `metadata_repo` / `search_repo`).
+/// `Arc<SqliteTagRepository>` + `Arc<SqliteMetadataRepository>`
+/// alongside the container lets `AppState` retain its `_inner`
+/// test-helper seam (same rationale as retaining `search_repo`).
 fn build_container(
     db_path: &Path,
-    metadata_repo: Arc<SqliteMetadataRepository>,
     search_repo: Arc<SqliteSearchRepository>,
     handlers: Vec<Arc<dyn EventBus>>,
 ) -> Result<
@@ -218,20 +213,21 @@ fn build_container(
         Arc<AppContainer>,
         SqliteWriterHandle,
         Arc<SqliteTagRepository>,
+        Arc<SqliteMetadataRepository>,
     ),
     perima_core::CoreError,
 > {
-    // WHY hybrid state post-Batch-C Task 3: Volume + Tag migrated to
-    // writer+pool; File/Metadata/Search still take an owned `Connection`.
-    // Tasks 4-6 migrate the remaining three repos.
+    // WHY hybrid state post-Batch-C Task 4: Volume + Tag + Metadata
+    // migrated to writer+pool; File/Search still take an owned
+    // `Connection`. Tasks 5-6 migrate the remaining two repos.
     //
-    // WHY a `NoopBus` to the writer (Task 3): the writer's after-COMMIT
+    // WHY a `NoopBus` to the writer (Task 4): the writer's after-COMMIT
     // emission path is scaffolded but NO command emits events today —
-    // neither the volume nor tag commands are on the `FileEvent` bus
-    // surface. Tasks 4-6 re-plumb this to the container's event bus
-    // once Batch E replaces `CompositeEventBus` with `async-broadcast`
-    // (the current single-construction-site invariant forbids a second
-    // composite here).
+    // none of volume / tag / metadata commands are on the `FileEvent`
+    // bus surface. Tasks 5-6 re-plumb this to the container's event
+    // bus once Batch E replaces `CompositeEventBus` with
+    // `async-broadcast` (the current single-construction-site
+    // invariant forbids a second composite here).
     struct NoopBus;
     impl EventBus for NoopBus {
         fn emit(&self, _: &perima_core::FileEvent) -> Result<(), perima_core::CoreError> {
@@ -248,12 +244,13 @@ fn build_container(
     // `r2d2::Pool` is `Arc`-backed).
     let volumes: Arc<dyn VolumeRepository> =
         Arc::new(SqliteVolumeRepository::new(writer.sender(), reads.clone()));
-    let tag_repo = Arc::new(SqliteTagRepository::new(writer.sender(), reads));
-    // WHY explicit `Arc<dyn _>` binding: `AppDeps::tags` is
-    // `Arc<dyn TagRepository>`; assigning a cloned `Arc<SqliteTagRepository>`
-    // to that typed local triggers the unsize coercion.
+    let tag_repo = Arc::new(SqliteTagRepository::new(writer.sender(), reads.clone()));
+    let metadata_repo = Arc::new(SqliteMetadataRepository::new(writer.sender(), reads));
+    // WHY explicit `Arc<dyn _>` bindings: `AppDeps::{tags,metadata}`
+    // are `Arc<dyn _>`; assigning the cloned concrete-typed `Arc`s to
+    // the typed locals triggers the unsize coercion.
     let tags: Arc<dyn TagRepository> = Arc::clone(&tag_repo);
-    let metadata: Arc<dyn MetadataRepository> = metadata_repo;
+    let metadata: Arc<dyn MetadataRepository> = Arc::clone(&metadata_repo);
     let search: Arc<dyn SearchRepository> = search_repo;
     let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
     let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());
@@ -282,5 +279,10 @@ fn build_container(
         thumbnailer,
     };
 
-    Ok((AppContainer::new(deps, handlers), writer, tag_repo))
+    Ok((
+        AppContainer::new(deps, handlers),
+        writer,
+        tag_repo,
+        metadata_repo,
+    ))
 }

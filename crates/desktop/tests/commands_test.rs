@@ -137,7 +137,22 @@ async fn list_files_with_metadata_returns_rows() {
     let first_hash = BlakeHash::parse_hex(&entries[0].hash).expect("parse hash");
 
     let db_path = data_dir.path().join("perima.db");
-    let repo = SqliteMetadataRepository::new(open_and_migrate(&db_path).expect("open"));
+    // WHY writer+pool harness (post-Batch-C Task 4): the metadata
+    // adapter now takes `(flume::Sender<WriteCmd>, ReadPool)`.
+    // `run_scan_inner` above opened its own writer + dropped it at
+    // scope end; we spin up a fresh writer here and keep its handle
+    // alive via `_writer` until teardown (WAL lets the two writers
+    // coexist).
+    struct TestNoopBus;
+    impl EventBus for TestNoopBus {
+        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+    let bus: Arc<dyn EventBus> = Arc::new(TestNoopBus);
+    let writer = SqliteWriter::start(&db_path, bus).expect("writer start");
+    let reads = ReadPool::open(&db_path).expect("pool open");
+    let repo = SqliteMetadataRepository::new(writer.sender(), reads);
     let meta = MediaMetadata {
         hash: first_hash,
         width: Some(640),
@@ -170,6 +185,11 @@ async fn list_files_with_metadata_returns_rows() {
     assert_eq!(populated.height, Some(480));
     assert_eq!(populated.camera_make.as_deref(), Some("Acme"));
     assert_eq!(populated.mime_type.as_deref(), Some("image/jpeg"));
+
+    // Tear down explicitly — drops the repo's sender clone + reaps
+    // the writer thread cleanly before the tempdir is removed.
+    drop(repo);
+    writer.join();
 }
 
 /// After a successful scan, `list_volumes_inner` must return at least one volume.
@@ -210,8 +230,22 @@ async fn desktop_scan_populates_metadata_and_thumbnails() {
     // in `crates/desktop/src/lib.rs::run`): a single
     // `SqliteMetadataRepository` Arc cloned into the queue worker and
     // inspected directly after the scan drain completes.
-    let metadata_conn = open_and_migrate(&db_path).expect("open metadata");
-    let metadata_repo = Arc::new(SqliteMetadataRepository::new(metadata_conn));
+    //
+    // WHY writer+pool harness (post-Batch-C Task 4): the adapter now
+    // takes `(flume::Sender<WriteCmd>, ReadPool)`. `run_scan_inner_with_metadata`
+    // below opens its own writer internally; we keep a separate
+    // writer for this test's direct assertions (WAL lets both
+    // coexist).
+    struct MetaTestNoopBus;
+    impl EventBus for MetaTestNoopBus {
+        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+    let bus: Arc<dyn EventBus> = Arc::new(MetaTestNoopBus);
+    let writer = SqliteWriter::start(&db_path, bus).expect("writer start");
+    let reads = ReadPool::open(&db_path).expect("pool open");
+    let metadata_repo = Arc::new(SqliteMetadataRepository::new(writer.sender(), reads));
 
     let result = run_scan_inner_with_metadata(
         fixture_dir.path(),
@@ -264,6 +298,11 @@ async fn desktop_scan_populates_metadata_and_thumbnails() {
         thumb_root.display(),
         thumb_count,
     );
+
+    // Tear down explicitly — drops the repo's sender clone + reaps
+    // the writer thread cleanly before the tempdir is removed.
+    drop(metadata_repo);
+    writer.join();
 }
 
 /// Exercises the four tag `_inner` helpers end-to-end:
@@ -281,11 +320,13 @@ async fn list_files_with_tags_returns_tagged_rows() {
         .await
         .expect("scan");
 
-    // Open a tag repo against the same DB. Post-Batch-C Task 3,
-    // `SqliteTagRepository` requires `(writer.sender(), ReadPool)`; spin
-    // up a dedicated writer for this test and keep its handle alive via
-    // `_writer` until teardown. WAL mode lets this writer coexist with
-    // the one spawned internally by `run_scan_inner` above.
+    // Open tag + metadata repos against the same DB. Post-Batch-C
+    // Tasks 3 + 4, both `SqliteTagRepository` and
+    // `SqliteMetadataRepository` require `(writer.sender(), ReadPool)`;
+    // spin up a dedicated writer for this test and keep its handle
+    // alive via `writer` until teardown. WAL mode lets this writer
+    // coexist with the one spawned internally by `run_scan_inner`
+    // above.
     let db_path = data_dir.join("perima.db");
 
     struct TestNoopBus;
@@ -297,11 +338,10 @@ async fn list_files_with_tags_returns_tagged_rows() {
     let bus: Arc<dyn EventBus> = Arc::new(TestNoopBus);
     let writer = SqliteWriter::start(&db_path, bus).expect("writer start");
     let reads = ReadPool::open(&db_path).expect("pool open");
-    let tag_repo = SqliteTagRepository::new(writer.sender(), reads);
+    let tag_repo = SqliteTagRepository::new(writer.sender(), reads.clone());
+    let metadata_repo = SqliteMetadataRepository::new(writer.sender(), reads);
 
     // Get files list to find a hash.
-    let metadata_conn = open_and_migrate(&db_path).expect("open meta conn");
-    let metadata_repo = SqliteMetadataRepository::new(metadata_conn);
     let files = list_files_with_metadata_inner(&metadata_repo, 100, None).expect("list");
     assert!(!files.is_empty(), "scan must have produced ≥1 file");
 
@@ -338,9 +378,10 @@ async fn list_files_with_tags_returns_tagged_rows() {
         .expect("find file after detach");
     assert!(tagged_file2.tags.is_empty(), "no tags after detach");
 
-    // Tear down explicitly — drops repo's sender clone + reaps the
-    // writer thread cleanly before the tempdir is removed.
+    // Tear down explicitly — drops both repos' sender clones + reaps
+    // the writer thread cleanly before the tempdir is removed.
     drop(tag_repo);
+    drop(metadata_repo);
     writer.join();
 }
 

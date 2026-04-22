@@ -279,7 +279,6 @@ mod tests {
     use perima_core::{BlakeHash, DeviceId, FileEvent};
     use perima_db::{
         ReadPool, SqliteMetadataRepository, SqliteTagRepository, SqliteWriter, SqliteWriterHandle,
-        open_and_migrate,
     };
     use tempfile::TempDir;
 
@@ -301,25 +300,23 @@ mod tests {
     /// inconsistency — we avoid that here.
     ///
     /// WHY the writer handle is returned: tests must keep it alive so
-    /// the writer thread outlives the `TagRepository` handle (post-Batch-C
-    /// Task 3 the tag adapter holds a sender tied to this writer).
+    /// the writer thread outlives the `TagRepository` +
+    /// `MetadataRepository` handles (post-Batch-C Tasks 3 + 4 both
+    /// adapters hold a sender tied to this writer).
     fn harness() -> (TagUseCase, TempDir, SqliteWriterHandle) {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("perima.db");
-        // WHY writer + pool for tags (Task 3): `SqliteTagRepository`
-        // now holds `(flume::Sender<WriteCmd>, ReadPool)`.
-        // `SqliteMetadataRepository` still takes an owned `Connection`
-        // until Task 4 — open a separate legacy connection for it
-        // (safe under WAL mode; migrations already ran via
-        // `SqliteWriter::start`).
+        // WHY writer + pool for both repos (Tasks 3 + 4):
+        // `SqliteTagRepository` + `SqliteMetadataRepository` now both
+        // hold `(flume::Sender<WriteCmd>, ReadPool)`; share the same
+        // writer sender + pool.
         let events: Arc<dyn EventBus> = Arc::new(NullBus);
         let writer = SqliteWriter::start(&db_path, Arc::clone(&events)).unwrap();
         let reads = ReadPool::open(&db_path).unwrap();
-        let meta_conn = open_and_migrate(&db_path).unwrap();
         let tags: Arc<dyn TagRepository> =
-            Arc::new(SqliteTagRepository::new(writer.sender(), reads));
+            Arc::new(SqliteTagRepository::new(writer.sender(), reads.clone()));
         let metadata: Arc<dyn MetadataRepository> =
-            Arc::new(SqliteMetadataRepository::new(meta_conn));
+            Arc::new(SqliteMetadataRepository::new(writer.sender(), reads));
         (TagUseCase::new(tags, metadata, events), tmp, writer)
     }
 

@@ -683,25 +683,23 @@ mod tests {
         mk_fixture(fixture.path());
 
         let db_path = db_tmp.path().join("perima.db");
-        // WHY mixed opens: post-Batch-C Task 2 the volume adapter uses
-        // writer+pool; File + Metadata still take an owned Connection
-        // until Tasks 4 + 5 migrate them. `SqliteWriter::start` runs
-        // migrations once on the writer's own Connection, so File +
-        // Metadata can open on a fully-migrated schema without
-        // duplicating migration work.
+        // WHY mixed opens: post-Batch-C Task 4 Volume + Metadata use
+        // writer+pool; File still takes an owned Connection until
+        // Task 5 migrates it. `SqliteWriter::start` runs migrations
+        // once on the writer's own Connection, so File can open on a
+        // fully-migrated schema without duplicating migration work.
         let writer = SqliteWriter::start(&db_path, Arc::new(NullBus)).unwrap();
         let reads = ReadPool::open(&db_path).unwrap();
         let file_conn = open_and_migrate(&db_path).unwrap();
-        let meta_conn = open_and_migrate(&db_path).unwrap();
 
         let files: Arc<dyn FileRepository> = Arc::new(SqliteFileRepository::new(file_conn));
         let volumes: Arc<dyn VolumeRepository> =
-            Arc::new(SqliteVolumeRepository::new(writer.sender(), reads));
+            Arc::new(SqliteVolumeRepository::new(writer.sender(), reads.clone()));
         // Use the real metadata repo for the DB so persistence tests
         // see a consistent view. A second recording mock is wired via
         // Arc dyn but held out-of-band for tests that want it.
         let _sqlite_meta: Arc<dyn MetadataRepository> =
-            Arc::new(SqliteMetadataRepository::new(meta_conn));
+            Arc::new(SqliteMetadataRepository::new(writer.sender(), reads));
         let recording = Arc::new(RecordingMetadata::default());
         let metadata: Arc<dyn MetadataRepository> = recording.clone();
 
