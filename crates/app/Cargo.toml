@@ -7,6 +7,13 @@ license.workspace = true
 repository.workspace = true
 publish = false  # WHY: intra-workspace only; not published to crates.io
 
+[features]
+# WHY specta feature: `ScanReport` needs `specta::Type` when the desktop
+# handler returns it across the IPC boundary. Mirrors the pattern in
+# `crates/core` (optional dep, cfg_attr gated). Activated by
+# `perima-desktop` via `perima-app = { features = ["specta"] }`.
+specta = ["dep:specta", "perima-core/specta"]
+
 [dependencies]
 perima-core  = { path = "../core" }
 perima-fs    = { path = "../fs" }
@@ -16,12 +23,19 @@ tokio.workspace    = true
 tokio-util.workspace = true
 thiserror.workspace = true
 tracing.workspace  = true
+# WHY serde: ScanReport + ScanReportEntry derive Serialize so the
+# desktop handler can return the UseCase output directly across the
+# IPC boundary (Batch D Task 8 — no shell-side ScanResult mirror).
+serde.workspace = true
 # WHY rayon: ScanUseCase parallelizes BLAKE3 hashing across CPUs via
 # `par_iter`. Matches the pattern in `crates/cli/src/cmd/scan.rs`
 # pre-extraction; Batch B preserves the exact orchestration shape.
 rayon.workspace    = true
 # WHY uuid: VolumeId fallback in dry-run path uses `Uuid::nil()`.
 uuid.workspace     = true
+# WHY optional specta: see [features] above. Not a hard dep — normal
+# `cargo build` of `perima-app` (CLI, tests) does not pull in specta.
+specta = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -10,8 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use perima_core::{
-    BlakeHash, CoreError, DeviceId, EventBus, FileEvent, MediaMetadata, MetadataRepository,
-    SearchRepository,
+    CoreError, DeviceId, EventBus, FileEvent, MediaMetadata, MetadataRepository, SearchRepository,
 };
 use perima_db::{
     ReadPool, SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository, SqliteWriter,
@@ -65,7 +64,7 @@ fn write_tiny_png(path: &Path, fill: [u8; 3]) {
         .expect("write png");
 }
 
-/// Scan three fixture files and assert `total=3, new=3, errors=0`.
+/// Scan three fixture files and assert `files_seen=3, files_new=3, files_errored=0`.
 #[tokio::test]
 async fn scan_indexes_files() {
     let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
@@ -82,13 +81,25 @@ async fn scan_indexes_files() {
     .await
     .expect("scan_inner should succeed");
 
+    // WHY ScanReport fields (not ScanResult): Batch D Task 8 deleted the
+    // shell-side ScanResult mirror; run_scan_inner now returns ScanReport
+    // from crates/app directly. files_seen == files_new + files_updated +
+    // files_errored for a clean first-run scan.
     assert_eq!(
-        result.total, 3,
+        result.files_seen, 3,
         "expected 3 total files, got {}",
-        result.total
+        result.files_seen
     );
-    assert_eq!(result.new, 3, "expected 3 new files, got {}", result.new);
-    assert_eq!(result.errors, 0, "expected 0 errors, got {}", result.errors);
+    assert_eq!(
+        result.files_new, 3,
+        "expected 3 new files, got {}",
+        result.files_new
+    );
+    assert_eq!(
+        result.files_errored, 0,
+        "expected 0 errors, got {}",
+        result.files_errored
+    );
 }
 
 /// After a successful scan, `list_files_inner` must return all 3 records.
@@ -131,9 +142,13 @@ async fn list_files_with_metadata_returns_rows() {
     // Attach a metadata row to one of the scanned files. We pull its
     // hash from `list_files_inner` to guarantee FK-compatibility with
     // the `files` row the scanner just inserted.
+    //
+    // WHY `entries[0].hash` is now `BlakeHash` (not `String`): Batch D Task 8
+    // deleted the `FileEntry` wire mirror; `list_files_inner` now returns
+    // `Vec<FileLocationRecord>` where `hash` is a typed `BlakeHash` value.
     let entries = list_files_inner(data_dir.path(), 100, None).expect("list_files_inner");
     assert!(!entries.is_empty(), "scan must have inserted ≥1 file");
-    let first_hash = BlakeHash::parse_hex(&entries[0].hash).expect("parse hash");
+    let first_hash = entries[0].hash;
 
     let db_path = data_dir.path().join("perima.db");
     // WHY writer+pool harness (post-Batch-C Task 4): the metadata
@@ -176,9 +191,12 @@ async fn list_files_with_metadata_returns_rows() {
         !rows.is_empty(),
         "expected ≥1 FileWithMetadataPayload row, got 0"
     );
+    // WHY `entries[0].hash.to_hex()`: `FileWithMetadataPayload.hash` is a
+    // hex String (flat IPC payload); `FileLocationRecord.hash` is `BlakeHash`.
+    // Compare using the hex representation.
     let populated = rows
         .iter()
-        .find(|r| r.hash == entries[0].hash)
+        .find(|r| r.hash == entries[0].hash.to_hex())
         .expect("row for inserted metadata must be present");
     assert_eq!(populated.width, Some(640));
     assert_eq!(populated.height, Some(480));
@@ -256,8 +274,17 @@ async fn desktop_scan_populates_metadata_and_thumbnails() {
     .await
     .expect("scan with metadata should succeed");
 
-    assert_eq!(result.total, 2, "expected 2 files, got {}", result.total);
-    assert_eq!(result.new, 2, "expected 2 new, got {}", result.new);
+    // WHY ScanReport fields: see scan_indexes_files test comment.
+    assert_eq!(
+        result.files_seen, 2,
+        "expected 2 files, got {}",
+        result.files_seen
+    );
+    assert_eq!(
+        result.files_new, 2,
+        "expected 2 new, got {}",
+        result.files_new
+    );
 
     // Assert 2 metadata rows exist via the shared handle. The drain
     // path above guarantees the worker has persisted by the time we
@@ -340,17 +367,22 @@ async fn list_files_with_tags_returns_tagged_rows() {
     let tag_repo = SqliteTagRepository::new(writer.sender(), reads.clone());
     let metadata_repo = SqliteMetadataRepository::new(writer.sender(), reads);
 
-    // Get files list to find a hash.
+    // Get files list to find a hash. `FileWithMetadataPayload.hash` is a
+    // hex String (flat composite payload retained in Batch D Task 8).
     let files = list_files_with_metadata_inner(&metadata_repo, 100, None).expect("list");
     assert!(!files.is_empty(), "scan must have produced ≥1 file");
 
     let first_hash = files[0].hash.clone();
 
     // Attach a tag via the inner helper.
+    // WHY `attach_tag_inner` now returns `Tag` (not `TagPayload`):
+    // Batch D Task 8 deleted TagPayload; Tag is the core type.
     let tag = attach_tag_inner(&tag_repo, &first_hash, "test-tag", device).expect("attach");
     assert_eq!(tag.name, "test-tag");
 
     // List files with tags — the tagged file must appear with 1 tag.
+    // WHY `fwt.tags` is `Vec<Tag>` now: FileWithTagsPayload.tags was
+    // updated from Vec<TagPayload> to Vec<Tag> in Batch D Task 8.
     let tagged =
         list_files_with_tags_inner(&metadata_repo, &tag_repo, 100, None).expect("list with tags");
     assert!(!tagged.is_empty());
@@ -361,12 +393,14 @@ async fn list_files_with_tags_returns_tagged_rows() {
     assert_eq!(tagged_file.tags.len(), 1, "must have exactly 1 tag");
     assert_eq!(tagged_file.tags[0].name, "test-tag");
 
-    // List tags — must return exactly 1.
+    // List tags — must return exactly 1. `list_tags_inner` now returns
+    // `Vec<Tag>` directly.
     let tags = list_tags_inner(&tag_repo).expect("list tags");
     assert_eq!(tags.len(), 1);
 
-    // Detach.
-    detach_tag_inner(&tag_repo, &first_hash, &tag.id, device).expect("detach");
+    // Detach. WHY `tag.id.to_string()`: `Tag.id` is `Uuid` (not String);
+    // `detach_tag_inner` takes `tag_id_str: &str` and parses it internally.
+    detach_tag_inner(&tag_repo, &first_hash, &tag.id.to_string(), device).expect("detach");
 
     // Verify empty after detach.
     let tagged2 = list_files_with_tags_inner(&metadata_repo, &tag_repo, 100, None)
@@ -467,6 +501,9 @@ async fn search_returns_hit_after_scan_and_rebuild() {
     drop(search_writer);
     search_repo.rebuild().expect("rebuild index");
 
+    // WHY `h.relative_path` on `SearchHit`: Batch D Task 8 deleted
+    // `SearchHitPayload`; `search_inner` now returns `Vec<SearchHit>`
+    // from `perima_core`. `SearchHit.relative_path` is a `String`.
     // `alpha.txt` is one of the mk_fixture files; unicode61 splits on
     // `.` so the `alpha` token is indexed.
     let hits = search_inner(&search_repo, "alpha", 10).expect("search");

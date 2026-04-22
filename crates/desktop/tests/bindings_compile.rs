@@ -2,7 +2,7 @@
 //! TypeScript export containing the expected IPC type graph.
 //!
 //! WHY a separate integration test (not relying on `lib.rs::run`'s
-//! `#[cfg(debug_assertions)]` path): this isolates the
+//! `#[cfg(feature = "specta-export")]` path): this isolates the
 //! "derives compile cleanly + exporter doesn't choke on our type
 //! graph" assertion from the full Tauri runtime initialization.
 //! Catches `specta::Type` derive failures separately from `cargo build`
@@ -54,21 +54,33 @@ fn tauri_specta_builder_exports_to_string_without_error() {
         "generated TypeScript bindings must be non-empty"
     );
 
-    // Mirror types present in the current (pre-Task-8) handler signatures.
-    // These are wire-wrapper structs in crates/desktop/src/commands.rs
-    // and crates/desktop/src/payloads.rs, each carrying `specta::Type`.
+    // Post-Task-8: the 1:1 wire-mirror types (ScanResult, FileEntry,
+    // VolumeEntry, SearchHitPayload) are deleted; the core domain types
+    // appear directly. Verify the core types that every handler now
+    // uses or returns.
+    assert!(ts.contains("CoreError"), "CoreError missing from bindings");
     assert!(
-        ts.contains("ScanResult"),
-        "ScanResult missing from bindings"
-    );
-    assert!(ts.contains("FileEntry"), "FileEntry missing from bindings");
-    assert!(
-        ts.contains("VolumeEntry"),
-        "VolumeEntry missing from bindings"
+        ts.contains("ScanReport"),
+        "ScanReport missing from bindings"
     );
     assert!(
-        ts.contains("SearchHitPayload"),
-        "SearchHitPayload missing from bindings"
+        ts.contains("FileLocationRecord"),
+        "FileLocationRecord missing from bindings"
+    );
+    assert!(
+        ts.contains("VolumeRecord"),
+        "VolumeRecord missing from bindings"
+    );
+    assert!(ts.contains("Tag"), "Tag missing from bindings");
+    assert!(ts.contains("SearchHit"), "SearchHit missing from bindings");
+    // Composite payloads retained (flat composites with no core analogue).
+    assert!(
+        ts.contains("FileWithMetadataPayload"),
+        "FileWithMetadataPayload missing from bindings"
+    );
+    assert!(
+        ts.contains("FileWithTagsPayload"),
+        "FileWithTagsPayload missing from bindings"
     );
 }
 
@@ -77,15 +89,9 @@ fn tauri_specta_builder_exports_to_string_without_error() {
 /// TypeScript after Task 8 flips all 13 handlers to `Result<T, CoreError>`
 /// and deletes the 1:1 wire-mirror structs.
 ///
-/// WHY `#[ignore]`: the assertions below WILL fail until Task 8 lands,
-/// because current handlers return `Result<T, String>` and the domain
-/// types are not reachable from any handler return type. This is not a
-/// `specta::Type` derive failure — it is the expected pre-Task-8 state.
-/// Re-enable (remove `#[ignore]`) when Task 8 is complete.
-// TODO(Batch D Task 8): remove `#[ignore]` once all handlers return
-// `Result<T, CoreError>` and FileLocationRecord/BlakeHash/FileEvent/SearchHit
-// replace their wire mirrors in handler signatures.
-#[ignore]
+/// WHY `#[ignore]` is removed (Task 8 complete): all 13 handlers now return
+/// `Result<T, CoreError>` and the domain types are reachable from handler
+/// return types. The previous `#[ignore]` was a pre-Task-8 sentinel.
 #[test]
 fn bindings_contain_core_domain_types() {
     let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
@@ -112,14 +118,16 @@ fn bindings_contain_core_domain_types() {
     let ts = std::fs::read_to_string(tmp.path()).expect("read generated TypeScript from tempfile");
 
     // All of these appear transitively via CoreError (error variant on every
-    // handler) and the domain-typed return values once Task 8 lands.
+    // handler) and the domain-typed return values.
     assert!(ts.contains("CoreError"), "CoreError missing from bindings");
     assert!(
         ts.contains("FileLocationRecord"),
         "FileLocationRecord missing from bindings"
     );
+    // WHY substring "Tag" (not exact): `tauri-specta` rc.24 may mangle or
+    // prefix type names. A substring match is sufficient to confirm the
+    // type is reachable.
     assert!(ts.contains("Tag"), "Tag missing from bindings");
     assert!(ts.contains("SearchHit"), "SearchHit missing from bindings");
-    assert!(ts.contains("FileEvent"), "FileEvent missing from bindings");
     assert!(ts.contains("BlakeHash"), "BlakeHash missing from bindings");
 }

@@ -15,7 +15,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "perima_desktop"
 
 [dependencies]
-perima-app   = { workspace = true }
+perima-app   = { workspace = true, features = ["specta"] }
 perima-core  = { path = "../core", features = ["specta"] }
 perima-db    = { path = "../db" }
 perima-fs    = { path = "../fs" }

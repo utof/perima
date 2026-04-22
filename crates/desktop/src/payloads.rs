@@ -1,13 +1,24 @@
 //! Wire-types for commands that join multiple domain records.
 //!
-//! WHY separate module: `commands.rs` already hosts `FileEntry` and
-//! `VolumeEntry`, which map 1:1 to a single `perima-core` record.
-//! Payloads that flatten a `(record, optional_record)` pair — like
-//! `FileWithMetadataPayload` — carry their own `From` impls and grow
-//! fast as v0.4.x lands thumbnails and derived attributes. Keeping them
-//! in their own module prevents `commands.rs` from sprawling.
+//! WHY separate module: `crates/desktop/src/commands.rs` previously hosted
+//! `FileEntry` and `VolumeEntry`, which mapped 1:1 to single `perima-core`
+//! records. Those were deleted in Batch D Task 8 — the core types now derive
+//! `specta::Type` and are used directly in handler signatures. This module
+//! retains only the composite payloads that flatten a `(record,
+//! optional_record)` pair with no clean 1:1 core analogue.
+//!
+//! WHY `TagPayload` and `SearchHitPayload` were deleted (Batch D Task 8):
+//! `perima_core::Tag` and `perima_core::SearchHit` now derive
+//! `specta::Type`; no shell-side mirror is needed. Handlers return the
+//! core types directly.
+//!
+//! WHY `FileWithMetadataPayload` is retained (spec §8 #6): it flattens a
+//! `(FileLocationRecord, Option<MediaMetadata>)` pair into a single-level
+//! object that the UI grid can bind without traversing optional sub-objects.
+//! There is no equivalent flat type in `perima-core`. The same rationale
+//! applies to `FileWithTagsPayload`.
 
-use perima_core::{FileLocationRecord, MediaMetadata, SearchHit, Tag};
+use perima_core::{FileLocationRecord, MediaMetadata, Tag};
 use serde::Serialize;
 
 /// Flattened `(FileLocationRecord, Option<MediaMetadata>)` pair for the
@@ -17,11 +28,10 @@ use serde::Serialize;
 /// binds one row per location and needs every column addressable with a
 /// single key. Nesting would force every cell to traverse an optional
 /// subobject just to discover it is absent. Flat fields with `None`
-/// columns match SQL's native shape and the existing `FileEntry`
-/// encoding.
+/// columns match SQL's native shape and the existing encoding.
 #[derive(Debug, Clone, Serialize, specta::Type)]
 pub struct FileWithMetadataPayload {
-    // File-location fields (mirror `FileEntry`).
+    // File-location fields (mirrors `FileLocationRecord`).
     /// BLAKE3-256 content hash as lowercase hex.
     pub hash: String,
     /// File size in bytes.
@@ -63,40 +73,23 @@ pub struct FileWithMetadataPayload {
     pub thumbnail_status: Option<String>,
 }
 
-/// Wire-type for a tag, safe to cross the IPC boundary.
-#[derive(Debug, Clone, Serialize, specta::Type)]
-pub struct TagPayload {
-    /// `UUIDv7` primary key.
-    pub id: String,
-    /// NFC-normalized lowercase name.
-    pub name: String,
-    /// ISO 8601 UTC timestamp of first sighting.
-    pub first_seen: String,
-}
-
-impl From<Tag> for TagPayload {
-    fn from(t: Tag) -> Self {
-        Self {
-            id: t.id.to_string(),
-            name: t.name,
-            first_seen: t.first_seen,
-        }
-    }
-}
-
 /// File-with-metadata plus its attached tags.
 ///
 /// WHY compose (not extend `FileWithMetadataPayload`): keeps each
-/// payload focused. The `tags` field is a Vec, not a flat field set,
+/// payload focused. The `tags` field is a `Vec`, not a flat field set,
 /// so it doesn't fit the "one-column-per-SQL-field" flat pattern of
 /// the metadata payload.
+///
+/// WHY `tags: Vec<Tag>` (not `Vec<TagPayload>`): `perima_core::Tag`
+/// now derives `specta::Type`; no shell-side mirror is needed
+/// (Batch D Task 8).
 #[derive(Debug, Clone, Serialize, specta::Type)]
 pub struct FileWithTagsPayload {
     /// All file + metadata fields (flat).
     #[serde(flatten)]
     pub file: FileWithMetadataPayload,
     /// Tags attached to this content hash.
-    pub tags: Vec<TagPayload>,
+    pub tags: Vec<Tag>,
 }
 
 impl From<(FileLocationRecord, Option<MediaMetadata>)> for FileWithMetadataPayload {
@@ -155,34 +148,6 @@ impl From<(FileLocationRecord, Option<MediaMetadata>)> for FileWithMetadataPaylo
             mime_type,
             thumbnail_path,
             thumbnail_status,
-        }
-    }
-}
-
-/// Wire-type for a single `FTS5` search result.
-///
-/// Maps 1:1 from [`SearchHit`]; exists as a separate type so `specta`
-/// can generate TypeScript bindings without pulling the domain type into
-/// the desktop crate's public surface.
-#[derive(Debug, Clone, Serialize, specta::Type)]
-pub struct SearchHitPayload {
-    /// `BLAKE3` hex hash of the file content.
-    pub blake3_hash: String,
-    /// Volume UUID string.
-    pub volume_id: String,
-    /// Relative path within the volume (representative location).
-    pub relative_path: String,
-    /// `BM25` rank (lower = better, `SQLite` convention).
-    pub rank: f64,
-}
-
-impl From<SearchHit> for SearchHitPayload {
-    fn from(h: SearchHit) -> Self {
-        Self {
-            blake3_hash: h.blake3_hash,
-            volume_id: h.volume_id,
-            relative_path: h.relative_path,
-            rank: h.rank,
         }
     }
 }

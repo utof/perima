@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
+
 use perima_core::{
     BlakeHash, CoreError, DeviceId, DiscoveredFile, EventBus, FileRepository, HashService,
     HashedFile, MediaPath, MetadataExtractor, MetadataRepository, Scanner, UpsertOutcome, VolumeId,
@@ -166,7 +168,13 @@ impl std::fmt::Debug for FullScan {
 /// Batch B would cascade through every `EventBus` impl; Batch E's
 /// bus-engine swap is the right place for that change. The shell
 /// iterates `per_file_entries` post-execute and prints its own lines.
-#[derive(Debug, Clone)]
+///
+/// WHY `Serialize`: the desktop `scan` handler returns `ScanReport`
+/// directly across the IPC boundary (Batch D Task 8); per-file entries
+/// are skipped at the serde boundary (`#[serde(skip)]`) because the
+/// frontend only needs aggregate stats. CLI shells access the field
+/// directly without serde.
+#[derive(Debug, Clone, Serialize)]
 pub struct ScanReportEntry {
     /// Content hash of the file as hashed this run.
     pub hash: BlakeHash,
@@ -177,7 +185,15 @@ pub struct ScanReportEntry {
 }
 
 /// Output of a successful scan.
-#[derive(Debug, Clone, Default)]
+///
+/// WHY `Serialize + specta::Type`: the desktop `scan` handler returns this
+/// struct directly across the Tauri IPC boundary (Batch D Task 8).
+/// Shell-internal fields (`per_file_entries`, `manifest_files`,
+/// `volume_mount`) are marked `#[serde(skip)]` because the frontend
+/// only needs aggregate stats; CLI shells access those fields in
+/// Rust after `execute` returns.
+#[derive(Debug, Clone, Default, Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ScanReport {
     /// Total files walked + attempted to hash.
     pub files_seen: u64,
@@ -202,13 +218,29 @@ pub struct ScanReport {
     /// returns; `crates/app` deliberately does NOT depend on
     /// `perima-db` (spec §2 IN), so the link is plain-text rather
     /// than an intra-doc reference.
+    ///
+    /// WHY `#[serde(skip)]`: this is a shell-internal routing value
+    /// (used by CLI + desktop to call `write_manifest`). The frontend
+    /// has no use for a raw `(VolumeId, PathBuf)` tuple. Aggregate
+    /// stats (`files_new`, etc.) are what the UI consumes.
+    #[serde(skip)]
     pub volume_mount: Option<(VolumeId, PathBuf)>,
     /// Per-file details for shells that print a hash/size/path line.
     /// Empty for callers that only consume aggregate stats.
+    ///
+    /// WHY `#[serde(skip)]`: shell-internal; the frontend has no use
+    /// for a per-file entry list on scan completion. CLI access is
+    /// direct (no serde). Future UI needs (Batch H) would define a
+    /// dedicated IPC event stream, not a bulk payload.
+    #[serde(skip)]
     pub per_file_entries: Vec<ScanReportEntry>,
     /// Hashed files that were successfully persisted this run; passed
     /// by the shell to `perima_db::manifest::write_manifest` to create
     /// `.perima/manifest.db` at the volume root.
+    ///
+    /// WHY `#[serde(skip)]`: see `volume_mount` — manifest writing is
+    /// shell-side plumbing; the frontend never inspects this list.
+    #[serde(skip)]
     pub manifest_files: Vec<HashedFile>,
 }
 
