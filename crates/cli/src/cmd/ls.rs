@@ -2,22 +2,20 @@
 //! small CLI-side post-filter for `--volume` + `--tag` args that the
 //! `UseCase` does not yet surface through its command enum.
 //!
-//! WHY a short-lived `TagRepository` connection for `--tag`: the
+//! WHY use `container.tags` for `--tag`: the
 //! `TagRepository::files_with_tag` port is not exposed through
-//! `TagUseCase::List` output; a future `UseCase` extension can lift it, and
-//! Task 8 keeps the shell minimal by re-opening a single connection in
-//! the filter path (same pattern as `cmd/metadata.rs` + `cmd/tag.rs`).
+//! `TagUseCase::List` output. Post-Batch-C Task 3, `AppContainer`
+//! exposes `Arc<dyn TagRepository>` directly so the filter path no
+//! longer needs a short-lived `SqliteTagRepository::new(...)` open.
+//! A future `UseCase` extension can lift this into `MetadataCommand`.
 
 use std::collections::HashSet;
 use std::io::Write;
-use std::path::Path;
 
 use perima_app::{AppContainer, MetadataCommand, MetadataOutput};
 use perima_core::{
-    BlakeHash, CoreError, DeviceId, FileLocationRecord, MediaMetadata, TagRepository, VolumeId,
-    normalize_tag,
+    BlakeHash, CoreError, DeviceId, FileLocationRecord, MediaMetadata, VolumeId, normalize_tag,
 };
-use perima_db::{SqliteTagRepository, open_and_migrate};
 
 /// Arguments for the ls command.
 #[derive(Debug, Clone)]
@@ -44,7 +42,7 @@ pub(crate) struct LsArgs {
 /// Propagates `CoreError` from the `UseCase` / repositories.
 pub(crate) async fn run(
     container: &AppContainer,
-    data_dir: &Path,
+    _data_dir: &std::path::Path,
     device: DeviceId,
     args: &LsArgs,
 ) -> Result<(), CoreError> {
@@ -53,7 +51,7 @@ pub(crate) async fn run(
     let tag_filter: Option<HashSet<BlakeHash>> = args
         .tag
         .as_deref()
-        .map(|raw| build_tag_filter(data_dir, raw))
+        .map(|raw| build_tag_filter(container, raw))
         .transpose()?;
 
     // WHY limit widening: downstream post-filters by volume/tag reduce the
@@ -118,18 +116,16 @@ pub(crate) async fn run(
     Ok(())
 }
 
-/// Look up a tag by name (opening a short-lived DB connection) and
-/// collect all hashes that carry it.
-fn build_tag_filter(data_dir: &Path, raw: &str) -> Result<HashSet<BlakeHash>, CoreError> {
+/// Look up a tag by name via the container's tag port and collect all
+/// hashes that carry it.
+fn build_tag_filter(container: &AppContainer, raw: &str) -> Result<HashSet<BlakeHash>, CoreError> {
     let normalized = normalize_tag(raw)?;
-    let db_path = data_dir.join("perima.db");
-    let tag_repo = SqliteTagRepository::new(open_and_migrate(&db_path)?);
-    let all_tags = tag_repo.list_tags()?;
+    let all_tags = container.tags.list_tags()?;
     let tag = all_tags
         .into_iter()
         .find(|t| t.name == normalized)
         .ok_or_else(|| CoreError::NotFound(format!("tag not found: {normalized}")))?;
-    let hashes = tag_repo.files_with_tag(tag.id)?;
+    let hashes = container.tags.files_with_tag(tag.id)?;
     Ok(hashes.into_iter().collect())
 }
 

@@ -9,9 +9,13 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use perima_core::{BlakeHash, DeviceId, MediaMetadata, MetadataRepository, SearchRepository};
+use perima_core::{
+    BlakeHash, CoreError, DeviceId, EventBus, FileEvent, MediaMetadata, MetadataRepository,
+    SearchRepository,
+};
 use perima_db::{
-    SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository, open_and_migrate,
+    ReadPool, SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository, SqliteWriter,
+    open_and_migrate,
 };
 use perima_desktop::commands::{
     attach_tag_inner, detach_tag_inner, list_files_inner, list_files_with_metadata_inner,
@@ -277,10 +281,23 @@ async fn list_files_with_tags_returns_tagged_rows() {
         .await
         .expect("scan");
 
-    // Open a tag repo against the same DB.
+    // Open a tag repo against the same DB. Post-Batch-C Task 3,
+    // `SqliteTagRepository` requires `(writer.sender(), ReadPool)`; spin
+    // up a dedicated writer for this test and keep its handle alive via
+    // `_writer` until teardown. WAL mode lets this writer coexist with
+    // the one spawned internally by `run_scan_inner` above.
     let db_path = data_dir.join("perima.db");
-    let tag_conn = open_and_migrate(&db_path).expect("open tag conn");
-    let tag_repo = SqliteTagRepository::new(tag_conn);
+
+    struct TestNoopBus;
+    impl EventBus for TestNoopBus {
+        fn emit(&self, _: &FileEvent) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+    let bus: Arc<dyn EventBus> = Arc::new(TestNoopBus);
+    let writer = SqliteWriter::start(&db_path, bus).expect("writer start");
+    let reads = ReadPool::open(&db_path).expect("pool open");
+    let tag_repo = SqliteTagRepository::new(writer.sender(), reads);
 
     // Get files list to find a hash.
     let metadata_conn = open_and_migrate(&db_path).expect("open meta conn");
@@ -320,6 +337,11 @@ async fn list_files_with_tags_returns_tagged_rows() {
         .find(|f| f.file.hash == first_hash)
         .expect("find file after detach");
     assert!(tagged_file2.tags.is_empty(), "no tags after detach");
+
+    // Tear down explicitly — drops repo's sender clone + reaps the
+    // writer thread cleanly before the tempdir is removed.
+    drop(tag_repo);
+    writer.join();
 }
 
 /// Regression for v0.4.3: thumbnail directory referenced by

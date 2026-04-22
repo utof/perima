@@ -214,17 +214,18 @@ async fn main() -> ExitCode {
 /// `DbEventHandler` so that filesystem events can mutate location rows via the
 /// shared bus without constructing a second `CompositeEventBus` in the shell.
 ///
-/// WHY hybrid state post-Batch-C Task 2: Volume migrated to writer+pool;
-/// File/Tag/Metadata/Search still take an owned `Connection`. Tasks 3-6
-/// will migrate the remaining four repos; until then `build_container`
-/// runs ONE migration sweep via `SqliteWriter::start` (which is also the
-/// sole production caller of `open_and_migrate`) and then opens
-/// legacy connections for the not-yet-migrated repos. The `SqliteWriter`
-/// handle is intentionally dropped at the end of `build_container` —
-/// the writer thread keeps running as long as any `flume::Sender<WriteCmd>`
-/// lives, which is held inside the `SqliteVolumeRepository` embedded in
-/// `AppContainer`. The thread reaps at process exit when all senders
-/// drop.
+/// WHY hybrid state post-Batch-C Task 3: Volume + Tag migrated to
+/// writer+pool; File/Metadata/Search still take an owned `Connection`.
+/// Tasks 4-6 will migrate the remaining three repos; until then
+/// `build_container` runs ONE migration sweep via `SqliteWriter::start`
+/// (which is also the sole production caller of `open_and_migrate`
+/// for the writer itself) and then opens legacy connections for the
+/// not-yet-migrated repos. The `SqliteWriter` handle is intentionally
+/// dropped at the end of `build_container` — the writer thread keeps
+/// running as long as any `flume::Sender<WriteCmd>` lives, which is
+/// held inside the `SqliteVolumeRepository` + `SqliteTagRepository`
+/// embedded in `AppContainer`. The thread reaps at process exit when
+/// all senders drop.
 fn build_container(
     db_path: &Path,
     extra_handlers: Vec<Arc<dyn EventBus>>,
@@ -251,25 +252,31 @@ fn build_container(
 
     let files: Arc<dyn FileRepository> =
         Arc::new(SqliteFileRepository::new(open_and_migrate(db_path)?));
+    // WHY clone `reads` for each writer+pool-backed adapter: `ReadPool`
+    // is cheap to [`Clone`] (inner `r2d2::Pool` is `Arc`-backed). Task 3
+    // migrates Tag; File/Metadata/Search remain legacy until their own
+    // tasks.
     let volumes: Arc<dyn VolumeRepository> =
-        Arc::new(SqliteVolumeRepository::new(writer.sender(), reads));
-    let tags: Arc<dyn TagRepository> =
-        Arc::new(SqliteTagRepository::new(open_and_migrate(db_path)?));
+        Arc::new(SqliteVolumeRepository::new(writer.sender(), reads.clone()));
+    // WHY Task 3 line: migrated to writer actor + read pool. File,
+    // Metadata, Search still use `open_and_migrate` until Tasks 4-6.
+    let tags: Arc<dyn TagRepository> = Arc::new(SqliteTagRepository::new(writer.sender(), reads));
     let metadata: Arc<dyn MetadataRepository> =
         Arc::new(SqliteMetadataRepository::new(open_and_migrate(db_path)?));
     let search: Arc<dyn SearchRepository> =
         Arc::new(SqliteSearchRepository::new(open_and_migrate(db_path)?));
     let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
     let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());
-    // WHY no explicit `writer` keep-alive: `volumes` above holds a
-    // cloned `flume::Sender<WriteCmd>` via `writer.sender()`. When
-    // `build_container` returns, the local `writer` handle drops and
-    // its `JoinHandle` is lost (the thread detaches), but the sender
-    // clone inside `volumes` — riding into the returned container —
-    // keeps the writer thread running for the container's lifetime.
-    // At CLI process exit, all senders drop and the thread observes
-    // `Disconnected` + returns. Tasks 3-6 will replace this with a
-    // container-owned writer handle that supports explicit join.
+    // WHY no explicit `writer` keep-alive: `volumes` + `tags` above
+    // each hold a cloned `flume::Sender<WriteCmd>` via
+    // `writer.sender()`. When `build_container` returns, the local
+    // `writer` handle drops and its `JoinHandle` is lost (the thread
+    // detaches), but the sender clones inside `volumes` / `tags` —
+    // riding into the returned container — keep the writer thread
+    // running for the container's lifetime. At CLI process exit, all
+    // senders drop and the thread observes `Disconnected` + returns.
+    // Tasks 4-6 will replace this with a container-owned writer
+    // handle that supports explicit join.
 
     // WHY the thumbnailer is chosen at container-build time: the container
     // is constructed once per command dispatch (via `build_container`),

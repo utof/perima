@@ -277,7 +277,10 @@ impl TagUseCase {
 #[allow(clippy::unwrap_used)] // Test code; unwrap panics signal bugs.
 mod tests {
     use perima_core::{BlakeHash, DeviceId, FileEvent};
-    use perima_db::{SqliteMetadataRepository, SqliteTagRepository, open_and_migrate};
+    use perima_db::{
+        ReadPool, SqliteMetadataRepository, SqliteTagRepository, SqliteWriter, SqliteWriterHandle,
+        open_and_migrate,
+    };
     use tempfile::TempDir;
 
     use super::*;
@@ -296,18 +299,28 @@ mod tests {
     /// consistent and the `TempDir` lifetime is managed uniformly.
     /// The previous reviewer on `SearchUseCase` flagged inline-setup
     /// inconsistency — we avoid that here.
-    fn harness() -> (TagUseCase, TempDir) {
+    ///
+    /// WHY the writer handle is returned: tests must keep it alive so
+    /// the writer thread outlives the `TagRepository` handle (post-Batch-C
+    /// Task 3 the tag adapter holds a sender tied to this writer).
+    fn harness() -> (TagUseCase, TempDir, SqliteWriterHandle) {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("perima.db");
-        // WHY two connections: `SqliteTagRepository` + `SqliteMetadataRepository`
-        // each own a `Mutex<Connection>`. Two separate opens are safe under WAL
-        // mode (same pattern as `crates/desktop/src/lib.rs`).
-        let conn1 = open_and_migrate(&db_path).unwrap();
-        let conn2 = open_and_migrate(&db_path).unwrap();
-        let tags: Arc<dyn TagRepository> = Arc::new(SqliteTagRepository::new(conn1));
-        let metadata: Arc<dyn MetadataRepository> = Arc::new(SqliteMetadataRepository::new(conn2));
+        // WHY writer + pool for tags (Task 3): `SqliteTagRepository`
+        // now holds `(flume::Sender<WriteCmd>, ReadPool)`.
+        // `SqliteMetadataRepository` still takes an owned `Connection`
+        // until Task 4 — open a separate legacy connection for it
+        // (safe under WAL mode; migrations already ran via
+        // `SqliteWriter::start`).
         let events: Arc<dyn EventBus> = Arc::new(NullBus);
-        (TagUseCase::new(tags, metadata, events), tmp)
+        let writer = SqliteWriter::start(&db_path, Arc::clone(&events)).unwrap();
+        let reads = ReadPool::open(&db_path).unwrap();
+        let meta_conn = open_and_migrate(&db_path).unwrap();
+        let tags: Arc<dyn TagRepository> =
+            Arc::new(SqliteTagRepository::new(writer.sender(), reads));
+        let metadata: Arc<dyn MetadataRepository> =
+            Arc::new(SqliteMetadataRepository::new(meta_conn));
+        (TagUseCase::new(tags, metadata, events), tmp, writer)
     }
 
     fn device() -> DeviceId {
@@ -324,7 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_returns_tags_present_in_db() {
-        let (uc, _tmp) = harness();
+        let (uc, _tmp, _writer) = harness();
         let dev = device();
 
         // Seed via Attach command.
@@ -350,7 +363,7 @@ mod tests {
 
     #[tokio::test]
     async fn attach_creates_link_and_returns_attached_1() {
-        let (uc, _tmp) = harness();
+        let (uc, _tmp, _writer) = harness();
         let dev = device();
         let hash = sample_hash();
 
@@ -383,7 +396,7 @@ mod tests {
 
     #[tokio::test]
     async fn detach_on_existing_link_returns_detached_1() {
-        let (uc, _tmp) = harness();
+        let (uc, _tmp, _writer) = harness();
         let dev = device();
         let hash = sample_hash();
 
@@ -417,7 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_files_with_tags_none_filter_returns_empty_on_fresh_db() {
-        let (uc, _tmp) = harness();
+        let (uc, _tmp, _writer) = harness();
 
         let out = uc
             .execute(TagCommand::ListFilesWithTags { filter: None })

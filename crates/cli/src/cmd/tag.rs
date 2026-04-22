@@ -18,8 +18,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use perima_app::{AppContainer, TagCommand, TagOutput};
-use perima_core::{BlakeHash, CoreError, DeviceId, FileRepository, TagRepository, normalize_tag};
-use perima_db::{SqliteFileRepository, SqliteTagRepository, open_and_migrate};
+use perima_core::{BlakeHash, CoreError, DeviceId, FileRepository, normalize_tag};
+use perima_db::{SqliteFileRepository, open_and_migrate};
 
 use super::metadata::find_by_absolute_suffix;
 
@@ -178,7 +178,7 @@ async fn run_rm(
 }
 
 /// List all active tags with their per-tag file counts.
-async fn run_ls(container: &AppContainer, data_dir: &Path, json: bool) -> Result<(), CoreError> {
+async fn run_ls(container: &AppContainer, _data_dir: &Path, json: bool) -> Result<(), CoreError> {
     let out = container.tag.execute(TagCommand::List).await?;
     let TagOutput::Tags(tags) = out else {
         return Err(CoreError::Internal(
@@ -186,15 +186,14 @@ async fn run_ls(container: &AppContainer, data_dir: &Path, json: bool) -> Result
         ));
     };
 
-    // WHY direct TagRepository open for counts: `count_files_for_tag` is
-    // not (yet) exposed through `TagUseCase`. Opening one short-lived
-    // connection for the count pass matches the `cmd/metadata.rs` pattern
-    // and is a follow-up for the next UseCase iteration.
-    let db_path = data_dir.join("perima.db");
-    let tag_repo = SqliteTagRepository::new(open_and_migrate(&db_path)?);
+    // WHY direct TagRepository via container.tags: `count_files_for_tag`
+    // is not (yet) exposed through `TagUseCase`. Post-Batch-C Task 3,
+    // the container exposes `Arc<dyn TagRepository>` directly so we no
+    // longer need a short-lived `SqliteTagRepository::new(...)` open
+    // here. A future UseCase iteration can lift this into `TagOutput`.
     let counts: Vec<u64> = tags
         .iter()
-        .map(|t| tag_repo.count_files_for_tag(t.id))
+        .map(|t| container.tags.count_files_for_tag(t.id))
         .collect::<Result<_, _>>()?;
 
     if json {

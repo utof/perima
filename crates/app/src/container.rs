@@ -160,6 +160,18 @@ pub struct AppContainer {
     /// type keeps the container decoupled from the concrete adapter
     /// (same pattern as `AppDeps::volumes`).
     pub volumes: Arc<dyn VolumeRepository>,
+    /// Direct handle to the tag repository port.
+    ///
+    /// WHY exposed (post-Batch-C Task 3): shell sites use
+    /// `TagRepository::count_files_for_tag` and `files_with_tag`
+    /// directly (CLI `tag ls` counts, CLI `ls --tag` filter); those
+    /// methods are not exposed through [`TagUseCase`] today. Before
+    /// Batch C, each of those sites opened a short-lived
+    /// `SqliteTagRepository::new(conn)`. With the writer actor owning
+    /// the sole writable connection, every shell site shares one
+    /// adapter handle via this field. Same pattern / rationale as
+    /// `volumes` above.
+    pub tags: Arc<dyn TagRepository>,
 }
 
 impl std::fmt::Debug for AppContainer {
@@ -226,6 +238,10 @@ impl AppContainer {
         // sites that need `find_or_create` can reach it without a
         // second open. Arc::clone is refcount-only; no allocation.
         let volumes = Arc::clone(&deps.volumes);
+        // WHY same treatment for tags: CLI `tag ls` + `ls --tag` call
+        // `count_files_for_tag` / `files_with_tag` directly — not
+        // exposed by `TagUseCase`. Arc::clone is refcount-only.
+        let tags = Arc::clone(&deps.tags);
 
         Arc::new(Self {
             scan,
@@ -235,6 +251,7 @@ impl AppContainer {
             metadata,
             events,
             volumes,
+            tags,
         })
     }
 }
@@ -352,22 +369,22 @@ mod tests {
         let db_tmp = tempfile::tempdir().unwrap();
         let db_path = db_tmp.path().join("perima.db");
 
-        // WHY mixed opens: Task 2 hybrid — Volume uses writer+pool;
-        // File/Tag/Metadata/Search still take an owned Connection
-        // until Tasks 3-6 migrate them. Migrations run once inside
+        // WHY mixed opens: Task 3 hybrid — Volume + Tag use writer+pool;
+        // File/Metadata/Search still take an owned Connection until
+        // Tasks 4-6 migrate them. Migrations run once inside
         // `SqliteWriter::start`, so later legacy opens skip the
         // migration sniff.
         let writer = SqliteWriter::start(&db_path, Arc::new(TestNoopBus)).unwrap();
         let reads = ReadPool::open(&db_path).unwrap();
         let file_conn = open_and_migrate(&db_path).unwrap();
-        let tag_conn = open_and_migrate(&db_path).unwrap();
         let meta_conn = open_and_migrate(&db_path).unwrap();
         let search_conn = open_and_migrate(&db_path).unwrap();
 
         let files: Arc<dyn FileRepository> = Arc::new(SqliteFileRepository::new(file_conn));
         let volumes: Arc<dyn VolumeRepository> =
-            Arc::new(SqliteVolumeRepository::new(writer.sender(), reads));
-        let tags: Arc<dyn TagRepository> = Arc::new(SqliteTagRepository::new(tag_conn));
+            Arc::new(SqliteVolumeRepository::new(writer.sender(), reads.clone()));
+        let tags: Arc<dyn TagRepository> =
+            Arc::new(SqliteTagRepository::new(writer.sender(), reads));
         let metadata: Arc<dyn MetadataRepository> =
             Arc::new(SqliteMetadataRepository::new(meta_conn));
         let search: Arc<dyn SearchRepository> = Arc::new(SqliteSearchRepository::new(search_conn));

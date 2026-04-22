@@ -14,7 +14,8 @@ use std::path::PathBuf;
 
 use flume::Sender;
 
-use perima_core::{CoreError, DeviceId, VolumeId, VolumeIdentifiers};
+use perima_core::{BlakeHash, CoreError, DeviceId, Tag, VolumeId, VolumeIdentifiers};
+use uuid::Uuid;
 
 /// Reply channel alias for writer-to-caller responses.
 pub type ReplyTx<T> = Sender<Result<T, CoreError>>;
@@ -72,9 +73,65 @@ pub enum VolumeWriteCmd {
 }
 
 /// Tag-repo write commands. Populated by Task 3.
+///
+/// WHY `ReplyTx<u64>` on `Attach` / `Detach` / `DeleteTag` (not `()`):
+/// the writer learns `rusqlite::Connection::changes()` after each UPDATE
+/// / INSERT, and callers occasionally want "did anything actually
+/// happen?" signal. The current [`perima_core::TagRepository`] port
+/// returns `Result<(), CoreError>` on attach/detach/delete, so the
+/// adapter drops the `u64` on the floor today; keeping the wider reply
+/// channel now means surfacing the count later is a port-only change.
 #[derive(Debug)]
-#[non_exhaustive]
-pub enum TagWriteCmd {}
+pub enum TagWriteCmd {
+    /// Insert a new tag row (or look up an existing active one by
+    /// normalized name). Returns the resolved [`Tag`].
+    ///
+    /// Name normalization is performed by the adapter before the command
+    /// is sent — the writer receives the already-normalized `name`.
+    UpsertTag {
+        /// Normalized tag name (post `perima_core::normalize_tag`).
+        name: String,
+        /// Device that initiated the upsert.
+        device: DeviceId,
+        /// Reply channel carrying the resolved [`Tag`].
+        reply: ReplyTx<Tag>,
+    },
+    /// Soft-delete a tag by id. Attachments in `file_tags` survive —
+    /// CRDT semantics preserve link history (see port trait doc).
+    DeleteTag {
+        /// Tag UUID.
+        tag_id: Uuid,
+        /// Device that initiated the delete.
+        device: DeviceId,
+        /// Reply channel carrying `rows_changed` (0 if already deleted).
+        reply: ReplyTx<u64>,
+    },
+    /// Attach a tag to a content hash. Idempotent at the DB level —
+    /// re-attaching an already-active `(hash, tag_id)` pair is a no-op.
+    Attach {
+        /// Content hash.
+        hash: BlakeHash,
+        /// Tag UUID.
+        tag_id: Uuid,
+        /// Device that initiated the attach.
+        device: DeviceId,
+        /// Reply channel carrying `rows_changed` (1 on new insert, 0 on
+        /// idempotent repeat).
+        reply: ReplyTx<u64>,
+    },
+    /// Soft-delete the `file_tags` row linking `hash` → `tag_id`.
+    Detach {
+        /// Content hash.
+        hash: BlakeHash,
+        /// Tag UUID.
+        tag_id: Uuid,
+        /// Device that initiated the detach.
+        device: DeviceId,
+        /// Reply channel carrying `rows_changed` (0 if nothing was
+        /// active for the pair).
+        reply: ReplyTx<u64>,
+    },
+}
 
 /// Metadata-repo write commands. Populated by Task 4.
 #[derive(Debug)]

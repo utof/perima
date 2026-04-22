@@ -150,10 +150,14 @@ impl SearchRepository for SqliteSearchRepository {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use perima_core::{DeviceId, TagRepository};
+    use std::sync::Arc;
 
+    use super::*;
+    use perima_core::{DeviceId, EventBus, FileEvent, TagRepository};
+
+    use crate::pool::ReadPool;
     use crate::tag_repo::SqliteTagRepository;
+    use crate::writer::{SqliteWriter, SqliteWriterHandle};
 
     const DEV: &str = "dev";
     const TS: &str = "2026-01-01T00:00:00Z";
@@ -171,19 +175,41 @@ mod tests {
         (td, SqliteSearchRepository::new(conn))
     }
 
+    /// Harness for search + tag tests.
+    ///
+    /// WHY returns `SqliteWriterHandle`: post-Batch-C Task 3,
+    /// `SqliteTagRepository` holds `(flume::Sender<WriteCmd>, ReadPool)`.
+    /// Tests must keep the writer handle alive so the writer thread
+    /// outlives the tag repo.
     fn test_db_with_tag_repo() -> (
         tempfile::TempDir,
         SqliteSearchRepository,
         SqliteTagRepository,
+        SqliteWriterHandle,
     ) {
+        struct NoopBus;
+        impl EventBus for NoopBus {
+            fn emit(&self, _: &FileEvent) -> Result<(), perima_core::CoreError> {
+                Ok(())
+            }
+        }
+
         let td = tempfile::tempdir().expect("tempdir");
         let db = td.path().join("test.db");
-        let conn1 = crate::connection::open_and_migrate(&db).expect("open search");
-        let conn2 = crate::connection::open_and_migrate(&db).expect("open tag");
+
+        // Writer runs the migration sweep; search still takes an owned
+        // `Connection` (Task 6 will migrate it). WAL mode lets the two
+        // connections coexist.
+        let bus: Arc<dyn EventBus> = Arc::new(NoopBus);
+        let writer = SqliteWriter::start(&db, bus).expect("writer start");
+        let reads = ReadPool::open(&db).expect("pool open");
+        let search_conn = crate::connection::open_and_migrate(&db).expect("open search");
+
         (
             td,
-            SqliteSearchRepository::new(conn1),
-            SqliteTagRepository::new(conn2),
+            SqliteSearchRepository::new(search_conn),
+            SqliteTagRepository::new(writer.sender(), reads),
+            writer,
         )
     }
 
@@ -282,7 +308,7 @@ mod tests {
 
     #[test]
     fn search_finds_by_tag() {
-        let (_td, repo, tag_repo) = test_db_with_tag_repo();
+        let (_td, repo, tag_repo, _writer) = test_db_with_tag_repo();
         {
             let conn = repo.conn.lock().expect("lock");
             insert_file(&conn, HASH_A, VOL, "beach.jpg");
@@ -337,7 +363,7 @@ mod tests {
 
     #[test]
     fn trigger_sync_on_tag_attach() {
-        let (_td, repo, tag_repo) = test_db_with_tag_repo();
+        let (_td, repo, tag_repo, _writer) = test_db_with_tag_repo();
         {
             let conn = repo.conn.lock().expect("lock");
             insert_file(&conn, HASH_A, VOL, "img.jpg");
@@ -395,7 +421,7 @@ mod tests {
         // match (SQLite convention; default `rank` returns negative BM25
         // score, smaller = better).
         const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        let (_td, repo, tag_repo) = test_db_with_tag_repo();
+        let (_td, repo, tag_repo, _writer) = test_db_with_tag_repo();
         {
             let conn = repo.conn.lock().expect("lock");
             insert_file(&conn, HASH_A, VOL, "vacation_tagged.jpg");
