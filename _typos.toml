@@ -12,6 +12,11 @@ extend-exclude = [
     "dist/",
     "*.snap",
     "CHANGELOG.md",  # existing past-tense entries; don't retro-edit
+    # WHY: superpowers specs/plans/cheatsheet contain many short git SHAs
+    # (e.g. `8ba3f04`, `6f74e30`) whose hex fragments trip the typos dictionary
+    # as false positives. These files are authored-for-AI-sessions drafts;
+    # typos noise here burns more minutes than it saves.
+    "docs/superpowers/**",
 ]
 
 [default.extend-words]
