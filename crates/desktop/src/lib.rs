@@ -250,12 +250,17 @@ fn build_container(
         reads.clone(),
     ));
     let search_repo = Arc::new(SqliteSearchRepository::new(writer.sender(), reads));
-    // WHY explicit `Arc<dyn _>` bindings: `AppDeps::{tags,metadata,search}`
-    // are `Arc<dyn _>`; assigning the cloned concrete-typed `Arc`s to
-    // the typed locals triggers the unsize coercion.
-    let tags: Arc<dyn TagRepository> = Arc::clone(&tag_repo);
-    let metadata: Arc<dyn MetadataRepository> = Arc::clone(&metadata_repo);
-    let search: Arc<dyn SearchRepository> = Arc::clone(&search_repo);
+    // WHY `.clone()` not `Arc::clone(&_)`: `AppDeps::{tags,metadata,search}`
+    // are `Arc<dyn _>`. Method-syntax `.clone()` anchors `T = SqliteX` from
+    // the receiver, returns `Arc<SqliteX>`, and the let binding triggers
+    // the `Arc<SqliteX> -> Arc<dyn _>` unsize coercion at assignment.
+    // The UFCS form `Arc::clone(&tag_repo)` fails: bidirectional inference
+    // picks `T = dyn _` from the let-binding type, then complains the input
+    // `&Arc<SqliteX>` doesn't match `&Arc<dyn _>` (coercion does not apply
+    // through references). CI macOS surfaced this on PR #130.
+    let tags: Arc<dyn TagRepository> = tag_repo.clone();
+    let metadata: Arc<dyn MetadataRepository> = metadata_repo.clone();
+    let search: Arc<dyn SearchRepository> = search_repo.clone();
     let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
     let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());
 
