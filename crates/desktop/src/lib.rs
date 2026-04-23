@@ -224,8 +224,8 @@ fn build_container(
     perima_core::CoreError,
 > {
     // WHY a `NoopBus` to the writer: the writer's after-COMMIT emission
-    // path is scaffolded but file-event emission is handled by the
-    // composite bus wired into `AppContainer`. Batch E's `async-broadcast`
+    // path is scaffolded but `AppEvent` emission is handled by
+    // `AppContainer`'s `Bus` (Batch E). Batch E's `async-broadcast`
     // will re-plumb this once the single-construction-site invariant is
     // relaxed. Spec §§3.3 + 4.8 (A4.8 first bullet).
     struct NoopBus;
