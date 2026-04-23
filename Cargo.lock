@@ -3446,6 +3446,7 @@ dependencies = [
  "blake3",
  "chrono",
  "flume",
+ "insta",
  "minijinja",
  "perima-core",
  "perima-db",

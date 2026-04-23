@@ -1,0 +1,118 @@
+---
+source: crates/db/src/schema/mod.rs
+assertion_line: 139
+expression: "render_for_source(\"search_content\")"
+---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+DROP TRIGGER IF EXISTS sc_after_insert;
+DROP TRIGGER IF EXISTS sc_after_update;
+DROP TRIGGER IF EXISTS sc_after_delete;
+
+
+
+
+
+CREATE TRIGGER sc_after_insert
+AFTER INSERT ON search_content
+BEGIN
+INSERT INTO search_index
+        (rowid, filename, relative_path, mime_type, camera_model, captured_at, tags)
+    VALUES
+        (NEW.rowid, NEW.filename, NEW.relative_path, NEW.mime_type,
+         NEW.camera_model, NEW.captured_at, NEW.tags);
+END;
+
+
+CREATE TRIGGER sc_after_update
+AFTER UPDATE ON search_content
+BEGIN
+INSERT INTO search_index
+        (search_index, rowid, filename, relative_path, mime_type, camera_model, captured_at, tags)
+    VALUES
+        ('delete', OLD.rowid, OLD.filename, OLD.relative_path, OLD.mime_type,
+         OLD.camera_model, OLD.captured_at, OLD.tags);
+    INSERT INTO search_index
+        (rowid, filename, relative_path, mime_type, camera_model, captured_at, tags)
+    VALUES
+        (NEW.rowid, NEW.filename, NEW.relative_path, NEW.mime_type,
+         NEW.camera_model, NEW.captured_at, NEW.tags);
+END;
+
+
+CREATE TRIGGER sc_after_delete
+AFTER DELETE ON search_content
+BEGIN
+INSERT INTO search_index
+        (search_index, rowid, filename, relative_path, mime_type, camera_model, captured_at, tags)
+    VALUES
+        ('delete', OLD.rowid, OLD.filename, OLD.relative_path, OLD.mime_type,
+         OLD.camera_model, OLD.captured_at, OLD.tags);
+END;
