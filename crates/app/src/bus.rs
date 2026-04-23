@@ -8,12 +8,19 @@ use std::sync::Arc;
 use async_broadcast::{InactiveReceiver, Receiver, Sender, TrySendError, broadcast};
 use perima_core::{AppEvent, CoreError, EventBus};
 
-/// Per-subscriber inbox capacity. Backpressure mode (default —
-/// `set_overflow(false)`): when ALL subscriber inboxes are saturated,
-/// `try_broadcast` returns `Err(Full)`. On the receiver side, the
-/// next `recv()` returns `Err(Overflowed(n))` indicating n missed
-/// events. Capacity 256 is the umbrella spec §A7 number; a fast
-/// subscriber drains 256 in milliseconds.
+/// Bus's bounded shared-buffer capacity. Backpressure mode (default —
+/// `set_overflow(false)`): when the buffer is saturated, `try_broadcast`
+/// returns `Err(Full)` (mapped to `Ok(())` with a warn log in `Bus::emit`).
+/// Receivers track their own cursor into the shared ring buffer; the
+/// next `recv()` simply yields the next un-dropped event. Bus's
+/// backpressure mode never surfaces `RecvError::Overflowed(n)` — that
+/// path only fires under `set_overflow(true)` (overflow mode), which
+/// the raw-channel test `receiver_overflowed_keeps_going` exercises
+/// to document the contract async-broadcast provides for late-joiner
+/// replay (umbrella spec §A7 future work).
+///
+/// Capacity 256 is the umbrella spec §A7 number; a fast subscriber
+/// drains 256 in milliseconds.
 const CAPACITY: usize = 256;
 
 /// Application-wide event bus.
@@ -45,9 +52,9 @@ impl std::fmt::Debug for Bus {
 }
 
 impl Bus {
-    /// Construct a fresh bus with [`CAPACITY`]-sized per-subscriber
-    /// inboxes. Holds an inactive receiver alive so the channel
-    /// doesn't close when subscribers drop.
+    /// Construct a fresh bus with a `CAPACITY`-sized shared ring buffer.
+    /// Holds an inactive receiver alive so the channel doesn't close
+    /// when subscribers drop.
     #[must_use]
     pub fn new() -> Arc<Self> {
         let (sender, receiver) = broadcast(CAPACITY);
@@ -58,8 +65,8 @@ impl Bus {
         })
     }
 
-    /// Subscribe to the bus. Returns a fresh `Receiver` with its own
-    /// CAPACITY-sized inbox. Drop the receiver to unsubscribe.
+    /// Subscribe to the bus. Returns a fresh `Receiver` whose cursor
+    /// tracks the shared ring buffer. Drop the receiver to unsubscribe.
     #[must_use]
     pub fn subscribe(&self) -> Receiver<AppEvent> {
         self.sender.new_receiver()
