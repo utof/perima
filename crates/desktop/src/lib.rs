@@ -23,7 +23,7 @@ pub mod state;
 use std::path::Path;
 use std::sync::Arc;
 
-use perima_app::{AppContainer, AppDeps, LogEventHandler};
+use perima_app::{AppContainer, AppDeps, EventHandler, LogEventHandler};
 use perima_core::{
     EventBus, FileRepository, HashService, MetadataRepository, Scanner, SearchRepository,
     TagRepository, VolumeRepository,
@@ -39,7 +39,7 @@ use tauri::Manager;
 use tauri_specta::{Builder, collect_commands};
 
 use crate::commands::DbEventHandler;
-use crate::events::TauriEventEmitter;
+use crate::events::TauriEventHandler;
 
 /// Boxed error type used by [`run`].
 ///
@@ -131,15 +131,15 @@ pub fn run() -> Result<(), RunError> {
             // `DbEventHandler` holds `Arc<SqliteFileRepository>`, which
             // requires a concrete (not trait-object) type. The handler
             // must be constructed BEFORE `build_container` so it can be
-            // passed as an extra_handler into `AppContainer::new` — the
-            // single CompositeEventBus construction site. Opening a
-            // separate writer+pool pair here is cheap under WAL mode;
-            // SQLite WAL serialises concurrent writers at the OS level.
+            // passed as an `EventHandler` into `AppContainer::new` — the
+            // single `Bus` construction site. Opening a separate
+            // writer+pool pair here is cheap under WAL mode; SQLite WAL
+            // serialises concurrent writers at the OS level.
             //
-            // WHY the `TauriEventEmitter` + `DbEventHandler` are wired
+            // WHY the `TauriEventHandler` + `DbEventHandler` are wired
             // at setup (not at `start_watch` time): the single-bus-
             // construction invariant (spec §4) says exactly one
-            // `CompositeEventBus::new` call in the codebase, inside
+            // `Bus::new` call in the codebase, inside
             // `AppContainer::new`. When no watcher is active neither
             // handler fires — events originate only from
             // `DebouncedWatcher` which only runs while `start_watch`
@@ -158,17 +158,19 @@ pub fn run() -> Result<(), RunError> {
                 watch_writer.sender(),
                 watch_reads,
             ));
-            let db_handler: Arc<dyn EventBus> = Arc::new(DbEventHandler::new(
-                Arc::clone(&watch_file_repo),
-                cfg.device_id,
-            ));
-            let tauri_emitter: Arc<dyn EventBus> = Arc::new(TauriEventEmitter {
-                app_handle: app.handle().clone(),
-            });
-            let log_handler: Arc<dyn EventBus> = Arc::new(LogEventHandler);
+            let handlers: Vec<Box<dyn EventHandler>> = vec![
+                Box::new(LogEventHandler),
+                Box::new(DbEventHandler::new(
+                    Arc::clone(&watch_file_repo),
+                    cfg.device_id,
+                )),
+                Box::new(TauriEventHandler {
+                    app_handle: app.handle().clone(),
+                }),
+            ];
 
             let (container, writer_handle, tag_repo, metadata_repo, search_repo) =
-                build_container(&db_path, vec![log_handler, db_handler, tauri_emitter])?;
+                build_container(&db_path, handlers)?;
 
             // WHY `manage(writer_handle)`: the writer thread stays
             // alive as long as at least one `flume::Sender<WriteCmd>`
@@ -176,10 +178,9 @@ pub fn run() -> Result<(), RunError> {
             // on the container; storing the handle lets a future
             // `shutdown` command call `handle.join()` explicitly.
             // WHY NOT manage `watch_writer`: the watch writer's sender
-            // lives inside `watch_file_repo` → `DbEventHandler` → the
-            // composite bus on the container — kept alive by
-            // `manage(app_state)`. The handle is intentionally dropped
-            // here; thread reaps when all senders drop at process exit.
+            // lives inside `watch_file_repo` → `DbEventHandler` — kept
+            // alive by `manage(app_state)`. The handle is intentionally
+            // dropped here; thread reaps when all senders drop at process exit.
             drop(watch_writer);
             app.manage(writer_handle);
 
@@ -211,7 +212,7 @@ pub fn run() -> Result<(), RunError> {
 /// methods not exposed by the trait object.
 fn build_container(
     db_path: &Path,
-    handlers: Vec<Arc<dyn EventBus>>,
+    handlers: Vec<Box<dyn EventHandler>>,
 ) -> Result<
     (
         Arc<AppContainer>,

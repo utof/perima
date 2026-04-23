@@ -26,8 +26,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use perima_app::{
-    FullScan, MetadataCommand, MetadataOutput, ScanCommand, ScanReport, SearchCommand,
-    SearchOutput, TagCommand, TagFilter, TagOutput, VolumeCommand, VolumeOutput,
+    EventHandler, FullScan, MetadataCommand, MetadataOutput, ScanCommand, ScanReport,
+    SearchCommand, SearchOutput, TagCommand, TagFilter, TagOutput, VolumeCommand, VolumeOutput,
 };
 use perima_core::{
     AppEvent, CoreError, DeviceId, EventBus, FileEvent, FileLocationRecord, LocationStatus,
@@ -83,16 +83,17 @@ const METADATA_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 // ports-and-adapters boundary. `LogEventHandler` — previously the
 // duplicate sibling in this section — was hoisted to
 // `perima_app::telemetry` in Task 10 because it has zero adapter
-// coupling. The shell-local `CompositeEventBus` struct that lived
-// here pre-Task-9 is also deleted — spec §4 acceptance demands
-// exactly one `CompositeEventBus::new` call in the codebase and that
-// site is now `crates/app/src/container.rs::AppContainer::new`.
+// coupling. The shell-local `TauriEventHandler` (Batch E Task 11)
+// replaces the old `TauriEventEmitter` + `EventBus` wiring with the
+// `EventHandler` trait pattern — exactly one `Bus::new` call in the
+// codebase, inside `crates/app/src/container.rs::AppContainer::new`.
 // ---------------------------------------------------------------------------
 
 /// Updates the database in response to filesystem events.
 ///
-/// WHY `Arc<SqliteFileRepository>`: `EventBus` requires `Send + Sync`.
-/// `SqliteFileRepository` uses `Mutex<Connection>` internally, satisfying both.
+/// WHY `Arc<SqliteFileRepository>`: `EventHandler` requires `Send + 'static`.
+/// `SqliteFileRepository` uses interior mutability (flume sender + r2d2 pool),
+/// satisfying both. `Arc` gives shared ownership without cloning the heavy repo.
 pub struct DbEventHandler {
     repo: Arc<SqliteFileRepository>,
     device: DeviceId,
@@ -103,7 +104,7 @@ impl DbEventHandler {
     /// and device.
     ///
     /// WHY a `new` constructor: `lib.rs::setup` builds the handler before
-    /// `AppContainer::new` wraps it into the single `CompositeEventBus`.
+    /// `AppContainer::new` wraps it into the single `Bus`.
     /// Keeping the struct fields private + exposing `new` preserves
     /// encapsulation across the crate boundary.
     #[must_use]
@@ -112,11 +113,19 @@ impl DbEventHandler {
     }
 }
 
-impl EventBus for DbEventHandler {
-    fn emit(&self, event: &AppEvent) -> Result<(), CoreError> {
-        match event {
-            AppEvent::File(file_event) => self.record_file_event(file_event),
-            AppEvent::ScanCompleted { .. } | AppEvent::IndexInvalidated { .. } => Ok(()),
+#[async_trait::async_trait]
+impl EventHandler for DbEventHandler {
+    fn name(&self) -> &'static str {
+        "db_event_handler"
+    }
+
+    async fn handle(&mut self, event: AppEvent) {
+        // Desktop DB handler only acts on FileEvents — ScanCompleted and
+        // IndexInvalidated are handled by TauriEventHandler for the frontend.
+        if let AppEvent::File(file_event) = event {
+            if let Err(e) = self.record_file_event(&file_event) {
+                tracing::warn!(error = %e, "failed to record file event");
+            }
         }
     }
 }
@@ -600,8 +609,8 @@ pub fn list_volumes_inner(
 /// Validates the path, detects the volume, then starts a new
 /// [`DebouncedWatcher`] that forwards every filesystem event to the
 /// shared `container.events` bus. The bus was assembled once at
-/// `lib.rs::setup` with the `DbEventHandler`, `TauriEventEmitter`, and
-/// `LogEventHandler` already wired — no second `CompositeEventBus` is
+/// `lib.rs::setup` with the `LogEventHandler`, `DbEventHandler`, and
+/// `TauriEventHandler` already wired — no second `Bus` is
 /// constructed here (spec §4 acceptance).
 ///
 /// # Errors
@@ -669,10 +678,10 @@ pub async fn start_watch(
     let cancel = CancellationToken::new();
 
     // WHY `Arc::clone(&state.container.events)`: the container's
-    // `events` field is the already-composed `CompositeEventBus` built
-    // at setup time with every shell handler (log, DB, Tauri-emit).
-    // DebouncedWatcher takes an `Arc<dyn EventBus>`; cloning the Arc
-    // avoids a second bus construction in this shell.
+    // `events` field is the already-composed `Bus` built at setup time
+    // with every shell handler (Log, Db, Tauri). DebouncedWatcher takes
+    // an `Arc<dyn EventBus>`; cloning the Arc avoids a second bus
+    // construction in this shell.
     let bus: Arc<dyn EventBus> = Arc::clone(&state.container.events);
 
     // WHY 1 s production debounce: short enough for responsive feedback,

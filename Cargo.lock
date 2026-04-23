@@ -3447,6 +3447,7 @@ dependencies = [
 name = "perima-desktop"
 version = "0.6.4"
 dependencies = [
+ "async-trait",
  "chrono",
  "directories",
  "image",

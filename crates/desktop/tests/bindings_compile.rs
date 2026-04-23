@@ -49,9 +49,11 @@ fn build_test_builder() -> Builder<tauri::Wry> {
 /// Coverage rationale: `CoreError` (Result error on every handler);
 /// `ScanReport` (scan handler return); `FileLocationRecord` /
 /// `VolumeRecord` / `Tag` / `SearchHit` (handler returns); `FileEvent`
-/// (emitted via `TauriEventEmitter`); `BlakeHash` (transitive field
-/// of `FileLocationRecord`); composite payloads `FileWithMetadataPayload`
-/// + `FileWithTagsPayload` (retained per spec §8 #6).
+/// (inner variant of `AppEvent::File`); `AppEvent` + `InvalidationReason`
+/// (emitted via `TauriEventHandler` on `"app-event"` channel, Batch E Task 11);
+/// `BlakeHash` (transitive field of `FileLocationRecord`); composite
+/// payloads `FileWithMetadataPayload` + `FileWithTagsPayload` (retained
+/// per spec §8 #6).
 #[test]
 fn tauri_specta_builder_exports_full_ipc_type_graph() {
     let tmp = tempfile::NamedTempFile::new().expect("create tempfile for bindings export");
@@ -76,6 +78,12 @@ fn tauri_specta_builder_exports_full_ipc_type_graph() {
         "SearchHit",
         "FileEvent",
         "BlakeHash",
+        // AppEvent envelope (Batch E Task 11): TauriEventHandler emits the
+        // full AppEvent on the "app-event" channel. Both the wrapper type and
+        // its InvalidationReason variant must appear in bindings.ts so the
+        // frontend can pattern-match exhaustively.
+        "AppEvent",
+        "InvalidationReason",
     ] {
         assert!(ts.contains(ty), "{ty} missing from bindings");
     }
