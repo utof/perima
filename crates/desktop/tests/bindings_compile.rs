@@ -44,16 +44,27 @@ fn build_test_builder() -> Builder<tauri::Wry> {
 
 /// Verifies that the tauri-specta builder accepts all 13 IPC commands
 /// and produces a non-empty TypeScript file containing every core
-/// domain type that crosses the IPC boundary post-Batch-D.
+/// domain type that crosses the IPC boundary as a command argument or
+/// return value.
 ///
 /// Coverage rationale: `CoreError` (Result error on every handler);
 /// `ScanReport` (scan handler return); `FileLocationRecord` /
-/// `VolumeRecord` / `Tag` / `SearchHit` (handler returns); `FileEvent`
-/// (inner variant of `AppEvent::File`); `AppEvent` + `InvalidationReason`
-/// (emitted via `TauriEventHandler` on `"app-event"` channel, Batch E Task 11);
-/// `BlakeHash` (transitive field of `FileLocationRecord`); composite
-/// payloads `FileWithMetadataPayload` + `FileWithTagsPayload` (retained
-/// per spec §8 #6).
+/// `VolumeRecord` / `Tag` / `SearchHit` (handler returns); `BlakeHash`
+/// (transitive field of `FileLocationRecord`); composite payloads
+/// `FileWithMetadataPayload` + `FileWithTagsPayload` (retained per
+/// spec §8 #6).
+///
+/// WHY `AppEvent` / `FileEvent` / `InvalidationReason` are NOT asserted
+/// here: those types cross the IPC boundary via the `"app-event"` Tauri
+/// channel (Batch E Task 11), not as command arguments or returns.
+/// `tauri-specta` only walks `commands()` registrations, so channel-only
+/// types are not emitted by `Builder::export`. Per Batch E E-12, those
+/// type declarations are hand-crafted in `apps/desktop/src/bindings.ts`
+/// for v1; the `bindings-drift` CI job (Batch D D-12) compares the
+/// committed file against regeneration. A future tauri-specta `events!`
+/// registration would let those types flow through this same generator
+/// (Batch H or later); until then this test deliberately scopes itself
+/// to command-graph types.
 #[test]
 fn tauri_specta_builder_exports_full_ipc_type_graph() {
     let tmp = tempfile::NamedTempFile::new().expect("create tempfile for bindings export");
@@ -68,22 +79,15 @@ fn tauri_specta_builder_exports_full_ipc_type_graph() {
         "generated TypeScript bindings must be non-empty"
     );
 
-    // Core types on the wire: error variant + handler returns + emitted
-    // event payload + transitive fields.
+    // Core types on the wire as command args / returns + transitive
+    // fields. See doc comment for why event-channel types are excluded.
     for ty in [
         "CoreError",
         "ScanReport",
         "FileLocationRecord",
         "VolumeRecord",
         "SearchHit",
-        "FileEvent",
         "BlakeHash",
-        // AppEvent envelope (Batch E Task 11): TauriEventHandler emits the
-        // full AppEvent on the "app-event" channel. Both the wrapper type and
-        // its InvalidationReason variant must appear in bindings.ts so the
-        // frontend can pattern-match exhaustively.
-        "AppEvent",
-        "InvalidationReason",
     ] {
         assert!(ts.contains(ty), "{ty} missing from bindings");
     }
