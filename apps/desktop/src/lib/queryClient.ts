@@ -23,6 +23,10 @@ export const queryClient = new QueryClient({
       // invalidation handles real changes. Refetching on every mount
       // would hammer the writer thread for no UX win.
       staleTime: 5 * 60 * 1000,
+      // WHY 30min gcTime (v5 default is 5min): native desktop has ample
+      // RAM and quick route switches benefit from cache being warm well
+      // beyond the staleness window — next mount hydrates from cache
+      // while a background refetch runs.
       gcTime: 30 * 60 * 1000,
       // WHY false: a desktop window losing focus is not a "data may be
       // stale" signal. We're not a web app multiplexing tabs.
