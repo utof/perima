@@ -243,4 +243,23 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn template_parses_without_panic() {
+        // Confirms the template file parses as valid jinja and is registrable.
+        // Does NOT exercise rendering against a real context — that's Task 4's
+        // snapshot tests.
+        // WHY `Environment::empty`: `Environment::new` is deprecated when used
+        // without the `serde` feature (default-features = false in our pin).
+        // Parse-only smoke test needs no auto-escape / built-in filters anyway.
+        let mut env = minijinja::Environment::empty();
+        env.add_template(
+            "fts_triggers.sql.j2",
+            include_str!("templates/fts_triggers.sql.j2"),
+        )
+        .expect("template parses");
+        let _ = env
+            .get_template("fts_triggers.sql.j2")
+            .expect("get_template");
+    }
 }

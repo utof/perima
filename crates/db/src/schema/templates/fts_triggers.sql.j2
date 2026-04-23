@@ -1,0 +1,320 @@
+{# =============================================================================
+   FTS5 trigger codegen template.
+
+   Single source of truth for the 16 FTS sync triggers (see
+   crates/db/src/schema/spec.rs::FTS_AGGREGATIONS). The Rust render side
+   (added in Task 4) hands us:
+     - aggregations:          [ { name, source_table, event: { kind, col? },
+                                  when?, body }, ... ]
+     - legacy_trigger_names:  [ "search_after_location_hash_change", ... ]
+
+   The template emits, in order:
+     (1) shared aggregation macros (the V007->V008 lesson encoded once),
+     (2) per-BodyKind body macros (16),
+     (3) prologue: DROP every legacy name, then DROP every current name,
+     (4) CREATE every aggregation in spec order (fire-order matters).
+
+   THE V007->V008 LESSON: every tag aggregation MUST filter
+   `deleted_at IS NULL` on BOTH the link table (`file_tags`) AND the
+   entity table (`tags`). Every metadata aggregation MUST filter
+   `deleted_at IS NULL` on `file_metadata`. The shared macros below
+   bake this in -- adding a new aggregation should reach for them
+   instead of inlining a JOIN.
+============================================================================= #}
+
+{# === Shared aggregation macros ============================================ #}
+
+{# Tag-name aggregation for a given hash expression. Both deleted_at
+   filters are MANDATORY -- this is the V008 #1 fix encoded once. #}
+{% macro tags_agg(blake_expr) -%}
+COALESCE((
+            SELECT GROUP_CONCAT(t.name, ' ')
+            FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+            WHERE ft.blake3_hash = {{ blake_expr }}
+              AND ft.deleted_at IS NULL
+              AND t.deleted_at IS NULL
+        ), '')
+{%- endmacro %}
+
+{# Single-column lookup from file_metadata, filtered live. The COALESCE
+   collapses both NULL-row (no metadata) and NULL-column cases to ''. #}
+{% macro metadata_col(col, blake_expr) -%}
+COALESCE((SELECT {{ col }} FROM file_metadata
+                                  WHERE blake3_hash = {{ blake_expr }}
+                                    AND deleted_at IS NULL), '')
+{%- endmacro %}
+
+{# Representative path for a given hash expression: the first-seen
+   surviving location row (deterministic via (first_seen ASC, id ASC)). #}
+{% macro representative_path(blake_expr) -%}
+(SELECT fl.relative_path FROM file_locations fl
+                         WHERE fl.blake3_hash = {{ blake_expr }} AND fl.deleted_at IS NULL
+                         ORDER BY fl.first_seen ASC, fl.id ASC LIMIT 1)
+{%- endmacro %}
+
+{# Seed an empty search_content row with the representative path columns
+   (filename + relative_path) only. Metadata/tags columns get refreshed
+   by a follow-up UPDATE in the calling trigger body. #}
+{% macro seed_search_content(blake_expr) -%}
+INSERT OR IGNORE INTO search_content (blake3_hash, filename, relative_path)
+    SELECT {{ blake_expr }}, fl.relative_path, fl.relative_path
+    FROM file_locations fl
+    WHERE fl.blake3_hash = {{ blake_expr }} AND fl.deleted_at IS NULL
+    ORDER BY fl.first_seen ASC, fl.id ASC LIMIT 1;
+{%- endmacro %}
+
+{# Refresh the path/metadata/tags columns of an already-seeded
+   search_content row, reading every value from joined live state. Used
+   by hash-change-seed and location-restore. NEVER pass NEW.relative_path
+   here; per V008 #2 the representative's path must come from a fresh
+   live-state lookup, not from the row that fired the trigger. #}
+{% macro refresh_full_from_live(blake_expr) -%}
+UPDATE search_content
+    SET filename      = {{ representative_path(blake_expr) }},
+        relative_path = {{ representative_path(blake_expr) }},
+        mime_type     = {{ metadata_col('mime_type', blake_expr) }},
+        camera_model  = {{ metadata_col('camera_model', blake_expr) }},
+        captured_at   = {{ metadata_col('captured_at', blake_expr) }},
+        tags          = {{ tags_agg(blake_expr) }}
+    WHERE blake3_hash = {{ blake_expr }};
+{%- endmacro %}
+
+{# Refresh the tags column for every search_content row whose hash is
+   referenced by a non-soft-deleted file_tags entry pointing at `tag_id_expr`.
+   Correlated subquery uses search_content.blake3_hash, NOT NEW/OLD --
+   intentional, so the same body works for tag rename + tag soft-delete +
+   tag restore + tag hard-delete. #}
+{% macro refresh_tags_for_holders(tag_id_expr) -%}
+UPDATE search_content
+    SET tags = COALESCE((
+        SELECT GROUP_CONCAT(t.name, ' ')
+        FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+        WHERE ft.blake3_hash = search_content.blake3_hash
+          AND ft.deleted_at IS NULL
+          AND t.deleted_at IS NULL
+    ), '')
+    WHERE blake3_hash IN (
+        SELECT ft.blake3_hash FROM file_tags ft
+        WHERE ft.tag_id = {{ tag_id_expr }} AND ft.deleted_at IS NULL
+    );
+{%- endmacro %}
+
+{# === Per-BodyKind macros (16) ============================================= #}
+
+{# search_content -> search_index sync (V007 internal API). #}
+
+{% macro body_search_content_after_insert() -%}
+    INSERT INTO search_index
+        (rowid, filename, relative_path, mime_type, camera_model, captured_at, tags)
+    VALUES
+        (NEW.rowid, NEW.filename, NEW.relative_path, NEW.mime_type,
+         NEW.camera_model, NEW.captured_at, NEW.tags);
+{%- endmacro %}
+
+{% macro body_search_content_after_update() -%}
+    INSERT INTO search_index
+        (search_index, rowid, filename, relative_path, mime_type, camera_model, captured_at, tags)
+    VALUES
+        ('delete', OLD.rowid, OLD.filename, OLD.relative_path, OLD.mime_type,
+         OLD.camera_model, OLD.captured_at, OLD.tags);
+    INSERT INTO search_index
+        (rowid, filename, relative_path, mime_type, camera_model, captured_at, tags)
+    VALUES
+        (NEW.rowid, NEW.filename, NEW.relative_path, NEW.mime_type,
+         NEW.camera_model, NEW.captured_at, NEW.tags);
+{%- endmacro %}
+
+{% macro body_search_content_after_delete() -%}
+    INSERT INTO search_index
+        (search_index, rowid, filename, relative_path, mime_type, camera_model, captured_at, tags)
+    VALUES
+        ('delete', OLD.rowid, OLD.filename, OLD.relative_path, OLD.mime_type,
+         OLD.camera_model, OLD.captured_at, OLD.tags);
+{%- endmacro %}
+
+{# file_locations triggers. #}
+
+{% macro body_file_locations_insert() -%}
+    INSERT OR IGNORE INTO search_content
+        (blake3_hash, filename, relative_path, mime_type, camera_model, captured_at, tags)
+    SELECT NEW.blake3_hash,
+           NEW.relative_path,
+           NEW.relative_path,
+           COALESCE(m.mime_type, ''),
+           COALESCE(m.camera_model, ''),
+           COALESCE(m.captured_at, ''),
+           {{ tags_agg('NEW.blake3_hash') }}
+    FROM (SELECT NULL) placeholder
+    LEFT JOIN file_metadata m ON m.blake3_hash = NEW.blake3_hash
+                              AND m.deleted_at IS NULL;
+{%- endmacro %}
+
+{% macro body_location_hash_change_retire() -%}
+    DELETE FROM search_content
+    WHERE blake3_hash = OLD.blake3_hash
+      AND NOT EXISTS (
+          SELECT 1 FROM file_locations fl
+          WHERE fl.blake3_hash = OLD.blake3_hash
+            AND fl.deleted_at IS NULL
+            AND fl.id != NEW.id
+      );
+{%- endmacro %}
+
+{% macro body_location_hash_change_seed() -%}
+    {{ seed_search_content('NEW.blake3_hash') }}
+
+    {{ refresh_full_from_live('NEW.blake3_hash') }}
+{%- endmacro %}
+
+{# RenameRepresentative is the ONE body that intentionally consumes
+   NEW.relative_path directly rather than via representative_path().
+   The trigger's WHEN-guard already asserts NEW IS the representative
+   (NEW.id = first-seen surviving location for NEW.blake3_hash), so
+   NEW.* IS the live state by definition. DO NOT "fix" this to use
+   representative_path() -- that would just round-trip the same value
+   through a redundant subquery. See V007:206-223 + V008 commentary. #}
+{% macro body_rename_representative() -%}
+    UPDATE search_content
+    SET relative_path = NEW.relative_path,
+        filename      = NEW.relative_path
+    WHERE blake3_hash = NEW.blake3_hash;
+{%- endmacro %}
+
+{% macro body_location_soft_delete() -%}
+    UPDATE search_content SET
+        relative_path = COALESCE({{ representative_path('OLD.blake3_hash') }}, relative_path),
+        filename      = COALESCE({{ representative_path('OLD.blake3_hash') }}, filename)
+    WHERE blake3_hash = OLD.blake3_hash
+      AND EXISTS (SELECT 1 FROM file_locations
+                  WHERE blake3_hash = OLD.blake3_hash AND deleted_at IS NULL);
+
+    DELETE FROM search_content
+    WHERE blake3_hash = OLD.blake3_hash
+      AND NOT EXISTS (SELECT 1 FROM file_locations
+                      WHERE blake3_hash = OLD.blake3_hash AND deleted_at IS NULL);
+{%- endmacro %}
+
+{% macro body_location_restore() -%}
+    {{ seed_search_content('NEW.blake3_hash') }}
+
+    {{ refresh_full_from_live('NEW.blake3_hash') }}
+{%- endmacro %}
+
+{# file_metadata triggers. #}
+
+{% macro body_metadata_insert() -%}
+    {{ seed_search_content('NEW.blake3_hash') }}
+
+    UPDATE search_content
+    SET mime_type    = COALESCE(NEW.mime_type, ''),
+        camera_model = COALESCE(NEW.camera_model, ''),
+        captured_at  = COALESCE(NEW.captured_at, '')
+    WHERE blake3_hash = NEW.blake3_hash;
+{%- endmacro %}
+
+{% macro body_metadata_update() -%}
+    UPDATE search_content
+    SET mime_type    = CASE WHEN NEW.deleted_at IS NULL
+                            THEN COALESCE(NEW.mime_type, '')
+                            ELSE '' END,
+        camera_model = CASE WHEN NEW.deleted_at IS NULL
+                            THEN COALESCE(NEW.camera_model, '')
+                            ELSE '' END,
+        captured_at  = CASE WHEN NEW.deleted_at IS NULL
+                            THEN COALESCE(NEW.captured_at, '')
+                            ELSE '' END
+    WHERE blake3_hash = NEW.blake3_hash;
+{%- endmacro %}
+
+{# file_tags triggers. #}
+
+{% macro body_file_tags_insert() -%}
+    {{ seed_search_content('NEW.blake3_hash') }}
+
+    UPDATE search_content
+    SET tags = {{ tags_agg('NEW.blake3_hash') }}
+    WHERE blake3_hash = NEW.blake3_hash;
+{%- endmacro %}
+
+{% macro body_file_tags_update() -%}
+    UPDATE search_content
+    SET tags = {{ tags_agg('NEW.blake3_hash') }}
+    WHERE blake3_hash = NEW.blake3_hash;
+{%- endmacro %}
+
+{# tags triggers. #}
+
+{% macro body_tags_name_update() -%}
+    {{ refresh_tags_for_holders('NEW.id') }}
+{%- endmacro %}
+
+{% macro body_tags_soft_delete_or_restore() -%}
+    {{ refresh_tags_for_holders('NEW.id') }}
+{%- endmacro %}
+
+{% macro body_tags_delete() -%}
+    {{ refresh_tags_for_holders('OLD.id') }}
+{%- endmacro %}
+
+{# === Prologue: drop legacy + current names (idempotent) =================== #}
+
+{% for name in legacy_trigger_names -%}
+DROP TRIGGER IF EXISTS {{ name }};
+{% endfor -%}
+{% for agg in aggregations -%}
+DROP TRIGGER IF EXISTS {{ agg.name }};
+{% endfor %}
+
+{# === CREATE every trigger in spec order =================================== #}
+
+{% for agg in aggregations %}
+CREATE TRIGGER {{ agg.name }}
+{%- if agg.event.kind == "Insert" %}
+AFTER INSERT ON {{ agg.source_table }}
+{%- elif agg.event.kind == "Update" %}
+AFTER UPDATE ON {{ agg.source_table }}
+{%- elif agg.event.kind == "UpdateOf" %}
+AFTER UPDATE OF {{ agg.event.col }} ON {{ agg.source_table }}
+{%- elif agg.event.kind == "Delete" %}
+AFTER DELETE ON {{ agg.source_table }}
+{%- endif %}
+{%- if agg.when %}
+WHEN {{ agg.when }}
+{%- endif %}
+BEGIN
+{%- if agg.body == "SearchContentAfterInsert" %}
+{{ body_search_content_after_insert() }}
+{%- elif agg.body == "SearchContentAfterUpdate" %}
+{{ body_search_content_after_update() }}
+{%- elif agg.body == "SearchContentAfterDelete" %}
+{{ body_search_content_after_delete() }}
+{%- elif agg.body == "FileLocationsInsert" %}
+{{ body_file_locations_insert() }}
+{%- elif agg.body == "LocationHashChangeRetire" %}
+{{ body_location_hash_change_retire() }}
+{%- elif agg.body == "LocationHashChangeSeed" %}
+{{ body_location_hash_change_seed() }}
+{%- elif agg.body == "RenameRepresentative" %}
+{{ body_rename_representative() }}
+{%- elif agg.body == "LocationSoftDelete" %}
+{{ body_location_soft_delete() }}
+{%- elif agg.body == "LocationRestore" %}
+{{ body_location_restore() }}
+{%- elif agg.body == "MetadataInsert" %}
+{{ body_metadata_insert() }}
+{%- elif agg.body == "MetadataUpdate" %}
+{{ body_metadata_update() }}
+{%- elif agg.body == "FileTagsInsert" %}
+{{ body_file_tags_insert() }}
+{%- elif agg.body == "FileTagsUpdate" %}
+{{ body_file_tags_update() }}
+{%- elif agg.body == "TagsNameUpdate" %}
+{{ body_tags_name_update() }}
+{%- elif agg.body == "TagsSoftDeleteOrRestore" %}
+{{ body_tags_soft_delete_or_restore() }}
+{%- elif agg.body == "TagsDelete" %}
+{{ body_tags_delete() }}
+{%- endif %}
+END;
+
+{% endfor %}
