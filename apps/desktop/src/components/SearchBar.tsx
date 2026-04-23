@@ -44,6 +44,7 @@ export default function SearchBar() {
     <input
       type="search"
       placeholder="Search…"
+      aria-label="Search files"
       value={searchQuery}
       onChange={(e) => { setSearchQuery(e.target.value); }}
       className="px-3 py-1.5 bg-gray-900 text-gray-100 rounded border border-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm w-64"
