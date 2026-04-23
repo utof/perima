@@ -45,12 +45,11 @@ pub const METADATA_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// `perima_db::SqliteFileRepository::migrate_sentinel_row` — an
 /// adapter-specific method that is NOT on the `FileRepository` trait.
 /// Lifting it into a `FileEvent` variant would force every `EventBus`
-/// impl across `crates/{db,cli,desktop}` to handle a new event shape,
-/// and breaks the Batch-B constraint "no public API break in
-/// crates/core". Cleanup path: Batch E replaces `CompositeEventBus`
-/// internals with `async-broadcast`; at that point a `FileEvent::
-/// LocationUpserted` variant + `SentinelMigrationHandler: EventBus`
-/// adapter is additive + cheap. Tracked for the event-bus follow-up.
+/// impl to handle a new event shape and breaks the Batch-B "no public
+/// API break in crates/core" constraint. When that trade-off becomes
+/// worthwhile, add a `FileEvent::LocationUpserted` variant and an
+/// `EventHandler` impl in the `db` adapter — the post-Batch-E `Bus`
+/// makes that additive and cheap.
 ///
 /// WHY `Arc<dyn Fn + Send + Sync>` (not `&dyn Fn`): `ScanCommand` is
 /// `Clone` + passed into tokio tasks in some callers; `&dyn Fn` would

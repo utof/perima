@@ -15,7 +15,7 @@
 //! single-construction-site invariant from Batch B), assigns
 //! `bus.clone()` to `events` (the `Arc<dyn EventBus>` shared with every
 //! `UseCase`), and spawns one tokio task per registered
-//! [`EventHandler`] running [`crate::events::recv_loop`]. Each task
+//! [`EventHandler`] running `crate::events::recv_loop`. Each task
 //! owns its own broadcast `Receiver` cursor; tasks exit when the bus
 //! closes (container drop).
 
@@ -174,7 +174,7 @@ impl AppContainer {
     /// 2. Sets `events = bus.clone()` (coerces `Arc<Bus>` to
     ///    `Arc<dyn EventBus>` because `Bus: EventBus`).
     /// 3. For each handler: subscribes a fresh `Receiver` and
-    ///    `tokio::spawn`s [`crate::events::recv_loop`] for it. Each task
+    ///    `tokio::spawn`s `crate::events::recv_loop` for it. Each task
     ///    runs until the bus closes (container drop).
     ///
     /// Pass `vec![]` to skip listeners (unit tests, dry runs, or shells
