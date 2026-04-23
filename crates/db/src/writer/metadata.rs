@@ -25,19 +25,22 @@
 //!
 //! # Events
 //!
-//! [`perima_core::FileEvent`] has no `MetadataExtracted` / `ThumbnailReady`
-//! variants today (`Created / Modified / Deleted / Renamed` only).
-//! This writer passes the bus through unused.
+//! After a successful COMMIT on `UpsertMetadata` (Inserted / Updated)
+//! or `UpdateThumbnail` (rows > 0), the writer emits
+//! [`perima_core::AppEvent::IndexInvalidated`] with
+//! [`perima_core::InvalidationReason::MetadataChanged`] — the coarse
+//! v1 signal that metadata-shaped query indexes (file detail panel,
+//! thumbnail grid, capture-time sort) are stale.
 //!
-//! WHY defer: metadata-event signaling is a Batch E decision — it lands
-//! together with `async-broadcast` + the `AppEvent` supersession of
-//! `FileEvent`. Adding speculative `MetadataEvent::*` variants now
-//! would churn every bus handler in the workspace for zero consumer
-//! benefit. Spec §3.3 match shape reserved for the additive change.
+//! WHY skip emit on `Unchanged`: the Unchanged arm writes zero rows
+//! and does not bump hlc — not a logical event per spec §3.3.
 
 use std::sync::Arc;
 
-use perima_core::{BlakeHash, CoreError, DeviceId, EventBus, Hlc, MediaMetadata, UpsertOutcome};
+use perima_core::{
+    AppEvent, BlakeHash, CoreError, DeviceId, EventBus, Hlc, InvalidationReason, MediaMetadata,
+    UpsertOutcome,
+};
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::cmd::MetadataWriteCmd;
@@ -47,13 +50,12 @@ use crate::errors::Error;
 /// (the reply channel lives inside each variant) and sends the result
 /// back on the caller's reply channel.
 ///
-/// WHY `_bus` unused: no metadata-related [`perima_core::FileEvent`]
-/// variant exists today. Keeping the parameter in the signature makes
-/// the Batch-E addition of `AppEvent::MetadataExtracted` /
-/// `ThumbnailReady` variants a single-file change in this module rather
-/// than a churn across `writer/mod.rs`.
+/// After successful writes that actually change state, this fn emits
+/// [`AppEvent::IndexInvalidated`] with
+/// [`InvalidationReason::MetadataChanged`] AFTER the COMMIT — see spec
+/// §3.3.
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn handle(conn: &mut Connection, cmd: MetadataWriteCmd, _bus: &Arc<dyn EventBus>) {
+pub(super) fn handle(conn: &mut Connection, cmd: MetadataWriteCmd, bus: &Arc<dyn EventBus>) {
     // WHY one HLC per command (not per row): the "one HLC per
     // user-visible logical event" invariant from spec §3.7. A single
     // upsert_metadata may INSERT a new row OR UPDATE an existing one;
@@ -68,6 +70,11 @@ pub(super) fn handle(conn: &mut Connection, cmd: MetadataWriteCmd, _bus: &Arc<dy
             reply,
         } => {
             let out = upsert_metadata_impl(conn, &record, device, hlc);
+            // WHY emit gated on Inserted | Updated: the `Unchanged`
+            // arm writes zero rows and does not bump hlc.
+            if matches!(&out, Ok(o) if !matches!(o, UpsertOutcome::Unchanged)) {
+                emit_metadata_changed(bus, "upsert_metadata");
+            }
             if reply.send(out).is_err() {
                 // WHY debug (not warn): caller dropped its reply
                 // handle — e.g. CLI aborted mid-command. The write
@@ -83,10 +90,28 @@ pub(super) fn handle(conn: &mut Connection, cmd: MetadataWriteCmd, _bus: &Arc<dy
             reply,
         } => {
             let out = update_thumbnail_impl(conn, &hash, path.as_deref(), &status, device, hlc);
+            // WHY emit gated on rows > 0: a thumbnail flip against a
+            // missing metadata row writes zero rows.
+            if matches!(&out, Ok(rows) if *rows > 0) {
+                emit_metadata_changed(bus, "update_thumbnail");
+            }
             if reply.send(out).is_err() {
                 tracing::debug!("metadata update_thumbnail reply channel closed before send");
             }
         }
+    }
+}
+
+/// Emit `IndexInvalidated::MetadataChanged` and log on emit failure.
+///
+/// `who` identifies the calling sub-command for log scoping. Failed
+/// emits log-only — the COMMIT already landed and the caller already
+/// got (or is about to get) its reply.
+fn emit_metadata_changed(bus: &Arc<dyn EventBus>, who: &'static str) {
+    if let Err(e) = bus.emit(&AppEvent::IndexInvalidated {
+        reason: InvalidationReason::MetadataChanged,
+    }) {
+        tracing::warn!(?e, who, "post-commit emit failed: MetadataChanged");
     }
 }
 

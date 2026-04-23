@@ -17,10 +17,18 @@
 //!
 //! # Events
 //!
-//! Today volume register + mount-recording emit no [`FileEvent`] —
-//! the existing bus speaks file-level events only. Placeholder
-//! `VolumeEvent::*` lands with Batch E; until then the writer passes
-//! the bus through unused. Spec §3.3 match shape reserved.
+//! Volume writes do NOT emit any [`perima_core::AppEvent`] in v1.
+//!
+//! WHY no emit: volume writes don't invalidate any v1 query index.
+//! The volumes UI reads volumes directly via
+//! [`perima_core::VolumeRepository::list`], not through a cached/
+//! invalidated query layer. The four `InvalidationReason` variants
+//! today (`TagsChanged`, `FilesChanged`, `MetadataChanged`,
+//! `SearchIndexRebuilt`) intentionally exclude volume scope.
+//!
+//! Add an emit here (`InvalidationReason::VolumesChanged` or similar)
+//! when a v2 frontend caches the volume list and needs a hint to
+//! refetch — until then a silent write is correct.
 
 use std::sync::Arc;
 
@@ -34,10 +42,11 @@ use crate::errors::Error;
 /// (the reply channel lives inside each variant) and sends the result
 /// back on the caller's reply channel.
 ///
-/// WHY `_bus` unused: volume events are not on the [`FileEvent`] bus
-/// today. The parameter stays in the signature so adding
-/// `VolumeEvent::MountRecorded` in Batch E is an additive change in
-/// this one module, not a churn across `writer/mod.rs`.
+/// WHY `_bus` unused: see module-level WHY block — volume writes
+/// invalidate no v1 query index. The parameter stays in the
+/// signature so adding a `VolumesChanged` invalidation in v2 is an
+/// additive change in this one module, not a churn across
+/// `writer/mod.rs`.
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn handle(conn: &mut Connection, cmd: VolumeWriteCmd, _bus: &Arc<dyn EventBus>) {
     // WHY one HLC per command (not per row): the "one HLC per

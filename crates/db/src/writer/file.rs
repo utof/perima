@@ -34,23 +34,31 @@
 //!
 //! # Events
 //!
-//! [`perima_core::FileEvent`] has `Created / Modified / Deleted / Renamed`
-//! only. Batch C does NOT change who emits `FileEvent` — filesystem-watch
-//! emission stays shell-local (`DbEventHandler` in `crates/cli` +
-//! `crates/desktop`). All six writer handlers pass the bus through unused.
+//! After a successful COMMIT on any file-shaped write that actually
+//! changed state, the writer emits
+//! [`perima_core::AppEvent::IndexInvalidated`] with
+//! [`perima_core::InvalidationReason::FilesChanged`] — the coarse v1
+//! signal that file-shaped query indexes (file grid, location list,
+//! status filters) are stale.
 //!
-//! WHY defer: `update_location_status` / `update_location_path` /
-//! `migrate_sentinel_row` are called FROM `DbEventHandler` which already
-//! sits INSIDE the `FileEvent` fan-out. Emitting `FileEvent` from inside
-//! the writer would cause a double-fire and break the single-source-of-
-//! truth invariant. Watch-as-UseCase (#120) resolves this in a future
-//! batch; until then the writer handlers return without emitting.
+//! `FileEvent` (filesystem-watcher events: Created / Modified /
+//! Deleted / Renamed) is a SEPARATE concern emitted by the watcher
+//! (now wrapped as `AppEvent::File`). The writer does NOT re-emit
+//! `FileEvent` — that would double-fire on every watcher-triggered
+//! status flip. The `IndexInvalidated::FilesChanged` signal is the
+//! cache-invalidation hint for query-state, not a re-broadcast of
+//! the underlying filesystem change.
+//!
+//! WHY emit on every variant: all five `FileWriteCmd` variants
+//! mutate `files` or `file_locations` — both are read by the
+//! frontend file grid + location list. Coarse invalidation is the
+//! v1 contract; per-row surgical invalidation is a Batch H decision.
 
 use std::sync::Arc;
 
 use perima_core::{
-    BlakeHash, CoreError, DeviceId, EventBus, HashedFile, Hlc, LocationStatus, MediaPath,
-    UpsertOutcome, VolumeId,
+    AppEvent, BlakeHash, CoreError, DeviceId, EventBus, HashedFile, Hlc, InvalidationReason,
+    LocationStatus, MediaPath, UpsertOutcome, VolumeId,
 };
 use rusqlite::{Connection, OptionalExtension};
 
@@ -61,15 +69,21 @@ use crate::errors::Error;
 /// (the reply channel lives inside each variant) and sends the result
 /// back on the caller's reply channel.
 ///
-/// WHY `_bus` unused: all file-related events originate from the
-/// filesystem watcher (`crates/fs`), not from the writer — calling
-/// `bus.emit` here would double-fire events already emitted by
-/// `DbEventHandler`. Keeping the parameter in the signature makes the
-/// Batch-E addition of fine-grained `AppEvent::File*` variants a
-/// single-file change in this module. See WHY-defer comment in the
-/// module doc above.
+/// After successful writes that actually change state (i.e. did not
+/// land on the `Unchanged` arm of an upsert and did not no-op a path/
+/// status update), this fn emits [`AppEvent::IndexInvalidated`] with
+/// [`InvalidationReason::FilesChanged`] AFTER the COMMIT — see spec
+/// §3.3.
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn handle(conn: &mut Connection, cmd: FileWriteCmd, _bus: &Arc<dyn EventBus>) {
+// WHY allow cognitive_complexity: the body is a single five-arm
+// `match`; each arm is one impl call + a small emit + a reply send.
+// The repetition lives in the data shape (5 sub-variants), not in
+// per-arm logic. Splitting into per-arm helpers either pushes every
+// helper past `clippy::too_many_arguments` (8 params: conn, payload
+// fields, hlc, bus, reply) or buys cleanliness via reference-passing
+// `reply` in a way that obscures the consume-on-send semantics.
+#[allow(clippy::cognitive_complexity)]
+pub(super) fn handle(conn: &mut Connection, cmd: FileWriteCmd, bus: &Arc<dyn EventBus>) {
     // WHY one HLC per command (not per row): the "one HLC per
     // user-visible logical event" invariant from spec §3.7. A single
     // upsert_file may INSERT a new row OR UPDATE an existing one; both
@@ -84,6 +98,12 @@ pub(super) fn handle(conn: &mut Connection, cmd: FileWriteCmd, _bus: &Arc<dyn Ev
             reply,
         } => {
             let out = upsert_file_impl(conn, &file, device, hlc);
+            // WHY emit gated on Inserted | Updated: the `Unchanged`
+            // arm writes zero rows and does not bump hlc — not a
+            // logical event per spec §3.3.
+            if matches!(&out, Ok(o) if !matches!(o, UpsertOutcome::Unchanged)) {
+                emit_files_changed(bus, "upsert_file");
+            }
             if reply.send(out).is_err() {
                 // WHY debug (not warn): caller dropped its reply
                 // handle — e.g. CLI aborted mid-command. The write
@@ -99,6 +119,9 @@ pub(super) fn handle(conn: &mut Connection, cmd: FileWriteCmd, _bus: &Arc<dyn Ev
             reply,
         } => {
             let out = upsert_location_impl(conn, &hash, volume, &path, device, hlc);
+            if matches!(&out, Ok(o) if !matches!(o, UpsertOutcome::Unchanged)) {
+                emit_files_changed(bus, "upsert_location");
+            }
             if reply.send(out).is_err() {
                 tracing::debug!("file upsert_location reply channel closed before send");
             }
@@ -111,6 +134,11 @@ pub(super) fn handle(conn: &mut Connection, cmd: FileWriteCmd, _bus: &Arc<dyn Ev
             reply,
         } => {
             let out = update_location_status_impl(conn, volume, &path, status, device, hlc);
+            // WHY emit gated on rows > 0: a status update against a
+            // non-existent (volume, path) pair writes zero rows.
+            if matches!(&out, Ok(rows) if *rows > 0) {
+                emit_files_changed(bus, "update_location_status");
+            }
             if reply.send(out).is_err() {
                 tracing::debug!("file update_location_status reply channel closed before send");
             }
@@ -123,6 +151,9 @@ pub(super) fn handle(conn: &mut Connection, cmd: FileWriteCmd, _bus: &Arc<dyn Ev
             reply,
         } => {
             let out = update_location_path_impl(conn, volume, &old_path, &new_path, device, hlc);
+            if matches!(&out, Ok(rows) if *rows > 0) {
+                emit_files_changed(bus, "update_location_path");
+            }
             if reply.send(out).is_err() {
                 tracing::debug!("file update_location_path reply channel closed before send");
             }
@@ -134,10 +165,26 @@ pub(super) fn handle(conn: &mut Connection, cmd: FileWriteCmd, _bus: &Arc<dyn Ev
             reply,
         } => {
             let out = migrate_sentinel_row_impl(conn, &path, real_volume, device, hlc);
+            if matches!(&out, Ok(rows) if *rows > 0) {
+                emit_files_changed(bus, "migrate_sentinel_row");
+            }
             if reply.send(out).is_err() {
                 tracing::debug!("file migrate_sentinel_row reply channel closed before send");
             }
         }
+    }
+}
+
+/// Emit `IndexInvalidated::FilesChanged` and log on emit failure.
+///
+/// `who` identifies the calling sub-command for log scoping. Failed
+/// emits log-only — the COMMIT already landed, the caller already got
+/// (or is about to get) its reply, and other handlers should still fire.
+fn emit_files_changed(bus: &Arc<dyn EventBus>, who: &'static str) {
+    if let Err(e) = bus.emit(&AppEvent::IndexInvalidated {
+        reason: InvalidationReason::FilesChanged,
+    }) {
+        tracing::warn!(?e, who, "post-commit emit failed: FilesChanged");
     }
 }
 

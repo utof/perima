@@ -11,8 +11,11 @@
 //!
 //! # Events
 //!
-//! `Rebuild` emits no events. No variant in [`perima_core::FileEvent`]
-//! maps to "FTS rebuilt"; a future `AppEvent` may add one post-Batch-E.
+//! After a successful COMMIT on `Rebuild`, the writer emits
+//! [`perima_core::AppEvent::IndexInvalidated`] with
+//! [`perima_core::InvalidationReason::SearchIndexRebuilt`] — the v1
+//! signal that the FTS5 search index has been wiped and reseeded;
+//! any cached search-result list is stale.
 //!
 //! WHY no `now_iso` / `Hlc` import: the FTS5 virtual table itself
 //! carries no `hlc` column (it is a derived index, not a source-of-truth
@@ -20,7 +23,7 @@
 
 use std::sync::Arc;
 
-use perima_core::{CoreError, EventBus};
+use perima_core::{AppEvent, CoreError, EventBus, InvalidationReason};
 use rusqlite::Connection;
 
 use crate::cmd::SearchWriteCmd;
@@ -30,16 +33,27 @@ use crate::errors::Error;
 /// (the reply channel lives inside each variant) and sends the result
 /// back on the caller's reply channel.
 ///
-/// WHY `_bus` unused: no search-related [`perima_core::FileEvent`] variant
-/// exists today. Keeping the parameter in the signature makes the
-/// Batch-E addition of an `AppEvent::SearchIndexRebuilt` variant a
-/// single-file change in this module rather than a churn across
-/// `writer/mod.rs`.
+/// After a successful COMMIT on `Rebuild`, this fn emits
+/// [`AppEvent::IndexInvalidated`] with
+/// [`InvalidationReason::SearchIndexRebuilt`] AFTER the COMMIT — see
+/// spec §3.3.
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn handle(conn: &mut Connection, cmd: SearchWriteCmd, _bus: &Arc<dyn EventBus>) {
+pub(super) fn handle(conn: &mut Connection, cmd: SearchWriteCmd, bus: &Arc<dyn EventBus>) {
     match cmd {
         SearchWriteCmd::Rebuild { reply } => {
             let out = rebuild_impl(conn);
+            // WHY unconditional emit on Ok: rebuild ALWAYS wipes +
+            // reseeds the FTS index. Even if the source rows were
+            // empty, the index state changed (cleared); a cached
+            // search result list with stale row metadata is
+            // invalidated.
+            if out.is_ok()
+                && let Err(e) = bus.emit(&AppEvent::IndexInvalidated {
+                    reason: InvalidationReason::SearchIndexRebuilt,
+                })
+            {
+                tracing::warn!(?e, "post-commit emit failed: SearchIndexRebuilt");
+            }
             if reply.send(out).is_err() {
                 // WHY debug (not warn): caller dropped its reply handle —
                 // e.g. CLI aborted mid-command. The rebuild already ran;

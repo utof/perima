@@ -24,19 +24,24 @@
 //!
 //! # Events
 //!
-//! [`perima_core::FileEvent`] has no tag-related variants today
-//! (`Created / Modified / Deleted / Renamed` only). This writer passes
-//! the bus through unused.
+//! After a successful COMMIT on `Attach` / `Detach`, the writer emits
+//! [`perima_core::AppEvent::IndexInvalidated`] with
+//! [`perima_core::InvalidationReason::TagsChanged`] — the coarse v1
+//! signal that tag-shaped query indexes (frontend tag list, file→tags
+//! join) are stale. `UpsertTag` / `DeleteTag` also emit `TagsChanged`:
+//! the tag list itself is the invalidated index.
 //!
-//! WHY defer: tag-event signaling is a Batch E decision — it lands
-//! together with `async-broadcast` + the `AppEvent` supersession of
-//! `FileEvent`. Adding speculative `TagEvent::*` variants now would
-//! churn every bus handler in the workspace for zero consumer benefit.
-//! Spec §3.3 match shape reserved for the additive change.
+//! WHY skip emit on no-op `Attach`: re-attaching an already-active
+//! `(hash, tag_id)` pair writes zero rows and does not bump `hlc` (see
+//! `attach_impl` below). No row written → no logical event happened →
+//! no `AppEvent` per spec §3.3 ("publish events AFTER COMMIT" — but
+//! only when a COMMIT actually changed state).
 
 use std::sync::Arc;
 
-use perima_core::{BlakeHash, CoreError, DeviceId, EventBus, Hlc, Tag};
+use perima_core::{
+    AppEvent, BlakeHash, CoreError, DeviceId, EventBus, Hlc, InvalidationReason, Tag,
+};
 use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
@@ -47,12 +52,12 @@ use crate::errors::Error;
 /// (the reply channel lives inside each variant) and sends the result
 /// back on the caller's reply channel.
 ///
-/// WHY `_bus` unused: no tag-related [`perima_core::FileEvent`] variant
-/// exists today. Keeping the parameter in the signature makes the
-/// Batch-E addition of `AppEvent::Tag*` variants a single-file change
-/// in this module rather than a churn across `writer/mod.rs`.
+/// After successful writes that actually change state (i.e. did not
+/// land on an idempotent no-op path), this fn emits
+/// [`AppEvent::IndexInvalidated`] with
+/// [`InvalidationReason::TagsChanged`] AFTER the COMMIT — see spec §3.3.
 #[allow(clippy::needless_pass_by_value)]
-pub(super) fn handle(conn: &mut Connection, cmd: TagWriteCmd, _bus: &Arc<dyn EventBus>) {
+pub(super) fn handle(conn: &mut Connection, cmd: TagWriteCmd, bus: &Arc<dyn EventBus>) {
     // WHY one HLC per command (not per row): the "one HLC per
     // user-visible logical event" invariant from spec §3.7. A single
     // upsert_tag may INSERT a new row OR UPDATE an existing one; both
@@ -90,6 +95,17 @@ pub(super) fn handle(conn: &mut Connection, cmd: TagWriteCmd, _bus: &Arc<dyn Eve
             reply,
         } => {
             let out = attach_impl(conn, &hash, tag_id, device, hlc);
+            // WHY emit gated on rows_changed > 0: the idempotent no-op
+            // path (already-attached pair) writes zero rows, does not
+            // bump hlc, and is NOT a logical event per spec §3.3.
+            if let Ok(rows) = &out
+                && *rows > 0
+                && let Err(e) = bus.emit(&AppEvent::IndexInvalidated {
+                    reason: InvalidationReason::TagsChanged,
+                })
+            {
+                tracing::warn!(?e, "post-commit emit failed: TagsChanged (attach)");
+            }
             if reply.send(out).is_err() {
                 tracing::debug!("tag attach reply channel closed before send");
             }
@@ -101,6 +117,17 @@ pub(super) fn handle(conn: &mut Connection, cmd: TagWriteCmd, _bus: &Arc<dyn Eve
             reply,
         } => {
             let out = detach_impl(conn, &hash, tag_id, device, hlc);
+            // WHY emit gated on rows_changed > 0: detaching a pair
+            // that's already inactive writes zero rows and is not a
+            // logical event (spec §3.3).
+            if let Ok(rows) = &out
+                && *rows > 0
+                && let Err(e) = bus.emit(&AppEvent::IndexInvalidated {
+                    reason: InvalidationReason::TagsChanged,
+                })
+            {
+                tracing::warn!(?e, "post-commit emit failed: TagsChanged (detach)");
+            }
             if reply.send(out).is_err() {
                 tracing::debug!("tag detach reply channel closed before send");
             }
