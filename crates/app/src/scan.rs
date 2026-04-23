@@ -305,10 +305,6 @@ impl ScanUseCase {
     /// - Propagates `CoreError` from the scanner, hasher, volume
     ///   detection, and repository adapters.
     pub async fn execute(&self, cmd: ScanCommand) -> Result<ScanReport, CoreError> {
-        // WHY touch self.events: held for the Batch-E event-emit path;
-        // reference the field so `unused` lints don't fire before
-        // Batch E wires the emissions.
-        let _ = Arc::clone(&self.events);
         match cmd {
             ScanCommand::Full(full) => self.execute_full(full).await,
             ScanCommand::Rescan {
@@ -567,6 +563,30 @@ impl ScanUseCase {
 
         report.interrupted = cancel.is_cancelled();
         report.duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        // Emit ScanCompleted only on successful, non-interrupted scans so the
+        // frontend doesn't trigger a stale refetch when the run was aborted.
+        // WHY Ok-only: a failed scan shouldn't trigger a frontend refetch.
+        // WHY None-volume guard: dry-run produces no VolumeId; skip the emit
+        // rather than fabricating a nil UUID for an event the frontend would
+        // misinterpret as a real volume.
+        if !report.interrupted
+            && let Some((vol_id, _)) = report.volume_mount
+        {
+            let event = perima_core::AppEvent::ScanCompleted {
+                volume: vol_id,
+                files_seen: report.files_seen,
+                files_new: report.files_new,
+                duration_ms: report.duration_ms,
+            };
+            // WHY warn + non-fatal: bus failure (e.g. all receivers
+            // dropped at shutdown) must not abort the scan completion
+            // path. The scan result is already committed to SQLite.
+            if let Err(e) = self.events.emit(&event) {
+                tracing::warn!(error = %e, "failed to emit ScanCompleted; non-fatal");
+            }
+        }
+
         Ok(report)
     }
 }
