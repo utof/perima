@@ -1,4 +1,4 @@
-import type { Tag } from "../types";
+import type { Tag } from "../bindings";
 
 interface TagSidebarProps {
   /** Full tag list (all known tags). */

@@ -6,6 +6,7 @@
 
 pub mod errors;
 pub mod events;
+pub mod hlc;
 pub mod ids;
 pub mod metadata;
 pub mod search;
@@ -13,7 +14,8 @@ pub mod tag;
 pub mod types;
 
 pub use errors::CoreError;
-pub use events::{EventBus, FileEvent};
+pub use events::{AppEvent, EventBus, FileEvent, InvalidationReason};
+pub use hlc::{HLC_MAX_COUNTER, HLC_MAX_MS, Hlc};
 pub use metadata::{MediaMetadata, MetadataExtractor};
 pub use search::SearchHit;
 pub use tag::{MAX_TAG_LEN, Tag, normalize as normalize_tag};

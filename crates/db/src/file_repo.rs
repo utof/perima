@@ -1,27 +1,34 @@
-//! `FileRepository` implementation backed by rusqlite.
+//! `FileRepository` adapter — writer-actor + read-pool backed.
+//!
+//! Post-Batch-C Task 7. The struct holds two cheap-to-clone handles:
+//! a [`flume::Sender<WriteCmd>`] connected to the single writer actor
+//! (spec §3.1) and a [`ReadPool`] of read-only `r2d2_sqlite`
+//! connections (spec §3.4). Writes build a [`FileWriteCmd`] variant with
+//! a `flume::bounded(1)` reply channel and block on the reply. Reads
+//! run SQL directly against a pooled connection.
+//!
+//! No `Mutex<Connection>`. Every caller now supplies
+//! `(writer_sender, read_pool)` via `SqliteFileRepository::new`.
 
-use std::sync::Mutex;
-
+use flume::Sender;
 use perima_core::{
     BlakeHash, CoreError, DeviceId, FileLocationRecord, FileRepository, FileSize, HashedFile,
     LocationStatus, MediaPath, UpsertOutcome, VolumeId,
 };
 use rusqlite::Connection;
-// WHY: OptionalExtension adds `.optional()` to query_row results, converting
-// QueryReturnedNoRows into Ok(None) for our two-statement SELECT-then-upsert pattern.
-use rusqlite::OptionalExtension;
 
+use crate::cmd::{FileWriteCmd, WriteCmd};
 use crate::errors::Error;
+use crate::pool::ReadPool;
 
-/// Rusqlite-backed file + location repository.
+/// Writer-actor + read-pool backed file + location repository.
 ///
-/// WHY `Mutex`: `rusqlite::Connection` is `Send` but not `Sync` (internal
-/// `RefCell` state). The `FileRepository` trait requires `Send + Sync` so
-/// callers can store implementations in `Arc<dyn FileRepository>`. Wrapping
-/// in `Mutex` makes the struct satisfy both bounds without `unsafe`.
-/// All DB methods lock briefly; there is no blocking I/O inside the lock.
+/// Cheap to [`Clone`]: both fields (`flume::Sender`, `ReadPool`) are
+/// internally refcounted.
+#[derive(Clone)]
 pub struct SqliteFileRepository {
-    conn: Mutex<Connection>,
+    writer: Sender<WriteCmd>,
+    reads: ReadPool,
 }
 
 impl std::fmt::Debug for SqliteFileRepository {
@@ -32,28 +39,20 @@ impl std::fmt::Debug for SqliteFileRepository {
 }
 
 impl SqliteFileRepository {
-    /// Wrap an existing connection. The caller must have run
-    /// migrations before constructing this.
-    pub const fn new(conn: Connection) -> Self {
-        Self {
-            conn: Mutex::new(conn),
-        }
+    /// Construct an adapter from a writer-command sender + a read pool.
+    ///
+    /// WHY no migration run here: migrations happen exactly once inside
+    /// [`crate::SqliteWriter::start`] BEFORE the writer thread spawns
+    /// (spec §3.6). The read pool is opened after migrations complete.
+    #[must_use]
+    pub const fn new(writer: Sender<WriteCmd>, reads: ReadPool) -> Self {
+        Self { writer, reads }
     }
 }
 
-fn now_iso() -> String {
-    chrono::Utc::now().to_rfc3339()
-}
-
-/// Convert `FileSize` (`u64`) to the `i64` that `SQLite` stores.
-///
-/// WHY: `SQLite` integers are signed 64-bit. A file larger than `i64::MAX`
-/// (~8 EiB) cannot exist on current hardware; we propagate as `Internal`
-/// rather than silently wrapping.
-fn size_to_i64(size: FileSize) -> Result<i64, CoreError> {
-    i64::try_from(size.0)
-        .map_err(|_| CoreError::Internal(format!("file size {} overflows i64", size.0)))
-}
+// ---------------------------------------------------------------------------
+// Helpers (read path)
+// ---------------------------------------------------------------------------
 
 /// Convert the `i64` stored in `SQLite` back to `FileSize`.
 ///
@@ -75,6 +74,10 @@ fn limit_to_i64(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
 }
 
+// ---------------------------------------------------------------------------
+// Inherent methods (writer-actor shim variants)
+// ---------------------------------------------------------------------------
+
 impl SqliteFileRepository {
     /// Migrate a sentinel row from phase 1b to the real `volume`.
     ///
@@ -89,62 +92,27 @@ impl SqliteFileRepository {
     /// Returns the number of rows updated (0 if no sentinel row existed).
     ///
     /// # Errors
-    /// `CoreError::Internal` on DB or mutex failure.
-    // WHY allow(significant_drop_tightening): the Mutex guard `conn` must
-    // outlive the `execute` call that borrows through it. This is the same
-    // pattern used throughout this file.
-    #[allow(clippy::significant_drop_tightening)]
+    /// `CoreError::Internal` on DB failure.
     pub fn migrate_sentinel_row(
         &self,
         path: &MediaPath,
         real_volume: VolumeId,
         device: DeviceId,
     ) -> Result<u64, CoreError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-        let now = now_iso();
-        let vol_str = real_volume.0.to_string();
-        let dev_str = device.0.to_string();
-        let path_str = path.as_str();
-        // WHY: nil UUID string literal is hard-coded here because this method
-        // is the *only* place we intentionally touch sentinel rows. Using a
-        // constant avoids importing VolumeId into a string constant but keeps
-        // the magic value visible and auditable.
-        let n = conn
-            .execute(
-                "UPDATE file_locations
-                 SET volume_id = ?1, updated_at = ?2, device_id = ?3
-                 WHERE volume_id = '00000000-0000-0000-0000-000000000000'
-                   AND relative_path = ?4 AND deleted_at IS NULL",
-                rusqlite::params![vol_str, now, dev_str, path_str],
-            )
-            .map_err(Error::from)?;
-        // WHY: `rusqlite::Connection::execute` returns `usize`; the schema
-        // guarantees at most 1 sentinel row per path, so the cast to u64 is
-        // safe on all supported platforms.
-        #[allow(clippy::cast_possible_truncation)]
-        Ok(n as u64)
+        let (reply_tx, reply_rx) = flume::bounded::<Result<u64, CoreError>>(1);
+        self.writer
+            .send(WriteCmd::File(FileWriteCmd::MigrateSentinelRow {
+                path: path.clone(),
+                real_volume,
+                device,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
     }
-}
 
-/// Convert a `LocationStatus` to its DB string representation.
-///
-/// WHY: status values are stored as lowercase strings so they are human-readable
-/// in `SQLite` tooling and stable across future Rust refactors (an enum discriminant
-/// index would shift if variants were reordered). This is the single source of
-/// truth for the mapping; the deserializer in `list_file_locations` mirrors it.
-const fn status_to_str(status: LocationStatus) -> &'static str {
-    match status {
-        LocationStatus::Active => "active",
-        LocationStatus::Missing => "missing",
-        LocationStatus::Moved => "moved",
-        LocationStatus::Stale => "stale",
-    }
-}
-
-impl SqliteFileRepository {
     /// Update the status of a non-deleted file location identified by
     /// `(volume, path)`.
     ///
@@ -152,10 +120,7 @@ impl SqliteFileRepository {
     /// 1 on success).
     ///
     /// # Errors
-    /// `CoreError::Internal` on DB or mutex failure.
-    // WHY allow(significant_drop_tightening): the Mutex guard `conn` must
-    // outlive the `execute` call that borrows through it.
-    #[allow(clippy::significant_drop_tightening)]
+    /// `CoreError::Internal` on DB failure.
     pub fn update_location_status(
         &self,
         volume: VolumeId,
@@ -163,26 +128,19 @@ impl SqliteFileRepository {
         status: LocationStatus,
         device: DeviceId,
     ) -> Result<u64, CoreError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-        let vol_str = volume.0.to_string();
-        let path_str = path.as_str();
-        let status_str = status_to_str(status);
-        let dev_str = device.0.to_string();
-        let now = now_iso();
-        let n = conn
-            .execute(
-                "UPDATE file_locations
-                 SET status = ?1, updated_at = ?2, device_id = ?3
-                 WHERE volume_id = ?4 AND relative_path = ?5 AND deleted_at IS NULL",
-                rusqlite::params![status_str, now, dev_str, vol_str, path_str],
-            )
-            .map_err(Error::from)?;
-        // WHY: at most 1 active row per (volume, path) by app-level invariant.
-        #[allow(clippy::cast_possible_truncation)]
-        Ok(n as u64)
+        let (reply_tx, reply_rx) = flume::bounded::<Result<u64, CoreError>>(1);
+        self.writer
+            .send(WriteCmd::File(FileWriteCmd::UpdateLocationStatus {
+                volume,
+                path: path.clone(),
+                status,
+                device,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
     }
 
     /// Update the relative path of a non-deleted file location and reset its
@@ -199,10 +157,7 @@ impl SqliteFileRepository {
     /// 1 if either the source was updated OR soft-deleted on collision).
     ///
     /// # Errors
-    /// `CoreError::Internal` on DB or mutex failure.
-    // WHY allow(significant_drop_tightening): the Mutex guard `conn` must
-    // outlive the transaction that borrows through it.
-    #[allow(clippy::significant_drop_tightening)]
+    /// `CoreError::Internal` on DB failure.
     pub fn update_location_path(
         &self,
         volume: VolumeId,
@@ -210,117 +165,42 @@ impl SqliteFileRepository {
         new_path: &MediaPath,
         device: DeviceId,
     ) -> Result<u64, CoreError> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-        let vol_str = volume.0.to_string();
-        let old_str = old_path.as_str();
-        let new_str = new_path.as_str();
-        let dev_str = device.0.to_string();
-        let now = now_iso();
-
-        // WHY BEGIN IMMEDIATE: the collision check + UPDATE/soft-delete
-        // sequence must serialize across connections. A concurrent upsert
-        // at `new_path` could otherwise slip between our SELECT and our
-        // UPDATE, violating the "exactly one active row per (vol, path)"
-        // invariant.
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(Error::from)?;
-
-        // Check whether an active row already exists at `new_path`.
-        let collision: Option<String> = tx
-            .query_row(
-                "SELECT id FROM file_locations
-                 WHERE volume_id = ?1 AND relative_path = ?2 AND deleted_at IS NULL",
-                rusqlite::params![vol_str, new_str],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(Error::from)?;
-
-        let n = if collision.is_some() {
-            // WHY: destination wins. Soft-delete the source row so the
-            // invariant "1 active row per (vol, path)" holds. CRDT-friendly:
-            // no hard delete, deleted_at/updated_at/device_id all stamped.
-            tx.execute(
-                "UPDATE file_locations
-                     SET deleted_at = ?1, updated_at = ?1, device_id = ?2
-                     WHERE volume_id = ?3 AND relative_path = ?4 AND deleted_at IS NULL",
-                rusqlite::params![now, dev_str, vol_str, old_str],
-            )
-            .map_err(Error::from)?
-        } else {
-            tx.execute(
-                "UPDATE file_locations
-                 SET relative_path = ?1, status = 'active', updated_at = ?2, device_id = ?3
-                 WHERE volume_id = ?4 AND relative_path = ?5 AND deleted_at IS NULL",
-                rusqlite::params![new_str, now, dev_str, vol_str, old_str],
-            )
-            .map_err(Error::from)?
-        };
-
-        tx.commit().map_err(Error::from)?;
-        // WHY: at most 1 active row per (volume, path) by app-level invariant,
-        // so `n` is always 0 or 1. Cast to u64 for the public contract.
-        #[allow(clippy::cast_possible_truncation)]
-        Ok(n as u64)
+        let (reply_tx, reply_rx) = flume::bounded::<Result<u64, CoreError>>(1);
+        self.writer
+            .send(WriteCmd::File(FileWriteCmd::UpdateLocationPath {
+                volume,
+                old_path: old_path.clone(),
+                new_path: new_path.clone(),
+                device,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
     }
 }
 
+// ---------------------------------------------------------------------------
+// FileRepository trait impl
+// ---------------------------------------------------------------------------
+
 impl FileRepository for SqliteFileRepository {
     fn upsert_file(&self, file: &HashedFile, device: DeviceId) -> Result<UpsertOutcome, CoreError> {
-        // WHY: PoisonError can only occur if a thread panicked while holding
-        // the lock. In that case the DB state is unknown; propagate as Internal.
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-        let hash_hex = file.hash.to_hex();
-        let now = now_iso();
-        let dev_str = device.0.to_string();
-        let size_i64 = size_to_i64(file.discovered.size)?;
-
-        // WHY: two-statement SELECT-then-INSERT/UPDATE because
-        // `SQLite`'s changes() cannot distinguish a fresh INSERT from
-        // a conflict-triggered UPDATE — both report 1.
-        let existing: Option<(i64, String)> = conn
-            .query_row(
-                "SELECT file_size, device_id FROM files WHERE blake3_hash = ?1",
-                [&hash_hex],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(Error::from)?;
-
-        let outcome = match existing {
-            None => {
-                conn.execute(
-                    "INSERT INTO files (blake3_hash, file_size, first_seen, updated_at, device_id)
-                     VALUES (?1, ?2, ?3, ?3, ?4)",
-                    rusqlite::params![hash_hex, size_i64, now, dev_str],
-                )
-                .map_err(Error::from)?;
-                UpsertOutcome::Inserted
-            }
-            Some((existing_size, existing_dev))
-                if existing_size == size_i64 && existing_dev == dev_str =>
-            {
-                UpsertOutcome::Unchanged
-            }
-            Some(_) => {
-                conn.execute(
-                    "UPDATE files SET file_size = ?1, updated_at = ?2, device_id = ?3
-                     WHERE blake3_hash = ?4",
-                    rusqlite::params![size_i64, now, dev_str, hash_hex],
-                )
-                .map_err(Error::from)?;
-                UpsertOutcome::Updated
-            }
-        };
-        drop(conn);
-        Ok(outcome)
+        let (reply_tx, reply_rx) = flume::bounded::<Result<UpsertOutcome, CoreError>>(1);
+        // WHY clone `file`: the command crosses a thread boundary via
+        // `flume::Sender::send`, which requires `'static`. `HashedFile`
+        // is `Clone` (shallow: hash + path + size).
+        self.writer
+            .send(WriteCmd::File(FileWriteCmd::UpsertFile {
+                file: file.clone(),
+                device,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
     }
 
     fn upsert_location(
@@ -330,174 +210,152 @@ impl FileRepository for SqliteFileRepository {
         path: &MediaPath,
         device: DeviceId,
     ) -> Result<UpsertOutcome, CoreError> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-        let hash_hex = hash.to_hex();
-        let vol_str = volume.0.to_string();
-        let path_str = path.as_str();
-        let dev_str = device.0.to_string();
-        let now = now_iso();
-
-        // WHY BEGIN IMMEDIATE: SQLite serializes statements but not
-        // read-modify-write sequences. Two concurrent scanners SELECTing
-        // "not found" would both INSERT and produce duplicate active rows
-        // for the same (volume, path). IMMEDIATE grabs the writer lock at
-        // BEGIN; the busy_timeout installed by `open_and_migrate` makes
-        // the second writer wait instead of erroring with SQLITE_BUSY.
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(Error::from)?;
-
-        // WHY: app-level uniqueness on (volume_id, relative_path,
-        // deleted_at IS NULL) replaces a UNIQUE constraint that
-        // CLAUDE.md forbids on mutable columns. Safe under IMMEDIATE.
-        let existing: Option<(String, String, String)> = tx
-            .query_row(
-                "SELECT id, blake3_hash, device_id FROM file_locations
-                 WHERE volume_id = ?1 AND relative_path = ?2 AND deleted_at IS NULL",
-                rusqlite::params![vol_str, path_str],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(Error::from)?;
-
-        let outcome = match existing {
-            None => {
-                let id = perima_core::ids::new_id().to_string();
-                tx.execute(
-                    "INSERT INTO file_locations
-                     (id, blake3_hash, volume_id, relative_path, status,
-                      first_seen, updated_at, device_id)
-                     VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5, ?6)",
-                    rusqlite::params![id, hash_hex, vol_str, path_str, now, dev_str],
-                )
-                .map_err(Error::from)?;
-                UpsertOutcome::Inserted
-            }
-            Some((_, ref existing_hash, ref existing_dev))
-                if *existing_hash == hash_hex && *existing_dev == dev_str =>
-            {
-                UpsertOutcome::Unchanged
-            }
-            Some((ref row_id, _, _)) => {
-                tx.execute(
-                    "UPDATE file_locations
-                     SET blake3_hash = ?1, updated_at = ?2, device_id = ?3
-                     WHERE id = ?4",
-                    rusqlite::params![hash_hex, now, dev_str, row_id],
-                )
-                .map_err(Error::from)?;
-                UpsertOutcome::Updated
-            }
-        };
-        tx.commit().map_err(Error::from)?;
-        drop(conn);
-        Ok(outcome)
+        let (reply_tx, reply_rx) = flume::bounded::<Result<UpsertOutcome, CoreError>>(1);
+        self.writer
+            .send(WriteCmd::File(FileWriteCmd::UpsertLocation {
+                hash: *hash,
+                volume,
+                path: path.clone(),
+                device,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
     }
 
-    // WHY allow(significant_drop_tightening): the Mutex guard `conn` must
-    // outlive `stmt` and `rows` because they borrow through the guard.
-    // Dropping `conn` after `rows` is fully consumed is already optimal;
-    // Clippy's suggested rewrite would break the borrow graph.
-    #[allow(clippy::significant_drop_tightening)]
     fn list_file_locations(
         &self,
         limit: usize,
         volume: Option<VolumeId>,
     ) -> Result<Vec<FileLocationRecord>, CoreError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-        // WHY separate SQL strings per branch instead of `(?1 IS NULL OR fl.volume_id = ?1)`:
-        // the OR-with-NULL predicate defeats index use on `idx_file_locations_volume_path`;
-        // EXPLAIN QUERY PLAN reports SCAN + TEMP B-TREE sort even when a concrete
-        // volume_id is supplied. Branching here keeps both shapes index-eligible.
-        let vol_filter = volume.map(|v| v.0.to_string());
-        let sql: &str = if vol_filter.is_some() {
-            "SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
-                    fl.status, fl.first_seen
-             FROM file_locations fl
-             JOIN files f ON f.blake3_hash = fl.blake3_hash
-             WHERE fl.deleted_at IS NULL AND fl.volume_id = ?1
-             ORDER BY fl.relative_path
-             LIMIT ?2"
-        } else {
-            "SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
-                    fl.status, fl.first_seen
-             FROM file_locations fl
-             JOIN files f ON f.blake3_hash = fl.blake3_hash
-             WHERE fl.deleted_at IS NULL
-             ORDER BY fl.relative_path
-             LIMIT ?1"
-        };
-        let mut stmt = conn.prepare(sql).map_err(Error::from)?;
-
-        let limit_i64 = limit_to_i64(limit);
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(v) = vol_filter.as_deref() {
-            params.push(Box::new(v.to_owned()));
-        }
-        params.push(Box::new(limit_i64));
-
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
-                let hash_hex: String = row.get(0)?;
-                let size: i64 = row.get(1)?;
-                let vol_str: String = row.get(2)?;
-                let rel_path: String = row.get(3)?;
-                let status_str: String = row.get(4)?;
-                let first_seen: String = row.get(5)?;
-                Ok((hash_hex, size, vol_str, rel_path, status_str, first_seen))
-            })
-            .map_err(Error::from)?;
-
-        let mut out = Vec::new();
-        for row in rows {
-            let (hash_hex, size, vol_str, rel_path, status_str, first_seen) =
-                row.map_err(Error::from)?;
-            let hash = BlakeHash::parse_hex(&hash_hex)?;
-            let volume_id = VolumeId(
-                uuid::Uuid::parse_str(&vol_str)
-                    .map_err(|e| CoreError::Internal(format!("bad volume uuid: {e}")))?,
-            );
-            let status = match status_str.as_str() {
-                "active" => LocationStatus::Active,
-                "missing" => LocationStatus::Missing,
-                "moved" => LocationStatus::Moved,
-                "stale" => LocationStatus::Stale,
-                other => {
-                    return Err(CoreError::Internal(format!(
-                        "unknown location status: {other}"
-                    )));
-                }
-            };
-            out.push(FileLocationRecord {
-                hash,
-                size: i64_to_size(size)?,
-                volume_id,
-                relative_path: MediaPath::new(&rel_path),
-                status,
-                first_seen,
-            });
-        }
-        Ok(out)
+        // WHY pool-only (no writer hop): `list_file_locations` is a
+        // pure SELECT. Reads go directly through the `r2d2_sqlite` pool
+        // (spec §3.5). `PooledConnection` derefs to
+        // `rusqlite::Connection`, so the SQL body is lifted verbatim
+        // from the pre-Batch-C impl.
+        let conn = self.reads.get()?;
+        list_file_locations_sql(&conn, limit, volume)
     }
 }
 
+/// Shared SELECT body for `list_file_locations`.
+///
+/// WHY separate function: factored out for clarity and potential reuse.
+fn list_file_locations_sql(
+    conn: &Connection,
+    limit: usize,
+    volume: Option<VolumeId>,
+) -> Result<Vec<FileLocationRecord>, CoreError> {
+    // WHY separate SQL strings per branch instead of `(?1 IS NULL OR fl.volume_id = ?1)`:
+    // the OR-with-NULL predicate defeats index use on `idx_file_locations_volume_path`;
+    // EXPLAIN QUERY PLAN reports SCAN + TEMP B-TREE sort even when a concrete
+    // volume_id is supplied. Branching here keeps both shapes index-eligible.
+    let vol_filter = volume.map(|v| v.0.to_string());
+    let sql: &str = if vol_filter.is_some() {
+        "SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
+                fl.status, fl.first_seen
+         FROM file_locations fl
+         JOIN files f ON f.blake3_hash = fl.blake3_hash
+         WHERE fl.deleted_at IS NULL AND fl.volume_id = ?1
+         ORDER BY fl.relative_path
+         LIMIT ?2"
+    } else {
+        "SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
+                fl.status, fl.first_seen
+         FROM file_locations fl
+         JOIN files f ON f.blake3_hash = fl.blake3_hash
+         WHERE fl.deleted_at IS NULL
+         ORDER BY fl.relative_path
+         LIMIT ?1"
+    };
+    let mut stmt = conn.prepare(sql).map_err(Error::from)?;
+
+    let limit_i64 = limit_to_i64(limit);
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(v) = vol_filter.as_deref() {
+        params.push(Box::new(v.to_owned()));
+    }
+    params.push(Box::new(limit_i64));
+
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            let hash_hex: String = row.get(0)?;
+            let size: i64 = row.get(1)?;
+            let vol_str: String = row.get(2)?;
+            let rel_path: String = row.get(3)?;
+            let status_str: String = row.get(4)?;
+            let first_seen: String = row.get(5)?;
+            Ok((hash_hex, size, vol_str, rel_path, status_str, first_seen))
+        })
+        .map_err(Error::from)?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (hash_hex, size, vol_str, rel_path, status_str, first_seen) =
+            row.map_err(Error::from)?;
+        let hash = BlakeHash::parse_hex(&hash_hex)?;
+        let volume_id = VolumeId(
+            uuid::Uuid::parse_str(&vol_str)
+                .map_err(|e| CoreError::Internal(format!("bad volume uuid: {e}")))?,
+        );
+        let status = match status_str.as_str() {
+            "active" => LocationStatus::Active,
+            "missing" => LocationStatus::Missing,
+            "moved" => LocationStatus::Moved,
+            "stale" => LocationStatus::Stale,
+            other => {
+                return Err(CoreError::Internal(format!(
+                    "unknown location status: {other}"
+                )));
+            }
+        };
+        out.push(FileLocationRecord {
+            hash,
+            size: i64_to_size(size)?,
+            volume_id,
+            relative_path: MediaPath::new(&rel_path),
+            status,
+            first_seen,
+        });
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[allow(
+    clippy::unwrap_used,
+    reason = "tests: unwrap is the assertion — a panic is a failing test by design"
+)]
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use perima_core::EventBus;
+    use tempfile::TempDir;
 
     use super::*;
-    use crate::connection::open_and_migrate;
+    use crate::pool::ReadPool;
+    use crate::test_utils::NoopBus;
+    use crate::writer::{SqliteWriter, SqliteWriterHandle};
 
-    fn test_db() -> (tempfile::TempDir, SqliteFileRepository) {
+    /// Test harness: tempdir-backed DB, writer actor, read pool, repo.
+    ///
+    /// WHY tempfile-on-disk (not in-memory): writer + pool must share
+    /// the same DB file; `:memory:` is per-connection private.
+    fn test_db() -> (TempDir, SqliteFileRepository, SqliteWriterHandle) {
         let td = tempfile::tempdir().expect("tempdir");
-        let conn = open_and_migrate(&td.path().join("test.db")).expect("open");
-        (td, SqliteFileRepository::new(conn))
+        let db_path = td.path().join("test.db");
+        let bus: Arc<dyn EventBus> = Arc::new(NoopBus);
+        let writer = SqliteWriter::start(&db_path, bus).expect("writer start");
+        let reads = ReadPool::open(&db_path).expect("pool open");
+        let repo = SqliteFileRepository::new(writer.sender(), reads);
+        (td, repo, writer)
     }
 
     fn sample_hashed_file(content: &[u8], rel_path: &str) -> HashedFile {
@@ -522,7 +380,7 @@ mod tests {
 
     #[test]
     fn upsert_file_inserts_new() {
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let f = sample_hashed_file(b"hello", "a.txt");
         let out = repo.upsert_file(&f, device()).expect("upsert");
         assert_eq!(out, UpsertOutcome::Inserted);
@@ -530,7 +388,7 @@ mod tests {
 
     #[test]
     fn upsert_file_unchanged_on_repeat() {
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let dev = device();
         let f = sample_hashed_file(b"hello", "a.txt");
         repo.upsert_file(&f, dev).expect("first");
@@ -540,7 +398,7 @@ mod tests {
 
     #[test]
     fn upsert_file_updated_on_size_change() {
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let dev = device();
         let f1 = sample_hashed_file(b"hello", "a.txt");
         repo.upsert_file(&f1, dev).expect("first");
@@ -553,7 +411,7 @@ mod tests {
 
     #[test]
     fn upsert_location_inserts_new() {
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let dev = device();
         let f = sample_hashed_file(b"hello", "a.txt");
         repo.upsert_file(&f, dev).expect("file");
@@ -565,7 +423,7 @@ mod tests {
 
     #[test]
     fn upsert_location_unchanged_on_repeat() {
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let dev = device();
         let f = sample_hashed_file(b"hello", "a.txt");
         repo.upsert_file(&f, dev).expect("file");
@@ -581,7 +439,7 @@ mod tests {
 
     #[test]
     fn upsert_location_updated_on_hash_change() {
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let dev = device();
         let f1 = sample_hashed_file(b"hello", "a.txt");
         let f2 = sample_hashed_file(b"world", "a.txt");
@@ -599,7 +457,7 @@ mod tests {
 
     #[test]
     fn list_file_locations_returns_all() {
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let dev = device();
         let vol = sentinel_volume();
         for (i, name) in ["a.txt", "b.txt", "c.txt"].iter().enumerate() {
@@ -617,7 +475,7 @@ mod tests {
 
     #[test]
     fn list_file_locations_respects_limit() {
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let dev = device();
         let vol = sentinel_volume();
         for i in 0..5 {
@@ -632,7 +490,7 @@ mod tests {
 
     #[test]
     fn list_file_locations_filters_by_volume() {
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let dev = device();
         let vol_a = VolumeId::new();
         let vol_b = VolumeId::new();
@@ -651,7 +509,7 @@ mod tests {
 
     #[test]
     fn migrate_sentinel_row_updates_volume_id() {
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let dev = device();
         let sentinel = sentinel_volume();
         let real_vol = VolumeId::new();
@@ -688,7 +546,7 @@ mod tests {
 
     #[test]
     fn migrate_sentinel_row_skips_non_sentinel() {
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let dev = device();
         let real_vol = VolumeId::new();
         let other_vol = VolumeId::new();
@@ -710,7 +568,7 @@ mod tests {
 
     #[test]
     fn update_status_to_missing() {
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let dev = device();
         let vol = VolumeId::new();
         let f = sample_hashed_file(b"missing_test", "img.jpg");
@@ -736,7 +594,7 @@ mod tests {
 
     #[test]
     fn update_status_to_stale() {
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let dev = device();
         let vol = VolumeId::new();
         let f = sample_hashed_file(b"stale_test", "doc.txt");
@@ -759,7 +617,7 @@ mod tests {
 
     #[test]
     fn update_location_path_renames() {
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let dev = device();
         let vol = VolumeId::new();
         let f = sample_hashed_file(b"rename_test", "old_name.jpg");
@@ -794,7 +652,7 @@ mod tests {
         // filesystem already has a file at new_path). Observable:
         // list_file_locations shows exactly the destination row, with the
         // destination's original hash untouched.
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let dev = device();
         let vol = VolumeId::new();
 
@@ -839,7 +697,7 @@ mod tests {
         // 1b edit. A plain rename (no active row at new_path) must update
         // the row in place and keep exactly one active row with the new
         // path and active status.
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let dev = device();
         let vol = VolumeId::new();
         let f = sample_hashed_file(b"normal_rename", "a.jpg");
@@ -862,67 +720,62 @@ mod tests {
 
     #[test]
     fn upsert_location_concurrent_unique() {
-        // WHY: two concurrent repo handles upserting the same
+        // WHY: two concurrent repo handles (cloned) upserting the same
         // (hash, volume, path) tuple must produce exactly ONE active row.
-        // The `BEGIN IMMEDIATE` wrapper in upsert_location serializes the
-        // SELECT-then-INSERT pattern across connections; pre-fix both
-        // threads SELECT "not found" and both INSERT, producing two rows.
-        use std::sync::{Arc, Barrier};
+        // Under the writer actor this is guaranteed by single-threaded
+        // serialization — the test still covers the observable behaviour
+        // contract (both return Ok; exactly one row in DB).
+        use std::sync::{Arc as ArcStd, Barrier};
         use std::thread;
 
-        let td = tempfile::tempdir().expect("tempdir");
-        let db_path = td.path().join("race.db");
-        // Run migrations once up front.
-        {
-            let _ = open_and_migrate(&db_path).expect("migrate");
-        }
+        let (_td, repo, _writer) = test_db();
+        let repo = ArcStd::new(repo);
         let dev = device();
         let vol = VolumeId::new();
 
         // Seed the files row so both threads can link a location to it.
-        {
-            let conn = open_and_migrate(&db_path).expect("seed open");
-            let seed = SqliteFileRepository::new(conn);
-            let f = sample_hashed_file(b"shared", "race.jpg");
-            seed.upsert_file(&f, dev).expect("seed file");
-        }
-
         let f = sample_hashed_file(b"shared", "race.jpg");
-        let barrier = Arc::new(Barrier::new(2));
+        repo.upsert_file(&f, dev).expect("seed file");
+
+        let barrier = ArcStd::new(Barrier::new(2));
         let mut handles = Vec::new();
         for _ in 0..2 {
-            let db_path = db_path.clone();
-            let barrier = Arc::clone(&barrier);
+            let repo = ArcStd::clone(&repo);
+            let barrier = ArcStd::clone(&barrier);
             let hash = f.hash;
             let path = f.discovered.relative_path.clone();
             handles.push(thread::spawn(move || {
-                let conn = open_and_migrate(&db_path).expect("open");
-                let repo = SqliteFileRepository::new(conn);
                 barrier.wait();
                 repo.upsert_location(&hash, vol, &path, dev)
                     .expect("upsert_location")
             }));
         }
-        for h in handles {
-            h.join().expect("thread");
-        }
+        let results: Vec<UpsertOutcome> = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread"))
+            .collect();
 
-        // Cross-check: exactly one active row for (vol, race.jpg).
-        let conn = open_and_migrate(&db_path).expect("verify open");
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM file_locations
-                 WHERE volume_id = ?1 AND relative_path = ?2 AND deleted_at IS NULL",
-                rusqlite::params![vol.0.to_string(), "race.jpg"],
-                |r| r.get(0),
-            )
-            .expect("count");
-        assert_eq!(count, 1, "exactly one active file_locations row");
+        // Writer serializes: first caller Inserted, second caller sees
+        // the same (hash, device) row and returns Unchanged. If the
+        // second ever returned Updated that'd mean the app-level
+        // uniqueness guard skipped a check — regression we want to catch.
+        assert!(
+            results.contains(&UpsertOutcome::Inserted),
+            "at least one Inserted"
+        );
+        assert!(
+            results.contains(&UpsertOutcome::Unchanged),
+            "at least one Unchanged (second caller must dedup)"
+        );
+        // Cross-check via list: exactly one active row.
+        let rows = repo.list_file_locations(10, Some(vol)).expect("list");
+        assert_eq!(rows.len(), 1, "exactly one active file_locations row");
+        assert_eq!(rows[0].relative_path.as_str(), "race.jpg");
     }
 
     #[test]
     fn update_location_path_nonexistent() {
-        let (_td, repo) = test_db();
+        let (_td, repo, _writer) = test_db();
         let dev = device();
         let vol = VolumeId::new();
 

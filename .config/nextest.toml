@@ -1,0 +1,12 @@
+# cargo-nextest configuration
+# https://nexte.st/docs/configuration/
+
+[profile.default]
+# Flag a test as "slow" after 40s and terminate after two slow periods
+# (80s total per test). Rationale: the slowest clean test in any crate
+# is ~14s (fts proptest in perima-db). Past 40s is a sign of lock
+# contention or deadlock, not legitimate compute. nextest 0.9.133 lacks
+# a CLI `--slow-timeout` flag, but honors this config key — keeps
+# `timeout NNN cargo nextest ...` wrappers from killing the whole suite
+# on a single hang.
+slow-timeout = { period = "40s", terminate-after = 2 }

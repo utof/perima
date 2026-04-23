@@ -1,35 +1,37 @@
-//! `MetadataRepository` implementation backed by rusqlite.
+//! `MetadataRepository` adapter — writer-actor + read-pool backed.
+//!
+//! Post-Batch-C Task 4. The struct holds two cheap-to-clone handles:
+//! a [`flume::Sender<WriteCmd>`] connected to the single writer actor
+//! (spec §3.1) and a [`ReadPool`] of read-only `r2d2_sqlite`
+//! connections (spec §3.4). Writes build a [`MetadataWriteCmd`] variant
+//! with a `flume::bounded(1)` reply channel and block on the reply.
+//! Reads run SQL directly against a pooled connection.
+//!
+//! No `Mutex<Connection>`. The legacy `::new(conn)` constructor is
+//! deleted; every caller now supplies `(writer_sender, read_pool)`.
 
-use std::sync::Mutex;
-
+use flume::Sender;
 use perima_core::{
     BlakeHash, CoreError, DeviceId, FileLocationRecord, FileSize, LocationStatus, MediaMetadata,
     MediaPath, MetadataRepository, UpsertOutcome, VolumeId,
 };
-use rusqlite::Connection;
 // WHY: OptionalExtension adds `.optional()` to query_row results, converting
-// QueryReturnedNoRows into Ok(None) for our two-statement SELECT-then-upsert
-// pattern (mirrors `SqliteFileRepository::upsert_file`).
+// QueryReturnedNoRows into Ok(None) for the two-statement SELECT-then-upsert
+// pattern preserved on the read path (mirrors `SqliteFileRepository`).
 use rusqlite::OptionalExtension;
 
+use crate::cmd::{MetadataWriteCmd, WriteCmd};
 use crate::errors::Error;
+use crate::pool::ReadPool;
 
-/// Rusqlite-backed media-metadata repository.
+/// Writer-actor + read-pool backed media-metadata repository.
 ///
-/// WHY `Mutex<Connection>`: `rusqlite::Connection` is `Send` but not
-/// `Sync` (internal `RefCell` state). The [`MetadataRepository`] trait
-/// requires `Send + Sync` so callers can share implementations via
-/// `Arc<dyn MetadataRepository>` — e.g. the desktop `AppState` and the
-/// background `MetadataQueue` worker need the same handle. Wrapping in
-/// `Mutex` satisfies both bounds without `unsafe`. All DB methods lock
-/// briefly; there is no blocking I/O inside the lock.
-///
-/// WHY `&self` throughout (unlike `SqliteFileRepository`'s `&mut self`):
-/// the trait is declared with `&self` so `Arc`-sharing works without
-/// `Mutex<Arc<..>>` contortions at call sites. `FileRepository`'s
-/// `&mut self` legacy is tracked for migration in v0.5.x.
+/// Cheap to [`Clone`]: both fields (`flume::Sender`, `ReadPool`) are
+/// internally refcounted.
+#[derive(Clone)]
 pub struct SqliteMetadataRepository {
-    conn: Mutex<Connection>,
+    writer: Sender<WriteCmd>,
+    reads: ReadPool,
 }
 
 impl std::fmt::Debug for SqliteMetadataRepository {
@@ -40,17 +42,15 @@ impl std::fmt::Debug for SqliteMetadataRepository {
 }
 
 impl SqliteMetadataRepository {
-    /// Wrap an existing connection. The caller must have run
-    /// migrations (at least V001 + V002) before constructing this.
-    pub const fn new(conn: Connection) -> Self {
-        Self {
-            conn: Mutex::new(conn),
-        }
+    /// Construct an adapter from a writer-command sender + a read pool.
+    ///
+    /// WHY no migration run here: migrations happen exactly once inside
+    /// [`crate::SqliteWriter::start`] BEFORE the writer thread spawns
+    /// (spec §3.6). The read pool is opened after migrations complete.
+    #[must_use]
+    pub const fn new(writer: Sender<WriteCmd>, reads: ReadPool) -> Self {
+        Self { writer, reads }
     }
-}
-
-fn now_iso() -> String {
-    chrono::Utc::now().to_rfc3339()
 }
 
 /// Cast a `usize` limit to `i64` for `SQLite`'s `LIMIT ?` parameter.
@@ -98,22 +98,6 @@ fn i64_to_u64_opt(v: Option<i64>) -> Result<Option<u64>, CoreError> {
     .transpose()
 }
 
-/// Convert `Option<u64>` to `Option<i64>` for binding as `INTEGER`.
-///
-/// WHY: `rusqlite`'s `ToSql` impl does not cover `u64` (`SQLite`
-/// integers are signed 64-bit). Values originating from media
-/// containers (duration in ms) fit comfortably in `i64` on any
-/// real-world asset; we propagate overflow as `Internal` rather than
-/// truncating.
-fn u64_opt_to_i64(v: Option<u64>) -> Result<Option<i64>, CoreError> {
-    v.map(|raw| {
-        i64::try_from(raw).map_err(|_| {
-            CoreError::Internal(format!("duration_ms {raw} overflows SQLite INTEGER (i64)"))
-        })
-    })
-    .transpose()
-}
-
 /// Raw tuple mirroring the optional columns of a `file_metadata` row.
 ///
 /// WHY type alias: the 11-tuple is repeated in `find_by_hash` and keeps
@@ -153,161 +137,35 @@ fn status_from_str(s: &str) -> Result<LocationStatus, CoreError> {
 }
 
 impl MetadataRepository for SqliteMetadataRepository {
-    // WHY allow(significant_drop_tightening): the Mutex guard `conn`
-    // must outlive the transaction that borrows through it. Dropping
-    // the guard earlier would break the borrow graph — same pattern
-    // used throughout `file_repo.rs`.
-    #[allow(clippy::significant_drop_tightening)]
     fn upsert_metadata(
         &self,
         meta: &MediaMetadata,
         device: DeviceId,
     ) -> Result<UpsertOutcome, CoreError> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-
-        // WHY BEGIN IMMEDIATE: the SELECT-then-INSERT/UPDATE sequence
-        // must serialize across connections. Two concurrent extractor
-        // workers SELECTing "not found" for the same hash would both
-        // INSERT otherwise — SQLite's statement-level atomicity is not
-        // enough for a read-modify-write cycle. IMMEDIATE grabs the
-        // writer lock at BEGIN; the busy_timeout installed by
-        // `open_and_migrate` makes the second writer wait instead of
-        // erroring with SQLITE_BUSY.
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|e| CoreError::Internal(format!("begin immediate: {e}")))?;
-
-        let hash_hex = meta.hash.to_hex();
-        let now = now_iso();
-        let dev_str = device.0.to_string();
-        let duration_ms_i64 = u64_opt_to_i64(meta.duration_ms)?;
-
-        // Mirror `SqliteFileRepository::upsert_file`'s SELECT-then-
-        // INSERT/UPDATE on the content-addressed PK (blake3_hash). We
-        // fetch the existing row's device_id + mime_type for a cheap
-        // equivalence proxy to classify Unchanged vs Updated.
-        let existing: Option<(String, Option<String>)> = tx
-            .query_row(
-                "SELECT device_id, mime_type FROM file_metadata
-                 WHERE blake3_hash = ?1 AND deleted_at IS NULL",
-                [&hash_hex],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(Error::from)?;
-
-        let outcome = match existing {
-            None => {
-                // WHY thumbnail_path / thumbnail_status NOT bound from
-                // `meta`: extractors always produce `None` for these
-                // fields. The queue worker writes them via the dedicated
-                // `update_thumbnail` method after thumbnail generation
-                // completes. A subsequent Updated upsert (triggered by
-                // a mime_type flip on the same hash) would otherwise
-                // clobber the worker's state back to NULL, silently
-                // losing the thumbnail association. See utof/perima#15
-                // HIGH #4 for the regression this prevents.
-                //
-                // WHY `thumbnail_status` literal-default 'pending' on
-                // INSERT: V004 backfills the NULL rows left by v0.4.0–
-                // v0.4.1, and future INSERTs need to produce 'pending'
-                // on the same path so the
-                // `idx_file_metadata_thumbnail_pending` partial index
-                // stays populated. The literal lives in the SQL, not
-                // in `MediaMetadata`, because the UPDATE branch of
-                // this upsert deliberately never touches thumbnail
-                // columns (Task 2 decoupling). See utof/perima#15
-                // HIGH #3.
-                tx.execute(
-                    "INSERT INTO file_metadata
-                     (blake3_hash, width, height, duration_ms, captured_at,
-                      camera_make, camera_model, codec, bitrate_bps, mime_type,
-                      thumbnail_status,
-                      extracted_at, updated_at, device_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                             'pending',
-                             ?11, ?11, ?12)",
-                    rusqlite::params![
-                        hash_hex,
-                        meta.width,
-                        meta.height,
-                        duration_ms_i64,
-                        meta.captured_at,
-                        meta.camera_make,
-                        meta.camera_model,
-                        meta.codec,
-                        meta.bitrate_bps,
-                        meta.mime_type,
-                        now,
-                        dev_str,
-                    ],
-                )
-                .map_err(Error::from)?;
-                UpsertOutcome::Inserted
-            }
-            Some((existing_dev, existing_mime))
-                if existing_dev == dev_str && existing_mime == meta.mime_type =>
-            {
-                // WHY cheap equality proxy: comparing every Option field
-                // would bloat this method and still miss changes hidden
-                // in (say) camera_model alone. mime_type + device_id is
-                // the coarsest check that classifies "new extraction
-                // run" vs "repeat call with identical inputs". v0.4.0
-                // accepts occasional false-Updated over false-Unchanged
-                // as the safe default.
-                UpsertOutcome::Unchanged
-            }
-            Some(_) => {
-                // WHY UPDATE omits thumbnail_path / thumbnail_status:
-                // same rationale as the INSERT branch above. The
-                // worker's `update_thumbnail` is the sole writer of
-                // those columns. Preserving whatever state the worker
-                // has already written across an Updated upsert is the
-                // invariant pinned by
-                // `upsert_metadata_preserves_thumbnail_state`.
-                tx.execute(
-                    "UPDATE file_metadata
-                     SET width = ?2, height = ?3, duration_ms = ?4,
-                         captured_at = ?5, camera_make = ?6, camera_model = ?7,
-                         codec = ?8, bitrate_bps = ?9, mime_type = ?10,
-                         updated_at = ?11, device_id = ?12
-                     WHERE blake3_hash = ?1",
-                    rusqlite::params![
-                        hash_hex,
-                        meta.width,
-                        meta.height,
-                        duration_ms_i64,
-                        meta.captured_at,
-                        meta.camera_make,
-                        meta.camera_model,
-                        meta.codec,
-                        meta.bitrate_bps,
-                        meta.mime_type,
-                        now,
-                        dev_str,
-                    ],
-                )
-                .map_err(Error::from)?;
-                UpsertOutcome::Updated
-            }
-        };
-
-        tx.commit()
-            .map_err(|e| CoreError::Internal(format!("commit: {e}")))?;
-        Ok(outcome)
+        let (reply_tx, reply_rx) = flume::bounded::<Result<UpsertOutcome, CoreError>>(1);
+        // WHY clone `meta`: the command crosses a thread boundary via
+        // `flume::Sender::send`, which requires `'static`. `MediaMetadata`
+        // is `Clone`, so this is a shallow clone (the only heap payloads
+        // are the `Option<String>` fields — metadata rows are small).
+        self.writer
+            .send(WriteCmd::Metadata(MetadataWriteCmd::UpsertMetadata {
+                record: meta.clone(),
+                device,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
     }
 
-    // WHY allow(significant_drop_tightening): the Mutex guard must
-    // outlive the query borrow.
-    #[allow(clippy::significant_drop_tightening)]
     fn find_by_hash(&self, hash: &BlakeHash) -> Result<Option<MediaMetadata>, CoreError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
+        // WHY a pool checkout here (no writer hop): `find_by_hash` is a
+        // pure SELECT. Reads go directly through the `r2d2_sqlite` pool
+        // (spec §3.5). `PooledConnection` derefs to
+        // `rusqlite::Connection`, so the SQL body is lifted verbatim
+        // from the pre-Batch-C impl.
+        let conn = self.reads.get()?;
         let hash_hex = hash.to_hex();
         let row: Option<MetadataRowCols> = conn
             .query_row(
@@ -367,20 +225,13 @@ impl MetadataRepository for SqliteMetadataRepository {
         }
     }
 
-    // WHY allow(significant_drop_tightening): `stmt` + `rows` borrow
-    // through the Mutex guard; dropping `conn` earlier breaks the
-    // borrow graph (same pattern as `list_file_locations`).
-    #[allow(clippy::significant_drop_tightening)]
     #[allow(clippy::too_many_lines)]
     fn list_with_metadata(
         &self,
         limit: usize,
         volume: Option<VolumeId>,
     ) -> Result<Vec<(FileLocationRecord, Option<MediaMetadata>)>, CoreError> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
+        let conn = self.reads.get()?;
         let vol_filter = volume.map(|v| v.0.to_string());
 
         // WHY single LEFT JOIN (no N+1): pairing file locations with
@@ -545,24 +396,6 @@ impl MetadataRepository for SqliteMetadataRepository {
         Ok(out)
     }
 
-    /// Update the thumbnail columns on an existing `file_metadata` row.
-    ///
-    /// Separate from `upsert_metadata` so the queue worker can write
-    /// the thumbnail result without triggering the upsert's
-    /// Unchanged/Updated equivalence proxy (which compares `device_id`
-    /// and `mime_type` only). A thumbnail status flip pending → ready
-    /// must always persist.
-    ///
-    /// Wraps the UPDATE in `BEGIN IMMEDIATE` matching the v0.3.1
-    /// hardening pattern; concurrent CLI + desktop writers serialize
-    /// via the writer lock instead of producing torn writes.
-    ///
-    /// Returns the number of rows updated (0 if no metadata row
-    /// exists for `hash`; 1 otherwise).
-    // WHY allow(significant_drop_tightening): `conn` guard must outlive
-    // the transaction; the suggested tightening would split the borrow
-    // graph across a drop boundary mid-tx.
-    #[allow(clippy::significant_drop_tightening)]
     fn update_thumbnail(
         &self,
         hash: &BlakeHash,
@@ -570,46 +403,56 @@ impl MetadataRepository for SqliteMetadataRepository {
         status: &str,
         device: DeviceId,
     ) -> Result<u64, CoreError> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| CoreError::Internal(format!("mutex poisoned: {e}")))?;
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|e| CoreError::Internal(format!("begin immediate: {e}")))?;
-        let hash_hex = hash.to_hex();
-        let now = now_iso();
-        let dev_str = device.0.to_string();
-        let n = tx
-            .execute(
-                "UPDATE file_metadata
-                 SET thumbnail_path = ?1, thumbnail_status = ?2,
-                     updated_at = ?3, device_id = ?4
-                 WHERE blake3_hash = ?5 AND deleted_at IS NULL",
-                rusqlite::params![path, status, now, dev_str, hash_hex],
-            )
-            .map_err(crate::errors::Error::from)?;
-        tx.commit()
-            .map_err(|e| CoreError::Internal(format!("commit: {e}")))?;
-        #[allow(clippy::cast_possible_truncation)]
-        Ok(n as u64)
+        let (reply_tx, reply_rx) = flume::bounded::<Result<u64, CoreError>>(1);
+        // WHY clone `path` / `status`: same rationale as `upsert_metadata`
+        // above — commands cross a thread boundary via `flume::Sender::send`
+        // (`'static` lifetime contract).
+        self.writer
+            .send(WriteCmd::Metadata(MetadataWriteCmd::UpdateThumbnail {
+                hash: *hash,
+                path: path.map(str::to_owned),
+                status: status.to_owned(),
+                device,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
     }
 }
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "tests: unwrap is the assertion — a panic is a failing test by design"
+)]
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Arc;
 
-    use perima_core::{DiscoveredFile, FileRepository, HashedFile};
+    use perima_core::{DiscoveredFile, EventBus, FileRepository, HashedFile};
+    use tempfile::TempDir;
 
     use super::*;
     use crate::connection::open_and_migrate;
     use crate::file_repo::SqliteFileRepository;
+    use crate::pool::ReadPool;
+    use crate::test_utils::NoopBus;
+    use crate::writer::{SqliteWriter, SqliteWriterHandle};
 
-    fn metadata_repo() -> (tempfile::TempDir, SqliteMetadataRepository) {
+    /// Test harness: tempdir-backed DB, writer actor, read pool, repo.
+    ///
+    /// WHY tempfile-on-disk (not in-memory): writer + pool must share
+    /// the same DB file; `:memory:` is per-connection private.
+    fn metadata_repo() -> (TempDir, SqliteMetadataRepository, SqliteWriterHandle) {
         let td = tempfile::tempdir().expect("tempdir");
-        let conn = open_and_migrate(&td.path().join("test.db")).expect("open");
-        (td, SqliteMetadataRepository::new(conn))
+        let db_path = td.path().join("test.db");
+        let bus: Arc<dyn EventBus> = Arc::new(NoopBus);
+        let writer = SqliteWriter::start(&db_path, bus).expect("writer start");
+        let reads = ReadPool::open(&db_path).expect("pool open");
+        let repo = SqliteMetadataRepository::new(writer.sender(), reads);
+        (td, repo, writer)
     }
 
     /// WHY duplicated from `file_repo::tests`: those helpers are
@@ -656,6 +499,11 @@ mod tests {
     /// v0.4.2 — rows persisted before V004 carried NULL; the partial
     /// index `idx_file_metadata_thumbnail_pending` excluded them.
     /// See `utof/perima#15` HIGH #3.
+    ///
+    /// WHY direct `open_and_migrate` here (not writer+pool): this test
+    /// exercises the raw migration SQL, not the adapter API. Running
+    /// a one-shot owned connection keeps the assertion scope tight —
+    /// no writer actor / pool required.
     #[test]
     fn v004_backfills_null_thumbnail_status_to_pending() {
         let td = tempfile::tempdir().expect("tempdir");
@@ -725,7 +573,7 @@ mod tests {
     /// populated for future rows. See `utof/perima#15` HIGH #3.
     #[test]
     fn upsert_metadata_insert_seeds_pending_thumbnail_status() {
-        let (_td, repo) = metadata_repo();
+        let (_td, repo, _writer) = metadata_repo();
         let dev = device();
         let hash = BlakeHash::from_bytes(*blake3::hash(b"seed").as_bytes());
         let meta = sample_metadata(hash);
@@ -746,7 +594,7 @@ mod tests {
 
     #[test]
     fn upsert_metadata_inserts_new() {
-        let (_td, repo) = metadata_repo();
+        let (_td, repo, _writer) = metadata_repo();
         let dev = device();
         let hash = BlakeHash::from_bytes(*blake3::hash(b"payload").as_bytes());
         let meta = sample_metadata(hash);
@@ -756,7 +604,7 @@ mod tests {
 
     #[test]
     fn upsert_metadata_unchanged_on_repeat() {
-        let (_td, repo) = metadata_repo();
+        let (_td, repo, _writer) = metadata_repo();
         let dev = device();
         let hash = BlakeHash::from_bytes(*blake3::hash(b"payload").as_bytes());
         let meta = sample_metadata(hash);
@@ -767,7 +615,7 @@ mod tests {
 
     #[test]
     fn upsert_metadata_updated_on_change() {
-        let (_td, repo) = metadata_repo();
+        let (_td, repo, _writer) = metadata_repo();
         let dev = device();
         let hash = BlakeHash::from_bytes(*blake3::hash(b"payload").as_bytes());
         let meta1 = sample_metadata(hash);
@@ -781,25 +629,27 @@ mod tests {
     #[test]
     fn list_with_metadata_joins_null() {
         // Arrange: insert a file + location WITHOUT a metadata row.
-        let td = tempfile::tempdir().expect("tempdir");
+        let (td, repo, writer) = metadata_repo();
         let db_path = td.path().join("test.db");
         let dev = device();
         let vol = VolumeId::new();
         let f = sample_hashed_file(b"joinsnull", "no_meta.txt");
 
+        // WHY reuse the writer handle's sender: `writer.sender()` gives
+        // a cloned `flume::Sender<WriteCmd>` for the same writer thread
+        // that backs `repo`, so file writes are serialised through the
+        // same actor without opening a second writer connection.
         {
-            let conn = open_and_migrate(&db_path).expect("open");
-            let file_repo = SqliteFileRepository::new(conn);
+            let seed_reads = ReadPool::open(&db_path).expect("seed pool");
+            let file_repo = SqliteFileRepository::new(writer.sender(), seed_reads);
             file_repo.upsert_file(&f, dev).expect("upsert file");
             file_repo
                 .upsert_location(&f.hash, vol, &f.discovered.relative_path, dev)
                 .expect("upsert location");
         }
 
-        // Act: open a second connection and call list_with_metadata.
-        let meta_conn = open_and_migrate(&db_path).expect("reopen");
-        let meta_repo = SqliteMetadataRepository::new(meta_conn);
-        let rows = meta_repo
+        // Act: call list_with_metadata through the pool.
+        let rows = repo
             .list_with_metadata(100, None)
             .expect("list_with_metadata");
 
@@ -817,7 +667,7 @@ mod tests {
     #[test]
     fn list_with_metadata_joins_populated() {
         // Arrange: insert file + location AND a metadata row for it.
-        let td = tempfile::tempdir().expect("tempdir");
+        let (td, repo, writer) = metadata_repo();
         let db_path = td.path().join("test.db");
         let dev = device();
         let vol = VolumeId::new();
@@ -825,25 +675,18 @@ mod tests {
         let meta = sample_metadata(f.hash);
 
         {
-            let conn = open_and_migrate(&db_path).expect("open");
-            let file_repo = SqliteFileRepository::new(conn);
+            let seed_reads = ReadPool::open(&db_path).expect("seed pool");
+            let file_repo = SqliteFileRepository::new(writer.sender(), seed_reads);
             file_repo.upsert_file(&f, dev).expect("upsert file");
             file_repo
                 .upsert_location(&f.hash, vol, &f.discovered.relative_path, dev)
                 .expect("upsert location");
         }
-        {
-            let conn = open_and_migrate(&db_path).expect("reopen for metadata");
-            let meta_repo = SqliteMetadataRepository::new(conn);
-            meta_repo
-                .upsert_metadata(&meta, dev)
-                .expect("upsert metadata");
-        }
+        // Seed metadata via the writer-backed repo.
+        repo.upsert_metadata(&meta, dev).expect("upsert metadata");
 
         // Act
-        let meta_conn = open_and_migrate(&db_path).expect("reopen for list");
-        let meta_repo = SqliteMetadataRepository::new(meta_conn);
-        let rows = meta_repo
+        let rows = repo
             .list_with_metadata(100, None)
             .expect("list_with_metadata");
 
@@ -872,7 +715,7 @@ mod tests {
 
     #[test]
     fn update_thumbnail_marks_ready_with_path() {
-        let (_td, repo) = metadata_repo();
+        let (_td, repo, _writer) = metadata_repo();
         let dev = device();
         let hash = BlakeHash::from_bytes(*blake3::hash(b"ready").as_bytes());
         let meta = sample_metadata(hash);
@@ -895,7 +738,7 @@ mod tests {
     /// leave them untouched. See `utof/perima#15` HIGH #4.
     #[test]
     fn upsert_metadata_preserves_thumbnail_state() {
-        let (_td, repo) = metadata_repo();
+        let (_td, repo, _writer) = metadata_repo();
         let dev = device();
         let hash = BlakeHash::from_bytes(*blake3::hash(b"preserve").as_bytes());
         let mut meta = sample_metadata(hash);
@@ -925,7 +768,7 @@ mod tests {
 
     #[test]
     fn update_thumbnail_marks_failed_keeps_path_none() {
-        let (_td, repo) = metadata_repo();
+        let (_td, repo, _writer) = metadata_repo();
         let dev = device();
         let hash = BlakeHash::from_bytes(*blake3::hash(b"fail").as_bytes());
         let meta = sample_metadata(hash);

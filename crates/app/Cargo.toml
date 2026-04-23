@@ -1,0 +1,55 @@
+[package]
+name = "perima-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false  # WHY: intra-workspace only; not published to crates.io
+
+[features]
+# WHY specta feature: `ScanReport` needs `specta::Type` when the desktop
+# handler returns it across the IPC boundary. Mirrors the pattern in
+# `crates/core` (optional dep, cfg_attr gated). Activated by
+# `perima-desktop` via `perima-app = { features = ["specta"] }`.
+specta = ["dep:specta", "perima-core/specta"]
+
+[dependencies]
+perima-core  = { path = "../core" }
+perima-fs    = { path = "../fs" }
+perima-hash  = { path = "../hash" }
+perima-media = { workspace = true }
+async-broadcast = { workspace = true }
+async-trait     = { workspace = true }
+futures         = { workspace = true }
+tokio.workspace    = true
+tokio-util.workspace = true
+thiserror.workspace = true
+tracing.workspace  = true
+# WHY serde: ScanReport + ScanReportEntry derive Serialize so the
+# desktop handler can return the UseCase output directly across the
+# IPC boundary (Batch D Task 8 — no shell-side ScanResult mirror).
+serde.workspace = true
+# WHY rayon: ScanUseCase parallelizes BLAKE3 hashing across CPUs via
+# `par_iter`. Matches the pattern in `crates/cli/src/cmd/scan.rs`
+# pre-extraction; Batch B preserves the exact orchestration shape.
+rayon.workspace    = true
+# WHY uuid: VolumeId fallback in dry-run path uses `Uuid::nil()`.
+uuid.workspace     = true
+# WHY optional specta: see [features] above. Not a hard dep — normal
+# `cargo build` of `perima-app` (CLI, tests) does not pull in specta.
+specta = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true
+insta.workspace    = true
+# WHY perima-db + rusqlite in dev-deps: integration-flavored unit tests
+# construct real SQLite-backed adapters (matching crates/db::file_repo
+# tests) rather than invent new mock ports. DB is NOT a runtime dep of
+# crates/app — shells inject `Arc<dyn Port>` adapters.
+perima-db = { path = "../db" }
+rusqlite.workspace = true
+
+[lints]
+workspace = true

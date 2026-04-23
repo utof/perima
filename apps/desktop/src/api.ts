@@ -2,35 +2,88 @@
  * Thin `neverthrow` wrappers around Tauri IPC commands.
  *
  * WHY: Components use `.match()` instead of try/catch, making error paths
- * explicit and type-checked. `ResultAsync<T, string>` is the contract.
+ * explicit and type-checked. `ResultAsync<T, CoreError>` is the contract.
+ * WHY CoreError not string: the backend now returns a typed discriminated
+ * union `{ kind, data }` so the frontend can branch on recoverable vs not
+ * (e.g. "NotFound" → soft refresh, "Io.kind=PermissionDenied" → modal).
  */
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ResultAsync } from "neverthrow";
 import type {
-  FileEntry,
-  FileEvent,
-  FileWithMetadata,
-  FileWithTags,
-  ScanResult,
+  AppEvent,
+  CoreError,
+  FileLocationRecord,
+  FileWithMetadataPayload,
+  FileWithTagsPayload,
+  ScanReport,
   SearchHit,
   Tag,
-  VolumeEntry,
-} from "./types";
+  VolumeRecord,
+} from "./bindings";
+
+// ── Error parsing ─────────────────────────────────────────────────────
 
 /**
- * Wraps a Tauri `invoke` call in a `ResultAsync`, mapping thrown errors to
- * their string message.
+ * All discriminant strings recognised in `CoreError`.
+ * Kept in sync with `crates/core/src/errors.rs` variants.
+ * WHY a Set: `KNOWN_KINDS.has(x)` is O(1) and type-narrows cleanly.
+ */
+const KNOWN_KINDS: ReadonlySet<CoreError["kind"]> = new Set([
+  "NotFound",
+  "Duplicate",
+  "InvalidPath",
+  "InvalidHash",
+  "InvalidTag",
+  "Io",
+  "Unsupported",
+  "Internal",
+]);
+
+/**
+ * Convert an unknown Tauri rejection value into a `CoreError`.
+ *
+ * Tauri rejects with the JSON-serialised `Result::Err` payload when a
+ * command handler returns `Err(CoreError::…)`. The payload is already
+ * `{ kind: "…", data: … }` on the wire, so we just validate and
+ * pass it through.
+ *
+ * The fallback path covers:
+ * - Tauri runtime errors that reject before the command runs (e.g.
+ *   command-not-registered, IPC serialisation failures).
+ * - Future `CoreError` variants the frontend hasn't picked up yet
+ *   (graceful degradation rather than crash).
+ */
+export function parseCoreError(raw: unknown): CoreError {
+  if (typeof raw === "object" && raw !== null && "kind" in raw) {
+    const r = raw as { kind: unknown; data?: unknown };
+    if (
+      typeof r.kind === "string" &&
+      KNOWN_KINDS.has(r.kind as CoreError["kind"])
+    ) {
+      return r as CoreError;
+    }
+  }
+  return {
+    kind: "Internal",
+    data: typeof raw === "string" ? raw : JSON.stringify(raw),
+  };
+}
+
+// ── IPC wrapper ───────────────────────────────────────────────────────
+
+/**
+ * Wraps a Tauri `invoke` call in a `ResultAsync`, mapping rejected
+ * values to typed `CoreError` via `parseCoreError`.
  */
 function fromInvoke<T>(
   cmd: string,
   args: Record<string, unknown>,
-): ResultAsync<T, string> {
-  return ResultAsync.fromPromise(
-    invoke<T>(cmd, args),
-    (e) => (e instanceof Error ? e.message : String(e)),
-  );
+): ResultAsync<T, CoreError> {
+  return ResultAsync.fromPromise(invoke<T>(cmd, args), parseCoreError);
 }
+
+// ── Command wrappers ──────────────────────────────────────────────────
 
 /**
  * Scan a directory tree, hashing and indexing every file found.
@@ -41,7 +94,7 @@ function fromInvoke<T>(
 export function scan(
   path: string,
   dryRun: boolean,
-): ResultAsync<ScanResult, string> {
+): ResultAsync<ScanReport, CoreError> {
   // WHY: Tauri v2 auto-converts camelCase args to snake_case on the Rust side.
   return fromInvoke("scan", { path, dryRun });
 }
@@ -55,7 +108,7 @@ export function scan(
 export function listFiles(
   limit: number,
   volume?: string,
-): ResultAsync<FileEntry[], string> {
+): ResultAsync<FileLocationRecord[], CoreError> {
   return fromInvoke("list_files", { limit, volume: volume ?? null });
 }
 
@@ -73,7 +126,7 @@ export function listFiles(
 export function listFilesWithMetadata(
   limit: number,
   volume?: string,
-): ResultAsync<FileWithMetadata[], string> {
+): ResultAsync<FileWithMetadataPayload[], CoreError> {
   return fromInvoke("list_files_with_metadata", {
     limit,
     volume: volume ?? null,
@@ -83,7 +136,7 @@ export function listFilesWithMetadata(
 /**
  * List all volumes known to the database.
  */
-export function listVolumes(): ResultAsync<VolumeEntry[], string> {
+export function listVolumes(): ResultAsync<VolumeRecord[], CoreError> {
   return fromInvoke("list_volumes", {});
 }
 
@@ -91,45 +144,49 @@ export function listVolumes(): ResultAsync<VolumeEntry[], string> {
  * Start watching the given folder for filesystem changes.
  *
  * Cancels any currently active watcher. Events are emitted via the
- * Tauri `file-event` channel; subscribe with {@link subscribeToFileEvents}.
+ * Tauri `app-event` channel; subscribe with {@link subscribeToAppEvents}.
  */
-export function startWatch(path: string): ResultAsync<void, string> {
+export function startWatch(path: string): ResultAsync<void, CoreError> {
   return fromInvoke("start_watch", { path });
 }
 
 /** Stop the active watcher, if any. No-op when nothing is watched. */
-export function stopWatch(): ResultAsync<void, string> {
+export function stopWatch(): ResultAsync<void, CoreError> {
   return fromInvoke("stop_watch", {});
 }
 
 /** Query whether a watcher is currently active. */
-export function isWatching(): ResultAsync<boolean, string> {
+export function isWatching(): ResultAsync<boolean, CoreError> {
   return fromInvoke("is_watching", {});
 }
 
-/** Returned by {@link subscribeToFileEvents}; call to stop listening. */
+/** Returned by {@link subscribeToAppEvents}; call to stop listening. */
 export type UnsubscribeFn = () => void;
 
 /**
- * Subscribe to `file-event` notifications emitted by the backend watcher.
+ * Subscribe to `app-event` notifications emitted by the backend bus.
  *
  * Resolves to an unsubscribe function. Consumers MUST call it on cleanup
- * to avoid leaks (e.g., from `useEffect` return).
+ * to avoid leaked listeners (e.g., from `useEffect` return).
+ *
+ * Channel renamed from `"file-event"` to `"app-event"` in Batch E — the
+ * single channel now carries the full `AppEvent` envelope (`File`,
+ * `ScanCompleted`, `IndexInvalidated`).
  *
  * WHY wrap `listen`: the raw `@tauri-apps/api/event` listener passes a
  * `{ payload, event, id, ... }` object to the callback; we unwrap the
- * payload so consumers only deal with the typed `FileEvent`.
+ * payload so consumers only deal with the typed `AppEvent`.
  */
-export async function subscribeToFileEvents(
-  callback: (event: FileEvent) => void,
+export async function subscribeToAppEvents(
+  callback: (event: AppEvent) => void,
 ): Promise<UnsubscribeFn> {
-  return listen<FileEvent>("file-event", (tauriEvent) => {
+  return listen<AppEvent>("app-event", (tauriEvent) => {
     callback(tauriEvent.payload);
   });
 }
 
 /** List all active tags. */
-export function listTags(): ResultAsync<Tag[], string> {
+export function listTags(): ResultAsync<Tag[], CoreError> {
   return fromInvoke("list_tags", {});
 }
 
@@ -137,7 +194,7 @@ export function listTags(): ResultAsync<Tag[], string> {
 export function attachTag(
   hash: string,
   tagName: string,
-): ResultAsync<Tag, string> {
+): ResultAsync<Tag, CoreError> {
   return fromInvoke("attach_tag", { hash, tagName });
 }
 
@@ -145,7 +202,7 @@ export function attachTag(
 export function detachTag(
   hash: string,
   tagId: string,
-): ResultAsync<void, string> {
+): ResultAsync<void, CoreError> {
   return fromInvoke("detach_tag", { hash, tagId });
 }
 
@@ -153,7 +210,7 @@ export function detachTag(
 export function listFilesWithTags(
   limit: number,
   volume?: string,
-): ResultAsync<FileWithTags[], string> {
+): ResultAsync<FileWithTagsPayload[], CoreError> {
   return fromInvoke("list_files_with_tags", { limit, volume: volume ?? null });
 }
 
@@ -166,11 +223,11 @@ export function listFilesWithTags(
 export function search(
   query: string,
   limit = 50,
-): ResultAsync<SearchHit[], string> {
+): ResultAsync<SearchHit[], CoreError> {
   return fromInvoke("search", { query, limit });
 }
 
 /** Wipe and rebuild the FTS5 search index from the current DB state. */
-export function searchRebuild(): ResultAsync<void, string> {
+export function searchRebuild(): ResultAsync<void, CoreError> {
   return fromInvoke("search_rebuild", {});
 }

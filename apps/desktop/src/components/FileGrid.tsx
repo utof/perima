@@ -1,11 +1,11 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import type { FileWithTags } from "../types";
+import type { FileWithTagsPayload } from "../bindings";
 import TagChip from "./TagChip";
 
 /** Props for {@link FileGrid}. */
 interface FileGridProps {
   /** Rows to render as grid tiles. */
-  files: FileWithTags[];
+  files: FileWithTagsPayload[];
   /** When true, show a loading indicator instead of tiles. */
   loading?: boolean;
 }
@@ -50,7 +50,7 @@ export default function FileGrid({ files, loading = false }: FileGridProps) {
 }
 
 /** Single grid tile rendering either a thumbnail or a placeholder. */
-function FileGridTile({ file }: { file: FileWithTags }) {
+function FileGridTile({ file }: { file: FileWithTagsPayload }) {
   const ready =
     file.thumbnail_status === "ready" && file.thumbnail_path !== null;
   const filename = file.relative_path.split("/").pop() ?? file.relative_path;

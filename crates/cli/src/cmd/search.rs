@@ -1,6 +1,7 @@
-//! `perima search` subcommand — full-text search over indexed metadata.
+//! `perima search` subcommand — thin delegator to [`perima_app::SearchUseCase`].
 
-use perima_core::{CoreError, SearchRepository};
+use perima_app::{AppContainer, SearchCommand};
+use perima_core::CoreError;
 
 /// Arguments for the `perima search` command.
 #[derive(clap::Args, Debug)]
@@ -33,24 +34,33 @@ pub(crate) struct SearchArgs {
 /// # Errors
 /// Returns [`CoreError::Internal`] on DB/`FTS5` errors.
 /// Returns [`CoreError::Unsupported`] when no query is supplied without `--rebuild`.
-pub(crate) fn run<S>(repo: &S, args: &SearchArgs) -> Result<(), CoreError>
-where
-    S: SearchRepository + ?Sized,
-{
+pub(crate) async fn run(container: &AppContainer, args: &SearchArgs) -> Result<(), CoreError> {
     if args.rebuild {
-        repo.rebuild()?;
+        container.search.execute(SearchCommand::Rebuild).await?;
         eprintln!("perima: search index rebuilt");
         return Ok(());
     }
 
-    let query = args
+    // WHY the empty-query check + unwrap stays here: clap's
+    // `required_unless_present = "rebuild"` already guarantees `query` is
+    // `Some(...)` once we're past the rebuild branch. The UseCase ALSO
+    // rejects empty/whitespace-only queries with `CoreError::Unsupported`,
+    // so we just delegate.
+    let q = args
         .query
         .as_deref()
-        .filter(|q| !q.trim().is_empty())
-        .ok_or_else(|| CoreError::Unsupported("query must be non-empty".into()))?;
+        .ok_or_else(|| CoreError::Unsupported("query must be non-empty".into()))?
+        .to_owned();
 
-    let hits = repo.search(query, args.limit)?;
+    let out = container
+        .search
+        .execute(SearchCommand::Query {
+            q,
+            limit: Some(args.limit),
+        })
+        .await?;
 
+    let hits = out.hits;
     if args.json {
         let json = serde_json::to_string(&hits)
             .map_err(|e| CoreError::Internal(format!("json serialize: {e}")))?;

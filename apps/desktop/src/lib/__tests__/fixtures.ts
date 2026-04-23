@@ -1,7 +1,7 @@
-import type { FileWithTags } from "../../types";
+import type { FileWithTagsPayload } from "../../bindings";
 
 /**
- * Construct a FileWithTags fixture for unit tests.
+ * Construct a FileWithTagsPayload fixture for unit tests.
  *
  * WHY shared: the same fixture shape is needed by search.test.ts
  * (computeFacets, composeVisible, sortByRank tests) and later by
@@ -10,7 +10,7 @@ import type { FileWithTags } from "../../types";
  * Only the two fields that matter for filter/compose logic (`hash` and
  * `tags[].id`) take real values; everything else is a neutral default.
  */
-export function file(hash: string, tagIds: string[]): FileWithTags {
+export function file(hash: string, tagIds: string[]): FileWithTagsPayload {
   return {
     hash,
     size: 0,

@@ -1,4 +1,4 @@
-//! `perima tag` subcommand — add, remove, and list tags.
+//! `perima tag` subcommand — thin delegator to [`perima_app::TagUseCase`].
 //!
 //! Provides three sub-subcommands:
 //! - `tag add <path> <tags…>` — attach one or more labels to a file
@@ -8,7 +8,8 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use perima_core::{BlakeHash, CoreError, DeviceId, FileRepository, TagRepository, normalize_tag};
+use perima_app::{AppContainer, TagCommand, TagOutput};
+use perima_core::{BlakeHash, CoreError, DeviceId, normalize_tag};
 
 use super::metadata::find_by_absolute_suffix;
 
@@ -28,12 +29,6 @@ pub(crate) enum TagAction {
         /// Path to the file to tag.
         path: PathBuf,
         /// One or more tag names to attach.
-        ///
-        /// WHY required + 1..: clap's default for `Vec<T>` is "zero or
-        /// more positionals" — `perima tag add foo.jpg` would silently
-        /// no-op. Force at least one tag argument so the error is a
-        /// clear "missing required tag" message instead of success-
-        /// that-did-nothing.
         #[arg(required = true, num_args = 1..)]
         tags: Vec<String>,
     },
@@ -58,32 +53,26 @@ pub(crate) enum TagAction {
 /// Returns [`CoreError::InvalidPath`] when the file does not exist or
 /// is not yet indexed (run `perima scan` first); propagates
 /// [`CoreError`] from tag normalization, DB access, and I/O.
-pub(crate) fn run<T, F>(
-    tag_repo: &T,
-    file_repo: &F,
+pub(crate) async fn run(
+    container: &AppContainer,
+    data_dir: &Path,
     device: DeviceId,
     args: &TagArgs,
-) -> Result<(), CoreError>
-where
-    T: TagRepository + ?Sized,
-    F: FileRepository + ?Sized,
-{
+) -> Result<(), CoreError> {
     match &args.action {
-        TagAction::Add { path, tags } => run_add(tag_repo, file_repo, device, path, tags),
-        TagAction::Rm { path, tag } => run_rm(tag_repo, file_repo, device, path, tag),
-        TagAction::Ls { json } => run_ls(tag_repo, *json),
+        TagAction::Add { path, tags } => run_add(container, data_dir, device, path, tags).await,
+        TagAction::Rm { path, tag } => run_rm(container, data_dir, device, path, tag).await,
+        TagAction::Ls { json } => run_ls(container, data_dir, *json).await,
     }
 }
 
-/// Resolve a path to a `BlakeHash` by suffix-matching indexed locations.
+/// Resolve a path to a `BlakeHash` via the container's shared file repository.
 ///
-/// WHY separate helper: both `run_add` and `run_rm` need the same
-/// canonicalization + suffix-match logic. Extracting it avoids
-/// duplicating the error messages and the `list_file_locations` call.
-fn resolve_hash<F>(file_repo: &F, path: &Path) -> Result<BlakeHash, CoreError>
-where
-    F: FileRepository + ?Sized,
-{
+/// WHY `container` instead of a local open: the writer actor owns the sole
+/// writable connection; opening a second one here would require a second
+/// writer. `container.files_repo` is the shared `Arc<dyn FileRepository>`
+/// already wired to the writer+pool.
+fn resolve_hash(container: &AppContainer, path: &Path) -> Result<BlakeHash, CoreError> {
     if !path.exists() {
         return Err(CoreError::InvalidPath(format!(
             "does not exist: {}",
@@ -97,16 +86,15 @@ where
         )));
     }
 
-    let absolute = perima_fs::platform_path::canonicalize(path).map_err(CoreError::Io)?;
+    let absolute = perima_fs::platform_path::canonicalize(path).map_err(CoreError::from)?;
     let absolute_str = absolute
         .to_str()
         .ok_or_else(|| CoreError::InvalidPath(format!("non-UTF8 path: {}", absolute.display())))?;
 
     // WHY list across ALL volumes (None): the user supplies an absolute
-    // path that may live on any known volume. We don't know which scan
-    // root produced the relative-path record, so suffix-matching against
-    // the full location set is the only portable approach.
-    let records = file_repo.list_file_locations(usize::MAX, None)?;
+    // path that may live on any known volume. Suffix-matching across the
+    // full location set is the only portable approach.
+    let records = container.files_repo.list_file_locations(usize::MAX, None)?;
     let record = find_by_absolute_suffix(&records, absolute_str).ok_or_else(|| {
         CoreError::InvalidPath(format!(
             "not indexed: {} (run `perima scan` first)",
@@ -118,24 +106,31 @@ where
 }
 
 /// Attach one or more tags to a file.
-fn run_add<T, F>(
-    tag_repo: &T,
-    file_repo: &F,
+async fn run_add(
+    container: &AppContainer,
+    _data_dir: &Path,
     device: DeviceId,
     path: &Path,
     tags: &[String],
-) -> Result<(), CoreError>
-where
-    T: TagRepository + ?Sized,
-    F: FileRepository + ?Sized,
-{
-    let hash = resolve_hash(file_repo, path)?;
+) -> Result<(), CoreError> {
+    let hash = resolve_hash(container, path)?;
 
     let mut applied = Vec::with_capacity(tags.len());
     for raw in tags {
-        let tag = tag_repo.upsert_tag(raw, device)?;
-        tag_repo.attach(&hash, tag.id, device)?;
-        applied.push(tag.name);
+        container
+            .tag
+            .execute(TagCommand::Attach {
+                hash,
+                name: raw.clone(),
+                device,
+            })
+            .await?;
+        // WHY call normalize_tag for the message: the UseCase does the
+        // same normalization internally; doing it here keeps the user-
+        // visible confirmation line consistent with the actual stored
+        // name when the raw input carried whitespace/case variance.
+        let normalized = normalize_tag(raw)?;
+        applied.push(normalized);
     }
 
     let stdout = std::io::stdout();
@@ -146,54 +141,54 @@ where
         path.display(),
         applied.join(", ")
     )
-    .map_err(CoreError::Io)
+    .map_err(CoreError::from)
 }
 
 /// Remove a tag from a file.
-fn run_rm<T, F>(
-    tag_repo: &T,
-    file_repo: &F,
+async fn run_rm(
+    container: &AppContainer,
+    _data_dir: &Path,
     device: DeviceId,
     path: &Path,
     tag_raw: &str,
-) -> Result<(), CoreError>
-where
-    T: TagRepository + ?Sized,
-    F: FileRepository + ?Sized,
-{
-    let hash = resolve_hash(file_repo, path)?;
+) -> Result<(), CoreError> {
+    let hash = resolve_hash(container, path)?;
 
-    // WHY upsert_tag for rm: we need the tag's UUID to call detach.
-    // upsert_tag is idempotent — if the tag doesn't exist we create it
-    // (harmless), then detach finds no active row (no-op soft-delete).
-    let tag = tag_repo.upsert_tag(tag_raw, device)?;
-    tag_repo.detach(&hash, tag.id, device)?;
+    container
+        .tag
+        .execute(TagCommand::Detach {
+            hash,
+            name: tag_raw.to_owned(),
+            device,
+        })
+        .await?;
 
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     let normalized = normalize_tag(tag_raw)?;
-    writeln!(handle, "removed {} from {}", normalized, path.display()).map_err(CoreError::Io)
+    writeln!(handle, "removed {} from {}", normalized, path.display()).map_err(CoreError::from)
 }
 
 /// List all active tags with their per-tag file counts.
-fn run_ls<T>(tag_repo: &T, json: bool) -> Result<(), CoreError>
-where
-    T: TagRepository + ?Sized,
-{
-    let tags = tag_repo.list_tags()?;
+async fn run_ls(container: &AppContainer, _data_dir: &Path, json: bool) -> Result<(), CoreError> {
+    let out = container.tag.execute(TagCommand::List).await?;
+    let TagOutput::Tags(tags) = out else {
+        return Err(CoreError::Internal(
+            "TagCommand::List returned non-Tags output".into(),
+        ));
+    };
 
-    // WHY pre-compute counts: propagate DB errors via `?` instead of
-    // swallowing them with `unwrap_or(0)` — a mutex-poison or SQLite
-    // failure should surface, not produce silent zero-counts.
+    // WHY direct TagRepository via container.tags: `count_files_for_tag`
+    // is not (yet) exposed through `TagUseCase`. Post-Batch-C Task 3,
+    // the container exposes `Arc<dyn TagRepository>` directly so we no
+    // longer need a short-lived `SqliteTagRepository::new(...)` open
+    // here. A future UseCase iteration can lift this into `TagOutput`.
     let counts: Vec<u64> = tags
         .iter()
-        .map(|t| tag_repo.count_files_for_tag(t.id))
+        .map(|t| container.tags.count_files_for_tag(t.id))
         .collect::<Result<_, _>>()?;
 
     if json {
-        // WHY manual construction instead of deriving Serialize on Tag:
-        // Tag already derives Serialize but we want a flat `{name, count, id}`
-        // shape rather than Tag's `{id, name, first_seen}` shape.
         let rows: Vec<serde_json::Value> = tags
             .iter()
             .zip(&counts)
@@ -210,13 +205,13 @@ where
         let mut handle = stdout.lock();
         serde_json::to_writer_pretty(&mut handle, &rows)
             .map_err(|e| CoreError::Internal(format!("json: {e}")))?;
-        writeln!(handle).map_err(CoreError::Io)?;
+        writeln!(handle).map_err(CoreError::from)?;
     } else {
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
-        writeln!(handle, "{:<32} {:>6}  ID", "NAME", "COUNT").map_err(CoreError::Io)?;
+        writeln!(handle, "{:<32} {:>6}  ID", "NAME", "COUNT").map_err(CoreError::from)?;
         for (t, &count) in tags.iter().zip(&counts) {
-            writeln!(handle, "{:<32} {:>6}  {}", t.name, count, t.id).map_err(CoreError::Io)?;
+            writeln!(handle, "{:<32} {:>6}  {}", t.name, count, t.id).map_err(CoreError::from)?;
         }
     }
 

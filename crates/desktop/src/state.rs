@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use perima_app::AppContainer;
 use perima_core::DeviceId;
 use perima_db::{SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository};
 use tokio::sync::Mutex;
@@ -11,10 +12,11 @@ use tokio_util::sync::CancellationToken;
 /// State shared across all Tauri commands via `tauri::State<AppState>`.
 ///
 /// WHY `data_dir` + `device_id` without a general DB handle: commands
-/// that read through `FileRepository` / `VolumeRepository` open their
-/// own `rusqlite::Connection` per-call. That adapter predates `&self`
-/// traits and uses `&mut self`, which collides with `Arc`-sharing. WAL
-/// mode makes the second open a no-op so per-call-open is cheap.
+/// that read through `FileRepository` still open their own
+/// `rusqlite::Connection` per-call (Tasks 3-6 migrate them to the
+/// writer actor). `VolumeRepository` as of Batch C Task 2 goes through
+/// `container.volumes` — no per-call open. WAL mode makes the remaining
+/// second open cheap for tests and the not-yet-migrated repos.
 ///
 /// WHY `metadata_repo: Arc<SqliteMetadataRepository>` is a deliberate
 /// deviation from the per-call-open pattern: the `MetadataRepository`
@@ -26,26 +28,45 @@ use tokio_util::sync::CancellationToken;
 /// the v0.4.0 plan calls this out explicitly.
 pub struct AppState {
     /// Resolved data directory (where `perima.db` lives).
+    ///
+    /// WHY kept post-Batch-B: `start_watch` + the `_inner` test helpers
+    /// (`run_scan_inner`, `list_files_inner`, `list_volumes_inner`) still
+    /// open short-lived per-call connections rooted at this directory.
+    /// Remove once those sites are fully ported (tracked as post-Batch-B
+    /// cleanup; see spec §5 risk mitigation "additive `AppState`").
     pub data_dir: PathBuf,
     /// Stable device identifier.
     pub device_id: DeviceId,
     /// Shared metadata repository handle.
     ///
-    /// See struct-level WHY for the rationale behind holding this
-    /// directly (rather than re-opening a connection per command).
+    /// WHY retained during Batch B: test helpers in
+    /// `crates/desktop/tests/commands_test.rs` still construct this repo
+    /// directly via `_inner` entry points. The migrated `#[tauri::command]`
+    /// handlers go through `container.metadata.execute` instead; this
+    /// field's only remaining consumer is the preserved test-helper seam.
     pub metadata_repo: Arc<SqliteMetadataRepository>,
     /// Shared tag repository handle.
     ///
-    /// WHY `Arc<SqliteTagRepository>` (same pattern as `metadata_repo`):
-    /// `TagRepository` trait uses `&self` with interior `Mutex<Connection>`,
-    /// so a single handle can be shared across commands without per-call-open.
+    /// WHY retained: same rationale as `metadata_repo` — preserved during
+    /// Batch B for the `_inner` test-helper contract; migrated commands
+    /// call `container.tag.execute` instead.
     pub tag_repo: Arc<SqliteTagRepository>,
     /// Shared search repository handle.
     ///
-    /// WHY `Arc<SqliteSearchRepository>`: `SearchRepository` uses `&self`
-    /// with interior `Mutex<Connection>`, enabling Arc-sharing across commands
-    /// without per-call connection opens.
+    /// WHY retained: same rationale as `metadata_repo` — preserved during
+    /// Batch B for the `_inner` test-helper contract; migrated commands
+    /// call `container.search.execute` instead.
     pub search_repo: Arc<SqliteSearchRepository>,
+    /// Single orchestration hub — every migrated handler calls through
+    /// one of the `UseCase` fields on this container.
+    ///
+    /// WHY `Arc<AppContainer>`: `AppContainer` is already internally
+    /// `Arc`-shared across its `UseCase` fields (see `perima_app::container`).
+    /// Wrapping the container itself in an `Arc` lets Tauri's
+    /// `manage(state)` move the value without forcing a clone per command
+    /// dispatch; every command then accesses `state.container.*` through
+    /// a single dereference.
+    pub container: Arc<AppContainer>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -55,12 +76,14 @@ impl std::fmt::Debug for AppState {
 }
 
 impl AppState {
-    /// Construct a new `AppState` from a resolved config, metadata repo, and
-    /// tag repo.
+    /// Construct a new `AppState` from a resolved config + repo handles +
+    /// an assembled [`AppContainer`].
     ///
     /// WHY a constructor (rather than public struct literal): keeps the
-    /// Arc-sharing contract for both repos explicit at the single
-    /// construction site in `run()`.
+    /// Arc-sharing contract for every field explicit at the single
+    /// construction site in `run()`. Also preserves the additive-migration
+    /// invariant — callers that forget to pass `container` get a compile
+    /// error rather than a silently missing dependency.
     #[must_use]
     pub const fn new(
         data_dir: PathBuf,
@@ -68,6 +91,7 @@ impl AppState {
         metadata_repo: Arc<SqliteMetadataRepository>,
         tag_repo: Arc<SqliteTagRepository>,
         search_repo: Arc<SqliteSearchRepository>,
+        container: Arc<AppContainer>,
     ) -> Self {
         Self {
             data_dir,
@@ -75,6 +99,7 @@ impl AppState {
             metadata_repo,
             tag_repo,
             search_repo,
+            container,
         }
     }
 }

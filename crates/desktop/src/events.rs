@@ -1,140 +1,71 @@
-//! Tauri-specific event payload types and the `TauriEventEmitter`.
+//! Tauri-specific event handler for [`perima_core::AppEvent`].
 //!
-//! WHY separate module: `perima_core::FileEvent` uses `MediaPath` and
-//! `VolumeId` which carry no framework dependencies. Adding `specta::Type`
-//! or `tauri` imports to core would violate that constraint. This module
-//! defines thin wrapper types that implement IPC-boundary traits without
-//! touching core domain types.
+//! WHY separate module: `perima_core::AppEvent` uses `MediaPath` and
+//! `VolumeId` which carry no framework dependencies. Adding `tauri` imports
+//! to core would violate that constraint. This module hosts only the
+//! `TauriEventHandler` adapter; the `AppEvent` type itself already
+//! derives `Serialize + specta::Type` (Batch E spec §4.1), so no
+//! wire-mirror enum is needed here.
+//!
+//! WHY `FileEventPayload` was deleted (Batch D Task 8): it was a 1:1
+//! mirror of `FileEvent` with manual field-string conversions. Now that
+//! `FileEvent` derives `Serialize` with `#[serde(tag = "type")]`,
+//! the Tauri handler passes the full `AppEvent` envelope directly.
+//!
+//! WHY channel renamed from `"file-event"` to `"app-event"` (Batch E Task 11):
+//! the frontend now receives the entire `AppEvent` envelope — including
+//! `ScanCompleted` and `IndexInvalidated` — via a single `"app-event"` channel.
+//! The previous `"file-event"` channel only delivered `FileEvent` variants.
+//! `apps/desktop/src/api.ts::subscribeToAppEvents` (Task 12) is the single
+//! subscriber.
 
-use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use perima_core::{CoreError, EventBus, FileEvent};
+use perima_app::EventHandler;
+use perima_core::AppEvent;
 
 // ---------------------------------------------------------------------------
-// Wire type
+// TauriEventHandler
 // ---------------------------------------------------------------------------
 
-/// Payload emitted on the `"file-event"` Tauri channel.
-///
-/// WHY `#[serde(tag = "type")]`: produces a discriminated union
-/// `{"type":"Created","path":"...","volume":"..."}` which matches the
-/// TypeScript `FileEvent` union defined in `apps/desktop/src/types.ts`.
-#[derive(Debug, Clone, Serialize, specta::Type)]
-#[serde(tag = "type")]
-pub enum FileEventPayload {
-    /// A new file appeared at `path`.
-    Created {
-        /// Relative path within the volume.
-        path: String,
-        /// Volume UUID string.
-        volume: String,
-    },
-    /// An existing file's content was modified.
-    Modified {
-        /// Relative path within the volume.
-        path: String,
-        /// Volume UUID string.
-        volume: String,
-    },
-    /// A file was deleted from `path`.
-    Deleted {
-        /// Relative path within the volume.
-        path: String,
-        /// Volume UUID string.
-        volume: String,
-    },
-    /// A file was renamed/moved within the same volume.
-    Renamed {
-        /// Previous relative path.
-        from: String,
-        /// New relative path.
-        to: String,
-        /// Volume UUID string.
-        volume: String,
-    },
-}
-
-impl From<&FileEvent> for FileEventPayload {
-    fn from(event: &FileEvent) -> Self {
-        match event {
-            FileEvent::Created { path, volume } => Self::Created {
-                path: path.as_str().to_owned(),
-                volume: volume.0.to_string(),
-            },
-            FileEvent::Modified { path, volume } => Self::Modified {
-                path: path.as_str().to_owned(),
-                volume: volume.0.to_string(),
-            },
-            FileEvent::Deleted { path, volume } => Self::Deleted {
-                path: path.as_str().to_owned(),
-                volume: volume.0.to_string(),
-            },
-            FileEvent::Renamed { from, to, volume } => Self::Renamed {
-                from: from.as_str().to_owned(),
-                to: to.as_str().to_owned(),
-                volume: volume.0.to_string(),
-            },
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// TauriEventEmitter
-// ---------------------------------------------------------------------------
-
-/// Emits [`FileEventPayload`] on the `"file-event"` Tauri channel.
+/// Emits [`AppEvent`] on the `"app-event"` Tauri channel.
 ///
 /// WHY `AppHandle`: `tauri::AppHandle::emit` broadcasts to all frontend
 /// windows without requiring a specific window reference, which is correct
 /// for a single-window desktop app and is forward-compatible with multi-window
 /// if that ever lands.
-pub struct TauriEventEmitter {
+///
+/// WHY `"app-event"` channel (not `"file-event"`): the full `AppEvent`
+/// envelope carries `File`, `ScanCompleted`, and `IndexInvalidated` variants.
+/// The frontend's `subscribeToAppEvents` in `api.ts` (Task 12) is the
+/// single subscriber. The previous `"file-event"` channel is gone.
+pub struct TauriEventHandler {
     /// The Tauri application handle used to emit events to the frontend.
     pub app_handle: AppHandle,
 }
 
-impl std::fmt::Debug for TauriEventEmitter {
+impl std::fmt::Debug for TauriEventHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TauriEventEmitter").finish_non_exhaustive()
+        f.debug_struct("TauriEventHandler").finish_non_exhaustive()
     }
 }
 
-impl EventBus for TauriEventEmitter {
-    fn emit(&self, event: &FileEvent) -> Result<(), CoreError> {
-        let payload: FileEventPayload = event.into();
-        self.app_handle
-            .emit("file-event", payload)
-            .map_err(|e| CoreError::Internal(format!("tauri emit: {e}")))
+#[async_trait::async_trait]
+impl EventHandler for TauriEventHandler {
+    fn name(&self) -> &'static str {
+        "tauri_event_handler"
     }
-}
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use perima_core::{MediaPath, VolumeId};
-    use uuid::Uuid;
-
-    #[test]
-    fn file_event_created_serializes_correctly() {
-        let volume = VolumeId(Uuid::nil());
-        let path = MediaPath::new("photos/img.jpg");
-        let event = FileEvent::Created {
-            path: path.clone(),
-            volume,
-        };
-
-        let payload: FileEventPayload = (&event).into();
-        let json = serde_json::to_string(&payload).expect("serialize");
-
-        // Assert discriminated-union shape: {"type":"Created","path":"...","volume":"..."}
-        let v: serde_json::Value = serde_json::from_str(&json).expect("parse");
-        assert_eq!(v["type"], "Created");
-        assert_eq!(v["path"], path.as_str());
-        assert_eq!(v["volume"], Uuid::nil().to_string());
+    async fn handle(&mut self, event: AppEvent) {
+        // WHY direct emit of AppEvent: AppEvent derives Serialize +
+        // cfg_attr specta::Type (Batch E spec §4.1). Channel name
+        // "app-event" replaces the pre-Batch-E "file-event" channel —
+        // frontend's subscribeToAppEvents (api.ts in Task 12) is the
+        // single subscriber. Emitting the full envelope (not just the
+        // FileEvent inner) lets the frontend receive ScanCompleted +
+        // IndexInvalidated uniformly.
+        if let Err(e) = self.app_handle.emit("app-event", &event) {
+            tracing::warn!(error = %e, "failed to emit AppEvent to Tauri channel");
+        }
     }
 }

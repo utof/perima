@@ -15,11 +15,27 @@ thiserror.workspace = true
 tracing.workspace   = true
 uuid.workspace      = true
 chrono.workspace    = true
+flume.workspace     = true
+r2d2.workspace      = true
+r2d2_sqlite.workspace = true
+
+[features]
+default = []
+# WHY: gates the shared `test_utils` module so production builds don't
+# expose NoopBus + future test scaffolding. Crates that need NoopBus in
+# their dev-dependencies enable this feature on perima-db.
+test-utils = []
 
 [dev-dependencies]
 tempfile.workspace  = true
 blake3.workspace    = true
 proptest.workspace  = true
+# WHY self-dep: integration tests live in `tests/` and consume perima-db
+# as an external crate, so they need the `test-utils` feature enabled
+# explicitly. Cargo's dev-dependency self-reference is the canonical
+# pattern for this (used by serde, tokio, etc.) — it's surprising the
+# first time you see it but standard.
+perima-db = { path = ".", features = ["test-utils"] }
 
 [lints]
 workspace = true

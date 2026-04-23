@@ -5,13 +5,22 @@
 //! which accept plain `Path` + `DeviceId` arguments. The underlying logic is
 //! identical — only the Tauri IPC wrapping is absent.
 
+// WHY file-level allow: each test fn defines an inline `struct NoopBus`
+// stub. Hoisting one helper at module scope is the long-term consolidation
+// target (#119/#125), but for v1 these test fixtures intentionally stay
+// self-contained — moving them now would expand the diff beyond the
+// "make CI green" scope.
+#![allow(clippy::items_after_statements)]
+
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
-use perima_core::{BlakeHash, DeviceId, MediaMetadata, MetadataRepository, SearchRepository};
+use perima_core::{
+    AppEvent, CoreError, DeviceId, EventBus, MediaMetadata, MetadataRepository, SearchRepository,
+};
 use perima_db::{
-    SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository, open_and_migrate,
+    ReadPool, SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository, SqliteWriter,
 };
 use perima_desktop::commands::{
     attach_tag_inner, detach_tag_inner, list_files_inner, list_files_with_metadata_inner,
@@ -62,7 +71,7 @@ fn write_tiny_png(path: &Path, fill: [u8; 3]) {
         .expect("write png");
 }
 
-/// Scan three fixture files and assert `total=3, new=3, errors=0`.
+/// Scan three fixture files and assert `files_seen=3, files_new=3, files_errored=0`.
 #[tokio::test]
 async fn scan_indexes_files() {
     let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
@@ -79,13 +88,25 @@ async fn scan_indexes_files() {
     .await
     .expect("scan_inner should succeed");
 
+    // WHY ScanReport fields (not ScanResult): Batch D Task 8 deleted the
+    // shell-side ScanResult mirror; run_scan_inner now returns ScanReport
+    // from crates/app directly. files_seen == files_new + files_updated +
+    // files_errored for a clean first-run scan.
     assert_eq!(
-        result.total, 3,
+        result.files_seen, 3,
         "expected 3 total files, got {}",
-        result.total
+        result.files_seen
     );
-    assert_eq!(result.new, 3, "expected 3 new files, got {}", result.new);
-    assert_eq!(result.errors, 0, "expected 0 errors, got {}", result.errors);
+    assert_eq!(
+        result.files_new, 3,
+        "expected 3 new files, got {}",
+        result.files_new
+    );
+    assert_eq!(
+        result.files_errored, 0,
+        "expected 0 errors, got {}",
+        result.files_errored
+    );
 }
 
 /// After a successful scan, `list_files_inner` must return all 3 records.
@@ -128,12 +149,31 @@ async fn list_files_with_metadata_returns_rows() {
     // Attach a metadata row to one of the scanned files. We pull its
     // hash from `list_files_inner` to guarantee FK-compatibility with
     // the `files` row the scanner just inserted.
+    //
+    // WHY `entries[0].hash` is now `BlakeHash` (not `String`): Batch D Task 8
+    // deleted the `FileEntry` wire mirror; `list_files_inner` now returns
+    // `Vec<FileLocationRecord>` where `hash` is a typed `BlakeHash` value.
     let entries = list_files_inner(data_dir.path(), 100, None).expect("list_files_inner");
     assert!(!entries.is_empty(), "scan must have inserted ≥1 file");
-    let first_hash = BlakeHash::parse_hex(&entries[0].hash).expect("parse hash");
+    let first_hash = entries[0].hash;
 
     let db_path = data_dir.path().join("perima.db");
-    let repo = SqliteMetadataRepository::new(open_and_migrate(&db_path).expect("open"));
+    // WHY writer+pool harness (post-Batch-C Task 4): the metadata
+    // adapter now takes `(flume::Sender<WriteCmd>, ReadPool)`.
+    // `run_scan_inner` above opened its own writer + dropped it at
+    // scope end; we spin up a fresh writer here and keep its handle
+    // alive via `_writer` until teardown (WAL lets the two writers
+    // coexist).
+    struct TestNoopBus;
+    impl EventBus for TestNoopBus {
+        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+    let bus: Arc<dyn EventBus> = Arc::new(TestNoopBus);
+    let writer = SqliteWriter::start(&db_path, bus).expect("writer start");
+    let reads = ReadPool::open(&db_path).expect("pool open");
+    let repo = SqliteMetadataRepository::new(writer.sender(), reads);
     let meta = MediaMetadata {
         hash: first_hash,
         width: Some(640),
@@ -158,14 +198,22 @@ async fn list_files_with_metadata_returns_rows() {
         !rows.is_empty(),
         "expected ≥1 FileWithMetadataPayload row, got 0"
     );
+    // WHY `entries[0].hash.to_hex()`: `FileWithMetadataPayload.hash` is a
+    // hex String (flat IPC payload); `FileLocationRecord.hash` is `BlakeHash`.
+    // Compare using the hex representation.
     let populated = rows
         .iter()
-        .find(|r| r.hash == entries[0].hash)
+        .find(|r| r.hash == entries[0].hash.to_hex())
         .expect("row for inserted metadata must be present");
     assert_eq!(populated.width, Some(640));
     assert_eq!(populated.height, Some(480));
     assert_eq!(populated.camera_make.as_deref(), Some("Acme"));
     assert_eq!(populated.mime_type.as_deref(), Some("image/jpeg"));
+
+    // Tear down explicitly — drops the repo's sender clone + reaps
+    // the writer thread cleanly before the tempdir is removed.
+    drop(repo);
+    writer.join();
 }
 
 /// After a successful scan, `list_volumes_inner` must return at least one volume.
@@ -206,8 +254,22 @@ async fn desktop_scan_populates_metadata_and_thumbnails() {
     // in `crates/desktop/src/lib.rs::run`): a single
     // `SqliteMetadataRepository` Arc cloned into the queue worker and
     // inspected directly after the scan drain completes.
-    let metadata_conn = open_and_migrate(&db_path).expect("open metadata");
-    let metadata_repo = Arc::new(SqliteMetadataRepository::new(metadata_conn));
+    //
+    // WHY writer+pool harness (post-Batch-C Task 4): the adapter now
+    // takes `(flume::Sender<WriteCmd>, ReadPool)`. `run_scan_inner_with_metadata`
+    // below opens its own writer internally; we keep a separate
+    // writer for this test's direct assertions (WAL lets both
+    // coexist).
+    struct MetaTestNoopBus;
+    impl EventBus for MetaTestNoopBus {
+        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+    let bus: Arc<dyn EventBus> = Arc::new(MetaTestNoopBus);
+    let writer = SqliteWriter::start(&db_path, bus).expect("writer start");
+    let reads = ReadPool::open(&db_path).expect("pool open");
+    let metadata_repo = Arc::new(SqliteMetadataRepository::new(writer.sender(), reads));
 
     let result = run_scan_inner_with_metadata(
         fixture_dir.path(),
@@ -219,8 +281,17 @@ async fn desktop_scan_populates_metadata_and_thumbnails() {
     .await
     .expect("scan with metadata should succeed");
 
-    assert_eq!(result.total, 2, "expected 2 files, got {}", result.total);
-    assert_eq!(result.new, 2, "expected 2 new, got {}", result.new);
+    // WHY ScanReport fields: see scan_indexes_files test comment.
+    assert_eq!(
+        result.files_seen, 2,
+        "expected 2 files, got {}",
+        result.files_seen
+    );
+    assert_eq!(
+        result.files_new, 2,
+        "expected 2 new, got {}",
+        result.files_new
+    );
 
     // Assert 2 metadata rows exist via the shared handle. The drain
     // path above guarantees the worker has persisted by the time we
@@ -260,6 +331,11 @@ async fn desktop_scan_populates_metadata_and_thumbnails() {
         thumb_root.display(),
         thumb_count,
     );
+
+    // Tear down explicitly — drops the repo's sender clone + reaps
+    // the writer thread cleanly before the tempdir is removed.
+    drop(metadata_repo);
+    writer.join();
 }
 
 /// Exercises the four tag `_inner` helpers end-to-end:
@@ -277,24 +353,43 @@ async fn list_files_with_tags_returns_tagged_rows() {
         .await
         .expect("scan");
 
-    // Open a tag repo against the same DB.
+    // Open tag + metadata repos against the same DB. Post-Batch-C
+    // Tasks 3 + 4, both `SqliteTagRepository` and
+    // `SqliteMetadataRepository` require `(writer.sender(), ReadPool)`;
+    // spin up a dedicated writer for this test and keep its handle
+    // alive via `writer` until teardown. WAL mode lets this writer
+    // coexist with the one spawned internally by `run_scan_inner`
+    // above.
     let db_path = data_dir.join("perima.db");
-    let tag_conn = open_and_migrate(&db_path).expect("open tag conn");
-    let tag_repo = SqliteTagRepository::new(tag_conn);
 
-    // Get files list to find a hash.
-    let metadata_conn = open_and_migrate(&db_path).expect("open meta conn");
-    let metadata_repo = SqliteMetadataRepository::new(metadata_conn);
+    struct TestNoopBus;
+    impl EventBus for TestNoopBus {
+        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+    let bus: Arc<dyn EventBus> = Arc::new(TestNoopBus);
+    let writer = SqliteWriter::start(&db_path, bus).expect("writer start");
+    let reads = ReadPool::open(&db_path).expect("pool open");
+    let tag_repo = SqliteTagRepository::new(writer.sender(), reads.clone());
+    let metadata_repo = SqliteMetadataRepository::new(writer.sender(), reads);
+
+    // Get files list to find a hash. `FileWithMetadataPayload.hash` is a
+    // hex String (flat composite payload retained in Batch D Task 8).
     let files = list_files_with_metadata_inner(&metadata_repo, 100, None).expect("list");
     assert!(!files.is_empty(), "scan must have produced ≥1 file");
 
     let first_hash = files[0].hash.clone();
 
     // Attach a tag via the inner helper.
+    // WHY `attach_tag_inner` now returns `Tag` (not `TagPayload`):
+    // Batch D Task 8 deleted TagPayload; Tag is the core type.
     let tag = attach_tag_inner(&tag_repo, &first_hash, "test-tag", device).expect("attach");
     assert_eq!(tag.name, "test-tag");
 
     // List files with tags — the tagged file must appear with 1 tag.
+    // WHY `fwt.tags` is `Vec<Tag>` now: FileWithTagsPayload.tags was
+    // updated from Vec<TagPayload> to Vec<Tag> in Batch D Task 8.
     let tagged =
         list_files_with_tags_inner(&metadata_repo, &tag_repo, 100, None).expect("list with tags");
     assert!(!tagged.is_empty());
@@ -305,12 +400,14 @@ async fn list_files_with_tags_returns_tagged_rows() {
     assert_eq!(tagged_file.tags.len(), 1, "must have exactly 1 tag");
     assert_eq!(tagged_file.tags[0].name, "test-tag");
 
-    // List tags — must return exactly 1.
+    // List tags — must return exactly 1. `list_tags_inner` now returns
+    // `Vec<Tag>` directly.
     let tags = list_tags_inner(&tag_repo).expect("list tags");
     assert_eq!(tags.len(), 1);
 
-    // Detach.
-    detach_tag_inner(&tag_repo, &first_hash, &tag.id, device).expect("detach");
+    // Detach. WHY `tag.id.to_string()`: `Tag.id` is `Uuid` (not String);
+    // `detach_tag_inner` takes `tag_id_str: &str` and parses it internally.
+    detach_tag_inner(&tag_repo, &first_hash, &tag.id.to_string(), device).expect("detach");
 
     // Verify empty after detach.
     let tagged2 = list_files_with_tags_inner(&metadata_repo, &tag_repo, 100, None)
@@ -320,6 +417,12 @@ async fn list_files_with_tags_returns_tagged_rows() {
         .find(|f| f.file.hash == first_hash)
         .expect("find file after detach");
     assert!(tagged_file2.tags.is_empty(), "no tags after detach");
+
+    // Tear down explicitly — drops both repos' sender clones + reaps
+    // the writer thread cleanly before the tempdir is removed.
+    drop(tag_repo);
+    drop(metadata_repo);
+    writer.join();
 }
 
 /// Regression for v0.4.3: thumbnail directory referenced by
@@ -387,10 +490,27 @@ async fn search_returns_hit_after_scan_and_rebuild() {
         .expect("scan");
 
     let db_path = data_dir.join("perima.db");
-    let search_conn = open_and_migrate(&db_path).expect("open search conn");
-    let search_repo = SqliteSearchRepository::new(search_conn);
+    // WHY spawn a test-local writer + pool: the repo adapter is constructed
+    // from `(Sender<WriteCmd>, ReadPool)`, and this integration test drives
+    // search without going through `AppContainer`. The repo clones the
+    // sender; dropping `search_writer` at end-of-test closes the channel
+    // and lets the writer thread exit.
+    struct NoopBus;
+    impl EventBus for NoopBus {
+        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
+            Ok(())
+        }
+    }
+    let search_writer = SqliteWriter::start(&db_path, Arc::new(NoopBus) as Arc<dyn EventBus>)
+        .expect("search writer");
+    let search_reads = ReadPool::open(&db_path).expect("search pool");
+    let search_repo = SqliteSearchRepository::new(search_writer.sender(), search_reads);
+    drop(search_writer);
     search_repo.rebuild().expect("rebuild index");
 
+    // WHY `h.relative_path` on `SearchHit`: Batch D Task 8 deleted
+    // `SearchHitPayload`; `search_inner` now returns `Vec<SearchHit>`
+    // from `perima_core`. `SearchHit.relative_path` is a `String`.
     // `alpha.txt` is one of the mk_fixture files; unicode61 splits on
     // `.` so the `alpha` token is indexed.
     let hits = search_inner(&search_repo, "alpha", 10).expect("search");

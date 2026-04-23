@@ -9,7 +9,8 @@ import StatusBar from "./components/StatusBar";
 import TagSidebar from "./components/TagSidebar";
 import WatcherBanner from "./components/WatcherBanner";
 import { composeVisible, computeFacets, sortByRank } from "./lib/search";
-import type { FileWithTags, ScanResult, SearchHit, Tag } from "./types";
+import { coreErrorMessage } from "./lib/coreError";
+import type { AppEvent, CoreError, FileWithTagsPayload, ScanReport, SearchHit, Tag } from "./bindings";
 
 /**
  * Which rendering mode the main file list uses.
@@ -29,15 +30,15 @@ type ViewMode = "table" | "grid";
  * consumers grows beyond 2–3 components.
  */
 export default function App() {
-  const [files, setFiles] = useState<FileWithTags[]>([]);
+  const [files, setFiles] = useState<FileWithTagsPayload[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
   // WHY string | null (not Set<string>): spec models multi-select as Set<string>
   // but v0.5.1 ships single-select only. Using null for "All" is simpler and
   // avoids converting Set → serializable state. Upgrade to Set when multi-select lands.
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
-  const [scanResult, setScanResult] = useState<ScanResult | null>(null);
+  const [scanResult, setScanResult] = useState<ScanReport | null>(null);
   const [scanning, setScanning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<CoreError | null>(null);
   const [loading, setLoading] = useState(true);
   // WHY: Watcher failures are non-blocking (the table is still accurate,
   // just not live-updating). Surface them via a dismissible banner rather
@@ -88,26 +89,56 @@ export default function App() {
     // or the debounced refresh resolves post-cleanup.
     let active = true;
 
+    /** Shared refetch helper — called by multiple AppEvent branches. */
+    const refetch = () => {
+      // WHY no listTags() here: the file watcher fires on filesystem
+      // events (file created/deleted/modified). Tags are only mutated
+      // via explicit Tauri commands from within this app — no external
+      // process can change file_tags without going through Tauri. A
+      // tag re-fetch on every file event would be wasteful and
+      // incorrect; tags refresh after scan (handleScanComplete) where
+      // new tags may actually have been created.
+      void api.listFilesWithTags(100).match(
+        (refreshed) => {
+          if (active) setFiles(refreshed);
+        },
+        (err) => {
+          if (active) setError(err);
+        },
+      );
+    };
+
     api
-      .subscribeToFileEvents(() => {
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(() => {
-          // WHY no listTags() here: the file watcher fires on filesystem
-          // events (file created/deleted/modified). Tags are only mutated
-          // via explicit Tauri commands from within this app — no external
-          // process can change file_tags without going through Tauri. A
-          // tag re-fetch on every file event would be wasteful and
-          // incorrect; tags refresh after scan (handleScanComplete) where
-          // new tags may actually have been created.
-          void api.listFilesWithTags(100).match(
-            (refreshed) => {
-              if (active) setFiles(refreshed);
-            },
-            (err) => {
-              if (active) setError(err);
-            },
-          );
-        }, 300);
+      .subscribeToAppEvents((event: AppEvent) => {
+        switch (event.kind) {
+          case "File":
+            // WHY 300ms debounce: a watcher burst (e.g., file-copy of 100
+            // files) shouldn't trigger 100 list_files_with_tags refetches.
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(refetch, 300);
+            break;
+          case "ScanCompleted":
+            // WHY immediate (no debounce): scan-end is rare + intentional;
+            // the user is waiting for their scanned files to appear.
+            if (timer) clearTimeout(timer);
+            refetch();
+            break;
+          case "IndexInvalidated":
+            // TODO Batch H: split per event.data.reason (TagsChanged / FilesChanged
+            // / MetadataChanged / SearchIndexRebuilt) for surgical TanStack
+            // invalidation. Currently coarse → debounced refetch matches
+            // the File-event behavior.
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(refetch, 300);
+            break;
+          default: {
+            // WHY exhaustiveness check: ensures the switch stays complete
+            // as new AppEvent variants are added (matches StatusBar.tsx
+            // pattern from Batch D).
+            const _exhaustive: never = event;
+            throw new Error(`Unhandled AppEvent kind: ${JSON.stringify(_exhaustive)}`);
+          }
+        }
       })
       .then((fn) => {
         if (active) {
@@ -136,7 +167,7 @@ export default function App() {
     setError(null);
   }
 
-  function handleScanComplete(result: ScanResult, path: string) {
+  function handleScanComplete(result: ScanReport, path: string) {
     setScanResult(result);
     setScanning(false);
     // Refresh file list and tags after a successful scan.
@@ -156,7 +187,9 @@ export default function App() {
     // complete.
     void api.startWatch(path).match(
       () => { setWatcherError(null); },
-      (err) => { setWatcherError(`Failed to start watcher: ${err}`); },
+      (err) => {
+        setWatcherError(`Failed to start watcher [${err.kind}]: ${coreErrorMessage(err)}`);
+      },
     );
   }
 

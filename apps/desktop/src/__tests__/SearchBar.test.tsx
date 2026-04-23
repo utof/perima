@@ -2,7 +2,7 @@ import { render, screen, fireEvent, act } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { okAsync, errAsync } from "neverthrow";
 import SearchBar from "../components/SearchBar";
-import type { SearchHit } from "../types";
+import type { CoreError, SearchHit } from "../bindings";
 
 vi.mock("../api", () => ({
   search: vi.fn(),
@@ -120,7 +120,7 @@ describe("SearchBar", () => {
   });
 
   it("swallows backend errors and fires onQueryChange(raw, [])", async () => {
-    mockSearch.mockReturnValue(errAsync("FTS5 parse error"));
+    mockSearch.mockReturnValue(errAsync<SearchHit[], CoreError>({ kind: "Internal", data: "FTS5 parse error" }));
     const onChange = vi.fn();
     render(<SearchBar onQueryChange={onChange} />);
 

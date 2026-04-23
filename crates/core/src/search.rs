@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 /// The `rank` field follows `SQLite`'s BM25 convention: lower (more negative)
 /// values indicate a better match. Callers should sort ascending.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct SearchHit {
     /// `BLAKE3` hex hash of the file content.
     pub blake3_hash: String,

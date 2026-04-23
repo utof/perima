@@ -12,11 +12,20 @@ thiserror.workspace = true
 serde.workspace     = true
 uuid.workspace      = true
 unicode-normalization.workspace = true
+# WHY features = ["derive", "uuid"]: specta::Type proc-macro lives behind
+# the "derive" feature. The "uuid" feature adds specta::Type impl for
+# uuid::Uuid so VolumeId/DeviceId(uuid::Uuid) can use #[specta(transparent)].
+specta = { workspace = true, optional = true, features = ["derive", "uuid"] }
+
+[features]
+default = []
+specta = ["dep:specta"]
 
 [dev-dependencies]
-proptest.workspace = true
-blake3.workspace   = true
-tempfile.workspace = true
+proptest.workspace  = true
+blake3.workspace    = true
+tempfile.workspace  = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

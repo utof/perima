@@ -1,11 +1,11 @@
 import { useState } from "react";
-import type { FileWithTags } from "../types";
+import type { FileWithTagsPayload } from "../bindings";
 import TagChip from "./TagChip";
 
 /** Props for {@link FileTable}. */
 interface FileTableProps {
   /** Rows to display. */
-  files: FileWithTags[];
+  files: FileWithTagsPayload[];
   /** When true, show a loading indicator instead of the table body. */
   loading: boolean;
 }

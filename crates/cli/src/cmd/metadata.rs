@@ -11,12 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use perima_app::AppContainer;
 use perima_core::{
-    CoreError, DeviceId, FileLocationRecord, FileRepository, MediaMetadata, MetadataExtractor,
-    MetadataRepository, VolumeRepository,
-};
-use perima_db::{
-    SqliteFileRepository, SqliteMetadataRepository, SqliteVolumeRepository, open_and_migrate,
+    CoreError, DeviceId, FileLocationRecord, MediaMetadata, MetadataExtractor, MetadataRepository,
 };
 use perima_media::{
     CompositeExtractor, ImageExtractor, MetadataQueue, ThumbnailGenerator, VideoExtractor,
@@ -49,13 +46,14 @@ pub(crate) struct MetadataArgs {
 /// is not yet indexed (run `perima scan` first); propagates
 /// [`CoreError`] from volume detection, DB access, and the extractor.
 pub(crate) async fn run(
+    container: &AppContainer,
     data_dir: &Path,
     device: DeviceId,
     args: &MetadataArgs,
 ) -> Result<(), CoreError> {
     validate_file(&args.path)?;
     let absolute_path =
-        perima_fs::platform_path::canonicalize(&args.path).map_err(CoreError::Io)?;
+        perima_fs::platform_path::canonicalize(&args.path).map_err(CoreError::from)?;
 
     // Resolve volume from the containing directory. WHY parent(): volume
     // detection inspects the mount point; a file path's parent is the
@@ -65,18 +63,20 @@ pub(crate) async fn run(
         .ok_or_else(|| CoreError::InvalidPath(format!("no parent: {}", absolute_path.display())))?;
     let detected = perima_fs::detect_volume(parent)?;
 
-    let db_path = data_dir.join("perima.db");
+    // WHY delegate to `container.volumes` post-Batch-C Task 2: the
+    // writer actor owns the sole writable connection; opening a second
+    // one just for `find_or_create` would require a second writer
+    // (spec §3.1 forbids). The container holds the shared adapter.
+    let volume_id = container
+        .volumes
+        .find_or_create(&detected.identifiers, device)?;
 
-    // WHY three connections: each repo owns its `Mutex<Connection>`, and
-    // under WAL mode a fresh open is ~microseconds. Sharing a single
-    // connection across repos would require wrapping it in another layer
-    // of `Mutex`, which none of the repos' `new(...)` constructors accept.
-    let vol_repo = SqliteVolumeRepository::new(open_and_migrate(&db_path)?);
-    let volume_id = vol_repo.find_or_create(&detected.identifiers, device)?;
-    drop(vol_repo);
-
-    let file_repo = SqliteFileRepository::new(open_and_migrate(&db_path)?);
-    let metadata_repo = Arc::new(SqliteMetadataRepository::new(open_and_migrate(&db_path)?));
+    // WHY via container.metadata_repo + container.files_repo (post-Batch-C
+    // Task 7): the writer actor owns the sole writable connection. Using
+    // the shared adapters from the container avoids opening a second
+    // writer here. `migrate_sentinel_row` is not needed here (no sentinel
+    // seam in the metadata command).
+    let metadata_repo: Arc<dyn MetadataRepository> = Arc::clone(&container.metadata_repo);
 
     // WHY suffix match on the absolute path: `scan` walker stores
     // paths relative to the *scan root* (see
@@ -89,7 +89,9 @@ pub(crate) async fn run(
     let absolute_str = absolute_path.to_str().ok_or_else(|| {
         CoreError::InvalidPath(format!("non-UTF8 path: {}", absolute_path.display()))
     })?;
-    let records = file_repo.list_file_locations(usize::MAX, Some(volume_id))?;
+    let records = container
+        .files_repo
+        .list_file_locations(usize::MAX, Some(volume_id))?;
     let Some(record) = find_by_absolute_suffix(&records, absolute_str) else {
         return Err(CoreError::InvalidPath(format!(
             "not indexed: {} (run `perima scan` first)",
@@ -214,38 +216,38 @@ fn print_json(meta: &MediaMetadata) -> Result<(), CoreError> {
     let mut handle = stdout.lock();
     serde_json::to_writer_pretty(&mut handle, meta)
         .map_err(|e| CoreError::Internal(format!("json: {e}")))?;
-    writeln!(handle).map_err(CoreError::Io)
+    writeln!(handle).map_err(CoreError::from)
 }
 
 fn print_table(meta: &MediaMetadata, record: &FileLocationRecord) -> Result<(), CoreError> {
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     let hash_hex = meta.hash.to_hex();
-    writeln!(handle, "hash:         {hash_hex}").map_err(CoreError::Io)?;
-    writeln!(handle, "path:         {}", record.relative_path.as_str()).map_err(CoreError::Io)?;
+    writeln!(handle, "hash:         {hash_hex}").map_err(CoreError::from)?;
+    writeln!(handle, "path:         {}", record.relative_path.as_str()).map_err(CoreError::from)?;
     if let Some(m) = &meta.mime_type {
-        writeln!(handle, "mime:         {m}").map_err(CoreError::Io)?;
+        writeln!(handle, "mime:         {m}").map_err(CoreError::from)?;
     }
     if let (Some(w), Some(h)) = (meta.width, meta.height) {
-        writeln!(handle, "dimensions:   {w}x{h}").map_err(CoreError::Io)?;
+        writeln!(handle, "dimensions:   {w}x{h}").map_err(CoreError::from)?;
     }
     if let Some(d) = meta.duration_ms {
-        writeln!(handle, "duration_ms:  {d}").map_err(CoreError::Io)?;
+        writeln!(handle, "duration_ms:  {d}").map_err(CoreError::from)?;
     }
     if let Some(c) = &meta.captured_at {
-        writeln!(handle, "captured_at:  {c}").map_err(CoreError::Io)?;
+        writeln!(handle, "captured_at:  {c}").map_err(CoreError::from)?;
     }
     if let Some(m) = &meta.camera_make {
-        writeln!(handle, "camera_make:  {m}").map_err(CoreError::Io)?;
+        writeln!(handle, "camera_make:  {m}").map_err(CoreError::from)?;
     }
     if let Some(m) = &meta.camera_model {
-        writeln!(handle, "camera_model: {m}").map_err(CoreError::Io)?;
+        writeln!(handle, "camera_model: {m}").map_err(CoreError::from)?;
     }
     if let Some(c) = &meta.codec {
-        writeln!(handle, "codec:        {c}").map_err(CoreError::Io)?;
+        writeln!(handle, "codec:        {c}").map_err(CoreError::from)?;
     }
     if let Some(b) = meta.bitrate_bps {
-        writeln!(handle, "bitrate_bps:  {b}").map_err(CoreError::Io)?;
+        writeln!(handle, "bitrate_bps:  {b}").map_err(CoreError::from)?;
     }
     Ok(())
 }

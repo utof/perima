@@ -20,6 +20,7 @@ use crate::{BlakeHash, CoreError};
 /// consistency with the existing `first_seen` / `last_seen` String
 /// columns, and it keeps `chrono` out of `perima-core`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct MediaMetadata {
     /// Content hash of the file this metadata describes. Matches the
     /// corresponding row in the `files` table.

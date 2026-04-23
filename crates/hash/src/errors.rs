@@ -13,7 +13,9 @@ pub enum Error {
 impl From<Error> for perima_core::CoreError {
     fn from(e: Error) -> Self {
         match e {
-            Error::Io(io) => Self::Io(io),
+            // WHY: delegate through CoreError's From<io::Error> impl so the
+            // kind+message lowering stays in one place (errors.rs in core).
+            Error::Io(io) => Self::from(io),
         }
     }
 }
