@@ -168,6 +168,9 @@ impl SqliteWriter {
         // afterwards against a fully-migrated schema (spec §3.6).
         let conn =
             open_and_migrate(db_path).map_err(|e| CoreError::Internal(format!("migrate: {e}")))?;
+        // WHY: idempotent post-migration install — keeps FTS trigger bodies in
+        // lockstep with `schema::FTS_AGGREGATIONS` + the codegen template,
+        // closes the V006→V007→V008 drift bug class. Runs every boot.
         install_fts_triggers(&conn)?;
         spawn_writer(conn, bus)
     }
@@ -193,6 +196,8 @@ impl SqliteWriter {
         embedded::migrations::runner()
             .run(&mut conn)
             .map_err(|e| CoreError::Internal(format!("migrate in-memory: {e}")))?;
+        // WHY: same as `start` — idempotent post-migration install keeps
+        // in-memory test DBs converged with the codegen template.
         install_fts_triggers(&conn)?;
         spawn_writer(conn, bus)
     }
@@ -338,7 +343,9 @@ mod tests {
         let h = SqliteWriter::start_in_memory(bus).expect("start_in_memory");
         // If install_fts_triggers panicked or returned Err, start_in_memory
         // above would have failed. Reaching here proves the install ran
-        // cleanly.
-        drop(h);
+        // cleanly. join() matches sibling tests' shutdown discipline —
+        // SqliteWriterHandle has no Drop impl (see lines 121-124), so a bare
+        // drop() leaks the writer thread until process teardown.
+        h.join();
     }
 }
