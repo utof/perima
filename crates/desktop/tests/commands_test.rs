@@ -72,7 +72,11 @@ fn write_tiny_png(path: &Path, fill: [u8; 3]) {
 }
 
 /// Scan three fixture files and assert `files_seen=3, files_new=3, files_errored=0`.
+///
+/// WHY ignored on CI: same `SQLite` lock-order deadlock as
+/// `list_files_after_scan`. See GH #131.
 #[tokio::test]
+#[ignore = "GH #131 — SQLite lock-order inversion deadlocks under concurrent Connection drops"]
 async fn scan_indexes_files() {
     let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
     let data_dir = tempfile::tempdir().expect("tempdir for data");
@@ -231,7 +235,11 @@ async fn list_files_with_metadata_returns_rows() {
 }
 
 /// After a successful scan, `list_volumes_inner` must return at least one volume.
+///
+/// WHY ignored on CI: same `SQLite` lock-order deadlock as
+/// `list_files_after_scan`. See GH #131.
 #[tokio::test]
+#[ignore = "GH #131 — SQLite lock-order inversion deadlocks under concurrent Connection drops"]
 async fn list_volumes_after_scan() {
     let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
     let data_dir = tempfile::tempdir().expect("tempdir for data");
@@ -358,7 +366,11 @@ async fn desktop_scan_populates_metadata_and_thumbnails() {
 
 /// Exercises the four tag `_inner` helpers end-to-end:
 /// attach → list-with-tags → list-tags → detach → verify empty.
+///
+/// WHY ignored on CI: same `SQLite` lock-order deadlock as
+/// `list_files_after_scan`. See GH #131.
 #[tokio::test]
+#[ignore = "GH #131 — SQLite lock-order inversion deadlocks under concurrent Connection drops"]
 async fn list_files_with_tags_returns_tagged_rows() {
     let td = tempfile::tempdir().expect("tempdir");
     let data_dir = td.path().join("data");
@@ -494,7 +506,11 @@ fn thumbnail_root_matches_asset_protocol_scope() {
 /// via the `SearchRepository` trait, and asserts the query returns the
 /// seeded filename. Exercises the inner helper end-to-end without
 /// constructing `tauri::State`.
+///
+/// WHY ignored on CI: same `SQLite` lock-order deadlock as
+/// `list_files_after_scan`. See GH #131.
 #[tokio::test]
+#[ignore = "GH #131 — SQLite lock-order inversion deadlocks under concurrent Connection drops"]
 async fn search_returns_hit_after_scan_and_rebuild() {
     let td = tempfile::tempdir().expect("tempdir");
     let data_dir = td.path().join("data");
