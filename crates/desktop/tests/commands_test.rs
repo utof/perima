@@ -110,7 +110,17 @@ async fn scan_indexes_files() {
 }
 
 /// After a successful scan, `list_files_inner` must return all 3 records.
+///
+/// WHY ignored on CI: hits the SQLite lock-order inversion in `unixClose` vs
+/// `unixLock`-from-`sqlite3WalClose` (GH #131). Test creates writer + read
+/// pool against a single DB; at end-of-test the writer thread + pool drop
+/// concurrently and the lock-order cycle deadlocks. Tracked locally via gdb
+/// backtrace 2026-04-23. Run manually with `cargo nextest run --run-ignored
+/// only -p perima-desktop` if you have a kernel + libc combination immune
+/// to the upstream race. Removal pending #131 production fix or migration
+/// off the `_inner` test seam (#119/#126).
 #[tokio::test]
+#[ignore = "GH #131 — SQLite lock-order inversion deadlocks under concurrent Connection drops"]
 async fn list_files_after_scan() {
     let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
     let data_dir = tempfile::tempdir().expect("tempdir for data");
@@ -135,7 +145,11 @@ async fn list_files_after_scan() {
 /// After inserting metadata for a scanned file, the
 /// `list_files_with_metadata_inner` helper must return at least one row
 /// with metadata fields populated from the stored record.
+///
+/// WHY ignored on CI: same SQLite lock-order deadlock as
+/// `list_files_after_scan` above. See GH #131.
 #[tokio::test]
+#[ignore = "GH #131 — SQLite lock-order inversion deadlocks under concurrent Connection drops"]
 async fn list_files_with_metadata_returns_rows() {
     let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
     let data_dir = tempfile::tempdir().expect("tempdir for data");
@@ -239,7 +253,11 @@ async fn list_volumes_after_scan() {
 /// PNG files must produce `file_metadata` rows AND WebP thumbnails on
 /// disk under `<data_dir>/thumbnails/` — the same subtree the Tauri
 /// asset-protocol scope exposes.
+///
+/// WHY ignored on CI: same SQLite lock-order deadlock as
+/// `list_files_after_scan` above. See GH #131.
 #[tokio::test]
+#[ignore = "GH #131 — SQLite lock-order inversion deadlocks under concurrent Connection drops"]
 async fn desktop_scan_populates_metadata_and_thumbnails() {
     let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
     let data_dir = tempfile::tempdir().expect("tempdir for data");
