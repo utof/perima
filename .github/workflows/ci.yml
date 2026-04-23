@@ -29,12 +29,17 @@ jobs:
 
       - uses: taiki-e/install-action@just
 
-      # WHY: `just ci` runs `cargo deny check` and `typos`. Both are
-      # external binaries — neither ships with the Rust toolchain. Using
-      # taiki-e/install-action fetches prebuilt binaries (seconds) rather
-      # than `cargo install` (minutes), which matters on the 3-OS matrix.
+      # WHY: `just ci` runs `cargo deny check`, `typos`, and
+      # `cargo nextest run`. All three are external binaries — none ship
+      # with the Rust toolchain. Using taiki-e/install-action fetches
+      # prebuilt binaries (seconds) rather than `cargo install` (minutes),
+      # which matters on the 3-OS matrix. Nextest swap landed in commit
+      # adopting `cargo nextest run` workspace-wide (closes #121) — the
+      # SQLite lock-order inversion that `cargo test` reproduces ~20% is
+      # documented in CLAUDE.md + GH #131.
       - uses: taiki-e/install-action@cargo-deny
       - uses: taiki-e/install-action@typos
+      - uses: taiki-e/install-action@cargo-nextest
 
       - uses: actions/setup-node@v4
         with:
