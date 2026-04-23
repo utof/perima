@@ -35,7 +35,11 @@ const VOL: &str = "00000000-0000-0000-0000-0000000000bb";
 // WHY small alphabet: 3 slots × 2 shadow hashes × 3 paths × 3 tags keeps
 // collisions dense, so a 20-op sequence is very likely to hit each
 // trigger body multiple times. Larger alphabets push the test toward
-// "no collisions, no interesting cases".
+// "no collisions, no interesting cases". `SLOTS` is referenced from
+// the strategy + Model + ground-truth projection — bumping it requires
+// matching changes there AND verifying `shadow_hash`'s slot encoding
+// still fits in a single byte (slot < 128).
+const SLOTS: usize = 3;
 const PATHS: &[&str] = &["pathzero.jpg", "pathone.jpg", "pathtwo.jpg"];
 const TAGS: &[&str] = &["tagone", "tagtwo", "tagthree"];
 
@@ -44,6 +48,7 @@ const TAGS: &[&str] = &["tagone", "tagtwo", "tagthree"];
 /// them so the hash-change trigger fires without merging slots.
 fn shadow_hash(slot: usize, is_b: bool) -> String {
     // 64-hex chars: first byte encodes (slot, is_b), rest are '0'.
+    debug_assert!(slot < 128, "shadow_hash slot encoding overflows past 127");
     let high = u8::try_from(slot).unwrap() * 2 + u8::from(is_b);
     format!("{high:02x}{}", "0".repeat(62))
 }
@@ -67,7 +72,7 @@ fn seed_conn(db_path: &Path) -> Connection {
 /// never trips an FK (none enforced today, but keeps semantics close to
 /// production where `files` rows always pre-exist their `file_locations`).
 fn seed_files_table(conn: &Connection) {
-    for slot in 0..3 {
+    for slot in 0..SLOTS {
         for is_b in [false, true] {
             let h = shadow_hash(slot, is_b);
             conn.execute(
@@ -154,7 +159,10 @@ fn attach_tag_raw(conn: &Connection, hash: &str, tag_name: &str) {
         .expect("get tag id");
     // Use INSERT OR IGNORE on (blake3_hash, tag_id) — but file_tags has
     // its own UUID PK, so we instead UPSERT-by-soft-delete: if a row
-    // already exists we restore it; else insert fresh.
+    // already exists we restore it; else insert fresh. Idempotency
+    // mirrors the model's `tags_by_hash[hash].insert(tag_idx)` (a
+    // BTreeSet insert that no-ops on existing membership), which is
+    // load-bearing for the proptest invariant.
     let existing: Option<String> = conn
         .query_row(
             "SELECT id FROM file_tags
@@ -271,7 +279,7 @@ impl SlotState {
 /// Full Rust-side ground-truth model.
 #[derive(Debug, Clone, Default)]
 struct Model {
-    slots: [SlotState; 3],
+    slots: [SlotState; SLOTS],
     /// `hash → set of attached (non-soft-deleted) tag indices`. Keyed by
     /// the concrete shadow hash (NOT the slot) so `UpdateHash` produces
     /// the correct "new hash has zero tags until re-attached" outcome.
@@ -316,14 +324,14 @@ enum LocOp {
 
 fn loc_op_strategy() -> impl Strategy<Value = LocOp> {
     prop_oneof![
-        (0..3usize, 0..PATHS.len()).prop_map(|(slot, path_idx)| LocOp::Insert { slot, path_idx }),
-        (0..3usize).prop_map(|slot| LocOp::UpdateHash { slot }),
-        (0..3usize, 0..PATHS.len())
+        (0..SLOTS, 0..PATHS.len()).prop_map(|(slot, path_idx)| LocOp::Insert { slot, path_idx }),
+        (0..SLOTS).prop_map(|slot| LocOp::UpdateHash { slot }),
+        (0..SLOTS, 0..PATHS.len())
             .prop_map(|(slot, new_path_idx)| LocOp::UpdatePath { slot, new_path_idx }),
-        (0..3usize).prop_map(|slot| LocOp::SoftDelete { slot }),
-        (0..3usize).prop_map(|slot| LocOp::Restore { slot }),
-        (0..3usize, 0..TAGS.len()).prop_map(|(slot, tag_idx)| LocOp::AttachTag { slot, tag_idx }),
-        (0..3usize, 0..TAGS.len()).prop_map(|(slot, tag_idx)| LocOp::DetachTag { slot, tag_idx }),
+        (0..SLOTS).prop_map(|slot| LocOp::SoftDelete { slot }),
+        (0..SLOTS).prop_map(|slot| LocOp::Restore { slot }),
+        (0..SLOTS, 0..TAGS.len()).prop_map(|(slot, tag_idx)| LocOp::AttachTag { slot, tag_idx }),
+        (0..SLOTS, 0..TAGS.len()).prop_map(|(slot, tag_idx)| LocOp::DetachTag { slot, tag_idx }),
     ]
 }
 
