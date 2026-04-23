@@ -73,7 +73,6 @@ fn write_tiny_png(path: &Path, fill: [u8; 3]) {
 
 /// Scan three fixture files and assert `files_seen=3, files_new=3, files_errored=0`.
 #[tokio::test]
-#[ignore = "GH #131 — desktop _inner test seam still deadlocks under SQLite 3.51.3 (separate close-ordering surface, not the upstream-fixed lock-order inversion). Tracked for migration off _inner seam in #119/#126."]
 async fn scan_indexes_files() {
     let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
     let data_dir = tempfile::tempdir().expect("tempdir for data");
@@ -112,7 +111,6 @@ async fn scan_indexes_files() {
 
 /// After a successful scan, `list_files_inner` must return all 3 records.
 #[tokio::test]
-#[ignore = "GH #131 — desktop _inner test seam still deadlocks under SQLite 3.51.3 (separate close-ordering surface, not the upstream-fixed lock-order inversion). Tracked for migration off _inner seam in #119/#126."]
 async fn list_files_after_scan() {
     let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
     let data_dir = tempfile::tempdir().expect("tempdir for data");
@@ -138,7 +136,6 @@ async fn list_files_after_scan() {
 /// `list_files_with_metadata_inner` helper must return at least one row
 /// with metadata fields populated from the stored record.
 #[tokio::test]
-#[ignore = "GH #131 — desktop _inner test seam still deadlocks under SQLite 3.51.3 (separate close-ordering surface, not the upstream-fixed lock-order inversion). Tracked for migration off _inner seam in #119/#126."]
 async fn list_files_with_metadata_returns_rows() {
     let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
     let data_dir = tempfile::tempdir().expect("tempdir for data");
@@ -221,7 +218,6 @@ async fn list_files_with_metadata_returns_rows() {
 
 /// After a successful scan, `list_volumes_inner` must return at least one volume.
 #[tokio::test]
-#[ignore = "GH #131 — desktop _inner test seam still deadlocks under SQLite 3.51.3 (separate close-ordering surface, not the upstream-fixed lock-order inversion). Tracked for migration off _inner seam in #119/#126."]
 async fn list_volumes_after_scan() {
     let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
     let data_dir = tempfile::tempdir().expect("tempdir for data");
@@ -244,7 +240,6 @@ async fn list_volumes_after_scan() {
 /// disk under `<data_dir>/thumbnails/` — the same subtree the Tauri
 /// asset-protocol scope exposes.
 #[tokio::test]
-#[ignore = "GH #131 — desktop _inner test seam still deadlocks under SQLite 3.51.3 (separate close-ordering surface, not the upstream-fixed lock-order inversion). Tracked for migration off _inner seam in #119/#126."]
 async fn desktop_scan_populates_metadata_and_thumbnails() {
     let fixture_dir = tempfile::tempdir().expect("tempdir for fixtures");
     let data_dir = tempfile::tempdir().expect("tempdir for data");
@@ -346,7 +341,6 @@ async fn desktop_scan_populates_metadata_and_thumbnails() {
 /// Exercises the four tag `_inner` helpers end-to-end:
 /// attach → list-with-tags → list-tags → detach → verify empty.
 #[tokio::test]
-#[ignore = "GH #131 — desktop _inner test seam still deadlocks under SQLite 3.51.3 (separate close-ordering surface, not the upstream-fixed lock-order inversion). Tracked for migration off _inner seam in #119/#126."]
 async fn list_files_with_tags_returns_tagged_rows() {
     let td = tempfile::tempdir().expect("tempdir");
     let data_dir = td.path().join("data");
@@ -483,7 +477,6 @@ fn thumbnail_root_matches_asset_protocol_scope() {
 /// seeded filename. Exercises the inner helper end-to-end without
 /// constructing `tauri::State`.
 #[tokio::test]
-#[ignore = "GH #131 — desktop _inner test seam still deadlocks under SQLite 3.51.3 (separate close-ordering surface, not the upstream-fixed lock-order inversion). Tracked for migration off _inner seam in #119/#126."]
 async fn search_returns_hit_after_scan_and_rebuild() {
     let td = tempfile::tempdir().expect("tempdir");
     let data_dir = td.path().join("data");

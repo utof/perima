@@ -404,13 +404,20 @@ pub async fn run_scan_inner_with_metadata(
     )
     .await;
 
-    // WHY explicit join: flush any pending writer commands AND reap the
-    // writer thread before this function returns. Without the drop
-    // ordering here, `writer` and `vol_repo` drop in definition order —
-    // `writer` first (reverse of declaration) — leaving the vol_repo
-    // sender orphaned momentarily. Explicit drop → join pattern makes
-    // the teardown deterministic for the test seam.
+    // WHY drop ALL sender-holding values before `writer.join()`:
+    // `SqliteWriterHandle::join` waits for the writer thread to exit,
+    // which only happens when ALL `Sender<WriteCmd>` clones drop and
+    // the channel closes. `file_repo`, `vol_repo`, and `sentinel_repo`
+    // each hold one sender clone via `writer.sender()` calls above;
+    // `on_persist` borrows `sentinel_repo`. Dropping only `vol_repo`
+    // (the previous bug) left two senders alive → writer thread parked
+    // in `flume::Receiver::recv` forever → `pthread_join` on writer
+    // hangs the test. Reproduced 2026-04-23 with gdb backtrace
+    // (Thread 18 → futex on writer's TID; Thread 17 → flume recv).
+    drop(on_persist); // releases &sentinel_repo borrow
+    drop(file_repo);
     drop(vol_repo);
+    drop(sentinel_repo);
     writer.join();
 
     result
