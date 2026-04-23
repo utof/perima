@@ -78,3 +78,8 @@ ignore = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Temporary git source for refinery PR #425 (rusqlite 0.39 support).
+# Removed alongside the [patch.crates-io] entry in Cargo.toml once
+# the upstream PR merges + ships a refinery release that supports
+# rusqlite 0.39 on crates.io. See GH issue tracking the workaround.
+allow-git = ["https://github.com/tomasol/refinery"]
