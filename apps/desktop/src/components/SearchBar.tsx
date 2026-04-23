@@ -41,8 +41,14 @@ interface SearchBarProps {
    *    `null` (distinct from `new Set()` — the latter means "searched,
    *    zero results").
    * 3. Same as #2 on backend error (swallowed; non-fatal).
+   *
+   * WHY optional with no-op default (Batch H Task 7 interim): App.tsx
+   * (post-Task-7 root-route shell) calls `<SearchBar />` prop-less while
+   * waiting for Task 8b's full store-driven rewrite. Keeping the prop
+   * optional silences the call-site TS error without disturbing the
+   * existing tests, which still pass the prop explicitly.
    */
-  onQueryChange: (query: string, hits: SearchHit[] | null) => void;
+  onQueryChange?: (query: string, hits: SearchHit[] | null) => void;
 }
 
 /**
@@ -54,7 +60,7 @@ interface SearchBarProps {
  * parent App.tsx only needs to know about the resolved (raw, hits)
  * pair — not the FTS5 grammar.
  */
-export default function SearchBar({ onQueryChange }: SearchBarProps) {
+export default function SearchBar({ onQueryChange = () => {} }: SearchBarProps) {
   const [query, setQuery] = useState("");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Track whether the last fire was "cleared" to avoid refiring on

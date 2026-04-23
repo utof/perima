@@ -1,16 +1,24 @@
 import type { CoreError, ScanReport } from "../bindings";
 
-/** Props for {@link StatusBar}. */
+/**
+ * Props for {@link StatusBar}.
+ *
+ * WHY all-optional with `null` defaults (Batch H Task 7 interim): App.tsx
+ * (post-Task-7 root-route shell) calls `<StatusBar />` prop-less while
+ * waiting for Task 9's store-driven rewrite. Keeping props optional
+ * silences the call-site TS error without disturbing existing tests,
+ * which still pass them explicitly.
+ */
 interface StatusBarProps {
   /** Most recent scan report, or null if no scan has run. */
-  scanResult: ScanReport | null;
+  scanResult?: ScanReport | null;
   /**
    * Current error, or null if none.
    * WHY CoreError not string: api.ts surfaces typed errors from the backend
    * discriminated union; the switch(error.kind) below renders distinct UX
    * per variant (Task 11).
    */
-  error: CoreError | null;
+  error?: CoreError | null;
 }
 
 /**
@@ -55,7 +63,7 @@ function renderError(error: CoreError): React.ReactNode {
  *
  * Shows the last scan summary, an error message, or a "No scans yet" hint.
  */
-export default function StatusBar({ scanResult, error }: StatusBarProps) {
+export default function StatusBar({ scanResult = null, error = null }: StatusBarProps) {
   if (error) {
     return (
       <div className="px-4 py-2 bg-gray-800 border-t border-gray-700 text-sm text-red-400">

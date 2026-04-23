@@ -3,7 +3,15 @@ import * as api from "../api";
 import { coreErrorMessage } from "../lib/coreError";
 import type { ScanReport } from "../bindings";
 
-/** Props for {@link ScanButton}. */
+/**
+ * Props for {@link ScanButton}.
+ *
+ * WHY all-optional with defaults (Batch H Task 7 interim): App.tsx
+ * (post-Task-7 root-route shell) calls `<ScanButton />` prop-less while
+ * waiting for Task 8a's `useMutation`-driven rewrite. Keeping props
+ * optional silences the call-site TS error without disturbing existing
+ * tests, which still pass them explicitly.
+ */
 interface ScanButtonProps {
   /**
    * Called when a scan completes successfully with the result summary and
@@ -12,11 +20,11 @@ interface ScanButtonProps {
    * WHY path is passed: the parent needs it to auto-start the filesystem
    * watcher on the folder that was just scanned (phase 3b).
    */
-  onScanComplete: (result: ScanReport, path: string) => void;
+  onScanComplete?: (result: ScanReport, path: string) => void;
   /** Called immediately before the scan starts (use to set loading state). */
-  onScanStart: () => void;
+  onScanStart?: () => void;
   /** When true, show the disabled "Scanning..." state. */
-  scanning: boolean;
+  scanning?: boolean;
 }
 
 /**
@@ -27,9 +35,9 @@ interface ScanButtonProps {
  * directory paths in the Tauri WebView.
  */
 export default function ScanButton({
-  onScanComplete,
-  onScanStart,
-  scanning,
+  onScanComplete = () => {},
+  onScanStart = () => {},
+  scanning = false,
 }: ScanButtonProps) {
   async function handleClick() {
     const selected = await openDialog({ directory: true, multiple: false });
