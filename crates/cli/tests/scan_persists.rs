@@ -49,7 +49,11 @@ fn scan_persists_three_files() {
 
     // Open the DB directly and count rows.
     let db_path = env_dir.path().join("perima.db");
-    let conn = rusqlite::Connection::open(&db_path).expect("open db");
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .expect("open db");
     let file_count: i64 = conn
         .query_row("SELECT count(*) FROM files", [], |r| r.get(0))
         .expect("count files");

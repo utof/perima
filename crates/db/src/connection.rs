@@ -39,6 +39,11 @@ mod embedded {
 /// Returns `Error::Rusqlite` on connection/pragma failure, or
 /// `Error::Refinery` on migration failure.
 pub fn open_and_migrate(path: &Path) -> Result<Connection, Error> {
+    // WHY #[allow]: this IS the SqliteWriter's single Connection entry
+    // point (called once per process from `SqliteWriter::start`). The
+    // workspace lint exists to keep callers OUT of `Connection::open`
+    // and INTO this function -- exempting the function itself.
+    #[allow(clippy::disallowed_methods)]
     let mut conn = Connection::open(path)?;
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;

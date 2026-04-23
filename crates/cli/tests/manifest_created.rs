@@ -72,7 +72,11 @@ fn manifest_db_created_after_scan() {
     // Determine the volume root that perima would have written the manifest
     // to by reading the volume_mounts table from the main DB.
     let db_path = env_dir.path().join("perima.db");
-    let conn = rusqlite::Connection::open(&db_path).expect("open main db");
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .expect("open main db");
 
     // Fetch the mount path that was recorded during the scan.
     let mount_path_str: Option<String> = conn
@@ -92,7 +96,11 @@ fn manifest_db_created_after_scan() {
     if manifest_path.exists() {
         // The manifest was written successfully (e.g. running as root, or the
         // volume root happens to be user-writable). Validate its contents.
-        let mconn = rusqlite::Connection::open(&manifest_path).expect("open manifest.db");
+        let mconn = rusqlite::Connection::open_with_flags(
+            &manifest_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("open manifest.db");
 
         // manifest_meta must contain a volume_id entry.
         let vol_id: String = mconn

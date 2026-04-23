@@ -166,6 +166,14 @@ mod tests {
     /// `WAL` mode.
     fn seed_via_conn(db_path: &std::path::Path, hash: &str, path: &str, mime: &str) {
         use rusqlite::Connection;
+        // WHY #[allow]: opens a second writable Connection alongside the
+        // SqliteWriter actor to seed `search_content` directly. Post-GH #131
+        // (SQLite 3.51.3) this no longer hits the lock-order-inversion close race that
+        // afflicted 3.51.0-3.51.1. The pattern remains fragile to future
+        // SQLite regressions; see clippy.toml header. Migrating this seed
+        // to a writer-routed test helper is tracked separately and is the
+        // canonical structural fix.
+        #[allow(clippy::disallowed_methods)]
         let conn = Connection::open(db_path).unwrap();
         // WHY explicit column list: matches V007 `search_content` schema
         // (blake3_hash, filename, relative_path, mime_type, camera_model,

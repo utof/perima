@@ -199,7 +199,11 @@ mod tests {
     /// WHY raw connection: test seeding inserts rows directly (bypassing
     /// the writer actor) to exercise `SQLite` triggers in isolation. The
     /// writer actor is idle (blocked on `flume` channel) while tests seed,
-    /// so a second connection in WAL mode does not conflict.
+    /// so a second connection in WAL mode does not conflict. Post-GH #131
+    /// (rusqlite 0.39 / `SQLite` 3.51.3) the lock-order-inversion close race is fixed
+    /// upstream; the proptest seeding pattern is tracked under #124 for
+    /// a longer-term writer-routed rewrite.
+    #[allow(clippy::disallowed_methods)]
     fn seed_conn(db_path: &Path) -> Connection {
         Connection::open(db_path).expect("seed conn open")
     }

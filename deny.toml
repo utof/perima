@@ -37,6 +37,21 @@ wildcards = "deny"  # no `foo = "*"` deps in external crates
 # wildcards check while still catching real external wildcard deps.
 allow-wildcard-paths = true
 
+# WHY rusqlite + libsqlite3-sys wrappers list:
+# Restrict the SQLite client surface to exactly the crates that need it
+# today. perima-db owns the writer actor + adapters; perima (the CLI bin)
+# uses rusqlite in dev-deps for integration-test DB inspection;
+# perima-app uses rusqlite in dev-deps for the search FTS test seed.
+# Adding rusqlite to a 4th crate (e.g. perima-fs, perima-hash, perima-core)
+# is rejected here as a hard CI failure -- the second-Connection bug class
+# (GH #131) is precisely "rusqlite ended up somewhere it shouldn't be."
+# Update this list deliberately when an additional crate genuinely needs
+# direct DB access; the default answer is "go through perima-db".
+deny = [
+    { crate = "rusqlite",       wrappers = ["perima-db", "perima", "perima-app", "r2d2_sqlite", "refinery-core"], reason = "Direct rusqlite use restricted to perima-db (prod) + perima/perima-app (dev-deps). r2d2_sqlite + refinery-core are transitive crates pulled by perima-db; they must appear in wrappers because cargo-deny's `wrappers` rule requires every direct linker. Adding rusqlite to a 4th first-party crate is rejected. See clippy.toml + GH #131." },
+    { crate = "libsqlite3-sys", wrappers = ["rusqlite"], reason = "Transitive of rusqlite only; rusqlite itself is already scoped above." },
+]
+
 [advisories]
 # RustSec advisory DB check. Fail on vulnerabilities.
 version = 2

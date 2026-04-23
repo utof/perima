@@ -35,6 +35,14 @@ pub fn write_manifest(
     }
 
     let db_path = perima_dir.join("manifest.db");
+    // WHY #[allow]: this opens a SEPARATE DB file (`manifest.db` on the
+    // mounted volume), not the main `perima.db`. The SqliteWriter actor
+    // owns `perima.db` exclusively; `manifest.db` lives on the user's
+    // volume and is its own short-lived RW connection. The GH #131
+    // lock-order-inversion bug class only applies to multiple Connections to the SAME
+    // file. Different files = different `unixInodeInfo` = no shared
+    // `unixBigLock` contention.
+    #[allow(clippy::disallowed_methods)]
     let conn = match rusqlite::Connection::open(&db_path) {
         Ok(c) => c,
         Err(e) => {
@@ -137,7 +145,11 @@ mod tests {
         let db_path = td.path().join(".perima/manifest.db");
         assert!(db_path.exists(), "manifest.db must be created");
 
-        let conn = rusqlite::Connection::open(&db_path).expect("open");
+        let conn = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("open");
         let vol_str: String = conn
             .query_row(
                 "SELECT value FROM manifest_meta WHERE key = 'volume_id'",
@@ -169,7 +181,11 @@ mod tests {
         write_manifest(td.path(), vol_id, &files).expect("write_manifest");
 
         let db_path = td.path().join(".perima/manifest.db");
-        let conn = rusqlite::Connection::open(&db_path).expect("open");
+        let conn = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("open");
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM manifest_files", [], |row| row.get(0))
             .expect("count");
@@ -191,7 +207,11 @@ mod tests {
         write_manifest(td.path(), vol_id, &[file2]).expect("second write");
 
         let db_path = td.path().join(".perima/manifest.db");
-        let conn = rusqlite::Connection::open(&db_path).expect("open");
+        let conn = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("open");
 
         let path: String = conn
             .query_row(
