@@ -64,11 +64,11 @@ tokio        = { version = "1", features = ["full"] }
 tokio-util   = { version = "0.7", features = ["rt"] }
 uuid         = { version = "1", features = ["v4", "v7", "serde"] }
 blake3       = "1"
-rusqlite     = { version = "0.38", features = ["bundled"] }
+rusqlite     = { version = "0.39", features = ["bundled"] }
 refinery     = { version = "0.9", features = ["rusqlite"] }
 flume        = "0.12"
 r2d2         = "0.8"
-r2d2_sqlite  = "0.32"
+r2d2_sqlite  = "0.33"
 walkdir      = "2"
 notify       = "8.2"
 notify-debouncer-full = "0.7"
@@ -102,3 +102,17 @@ mime_guess   = "2"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# WHY [patch.crates-io] for refinery: rusqlite 0.39 (which bundles SQLite
+# 3.51.3, fixing the AB-BA lock-order inversion in unixClose vs unixLock
+# documented in GH #131) requires refinery-core to widen its `rusqlite`
+# version cap from `<=0.38` to `<=0.39`. The upstream PR
+# https://github.com/rust-db/refinery/pull/425 ("chore: Support rusqlite
+# 0.39.x") is mergeable + all CI checks green, awaiting maintainer merge.
+# Pinning to the PR branch via this patch resolves the libsqlite3-sys
+# `links = "sqlite3"` conflict and lets the SQLite version bump land.
+# Removal: drop both lines once refinery 0.10 (or whatever ships #425)
+# is on crates.io and the workspace dep is bumped to it.
+[patch.crates-io]
+refinery      = { git = "https://github.com/tomasol/refinery", branch = "pr-rusqlite-39" }
+refinery-core = { git = "https://github.com/tomasol/refinery", branch = "pr-rusqlite-39" }
