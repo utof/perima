@@ -16,6 +16,7 @@ tracing.workspace   = true
 uuid.workspace      = true
 chrono.workspace    = true
 flume.workspace     = true
+minijinja.workspace = true
 r2d2.workspace      = true
 r2d2_sqlite.workspace = true
 

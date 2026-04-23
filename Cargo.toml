@@ -98,6 +98,7 @@ image        = "0.25"
 nom-exif     = "2.7"
 mp4parse     = "0.17"
 mime_guess   = "2"
+minijinja    = { version = "2", default-features = false, features = ["macros", "loader"] }
 
 [profile.release]
 lto = "thin"
