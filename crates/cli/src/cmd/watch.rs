@@ -10,7 +10,7 @@
 //! WHY `run` consumes `container.events` directly: `main.rs::dispatch_watch`
 //! constructs a [`DbEventHandler`] via [`make_db_event_handler`] and passes
 //! it as an `extra_handler` to `build_container` before `AppContainer::new`
-//! wraps all handlers in the single [`perima_app::CompositeEventBus`].
+//! wraps all handlers in the single [`perima_app::Bus`].
 //! `run` then receives `container.events` — the already-composed bus —
 //! and forwards it directly to `DebouncedWatcher`. No second bus
 //! construction happens in the shell layer (resolves spec §4 acceptance).
@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use perima_app::AppContainer;
-use perima_core::{AppEvent, CoreError, DeviceId, EventBus, FileEvent, LocationStatus};
+use perima_app::{AppContainer, EventHandler};
+use perima_core::{AppEvent, CoreError, DeviceId, FileEvent, LocationStatus};
 use perima_db::SqliteFileRepository;
 use perima_fs::DebouncedWatcher;
 
@@ -32,19 +32,28 @@ use crate::signals::Cancellation;
 
 /// Updates the database in response to filesystem events.
 ///
-/// WHY `Arc<SqliteFileRepository>`: `EventBus` requires `Send + Sync`.
-/// `SqliteFileRepository` uses `Mutex<Connection>` internally, satisfying both.
-/// `Arc` lets `DbEventHandler` be cheaply cloneable and placed in a composite.
+/// WHY `Arc<SqliteFileRepository>`: `EventHandler` requires `Send + 'static`.
+/// `SqliteFileRepository` uses interior mutability (flume sender + r2d2 pool),
+/// satisfying both. `Arc` gives shared ownership without cloning the heavy repo.
 struct DbEventHandler {
     repo: Arc<SqliteFileRepository>,
     device: DeviceId,
 }
 
-impl EventBus for DbEventHandler {
-    fn emit(&self, event: &AppEvent) -> Result<(), CoreError> {
-        match event {
-            AppEvent::File(file_event) => self.record_file_event(file_event),
-            AppEvent::ScanCompleted { .. } | AppEvent::IndexInvalidated { .. } => Ok(()),
+#[async_trait::async_trait]
+impl EventHandler for DbEventHandler {
+    fn name(&self) -> &'static str {
+        "db_event_handler"
+    }
+
+    async fn handle(&mut self, event: AppEvent) {
+        // CLI watch handler only acts on FileEvents — domain events
+        // (ScanCompleted, IndexInvalidated) are no-ops since the CLI
+        // has no frontend cache to invalidate.
+        if let AppEvent::File(file_event) = event
+            && let Err(e) = self.record_file_event(&file_event)
+        {
+            tracing::warn!(error = %e, "failed to record file event");
         }
     }
 }
@@ -106,18 +115,18 @@ impl DbEventHandler {
     }
 }
 
-/// Construct a [`DbEventHandler`] wrapped as `Arc<dyn EventBus>`.
+/// Construct a [`DbEventHandler`] boxed as `Box<dyn EventHandler>`.
 ///
 /// WHY `pub(crate)`: `main.rs::dispatch_watch` builds this handler
 /// before calling `build_container`, so it can pass it as an extra
-/// handler and `AppContainer`'s single [`perima_app::CompositeEventBus`]
-/// absorbs it. Only the watch dispatcher needs this — keeping it
-/// `pub(crate)` limits the API surface.
+/// handler and `AppContainer::new` absorbs it into the single [`perima_app::Bus`].
+/// Only the watch dispatcher needs this — keeping it `pub(crate)` limits
+/// the API surface.
 pub(crate) fn make_db_event_handler(
     repo: Arc<SqliteFileRepository>,
     device: DeviceId,
-) -> Arc<dyn perima_core::EventBus> {
-    Arc::new(DbEventHandler { repo, device })
+) -> Box<dyn perima_app::EventHandler> {
+    Box::new(DbEventHandler { repo, device })
 }
 
 // ---------------------------------------------------------------------------

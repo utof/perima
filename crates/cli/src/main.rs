@@ -22,10 +22,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use perima_app::{AppContainer, AppDeps};
+use perima_app::{AppContainer, AppDeps, EventHandler};
 use perima_core::{
-    EventBus, FileRepository, HashService, MetadataRepository, Scanner, SearchRepository,
-    TagRepository, VolumeRepository,
+    FileRepository, HashService, MetadataRepository, Scanner, SearchRepository, TagRepository,
+    VolumeRepository,
 };
 use perima_db::{
     ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository,
@@ -208,27 +208,28 @@ async fn main() -> ExitCode {
 
 /// Build an [`AppContainer`] for a given database path.
 ///
-/// `extra_handlers` lets callers inject additional [`EventBus`] implementations
-/// before the single [`perima_app::CompositeEventBus`] is constructed inside
+/// `extra_handlers` lets callers inject additional [`EventHandler`] implementations
+/// before the single [`perima_app::Bus`] is constructed inside
 /// [`AppContainer::new`]. The `watch` dispatcher uses this to inject its
 /// `DbEventHandler` so that filesystem events can mutate location rows via the
-/// shared bus without constructing a second `CompositeEventBus` in the shell.
+/// shared bus without constructing a second bus in the shell.
 fn build_container(
     db_path: &Path,
-    extra_handlers: Vec<Arc<dyn EventBus>>,
+    extra_handlers: Vec<Box<dyn EventHandler>>,
 ) -> Result<Arc<AppContainer>, perima_core::CoreError> {
     // WHY a `NoopBus` passed to the writer: the writer's after-COMMIT
     // emission path is scaffolded but file-event emission is handled by
-    // the composite bus wired into `AppContainer`. Batch E's
-    // `async-broadcast` will re-plumb this once the single-construction-site
-    // invariant is relaxed. Spec §§3.3 + 4.8 (A4.8 first bullet).
+    // the async-broadcast Bus wired into `AppContainer`. The writer bus
+    // is separate from the handler list — it receives post-COMMIT events
+    // from the writer thread (std::thread, not tokio), so it must be
+    // Arc<dyn EventBus> (sync emit). Spec §§3.3 + 4.8 (A4.8 first bullet).
     struct NoopBus;
-    impl EventBus for NoopBus {
+    impl perima_core::events::EventBus for NoopBus {
         fn emit(&self, _: &perima_core::AppEvent) -> Result<(), perima_core::CoreError> {
             Ok(())
         }
     }
-    let writer_bus: Arc<dyn EventBus> = Arc::new(NoopBus);
+    let writer_bus: Arc<dyn perima_core::events::EventBus> = Arc::new(NoopBus);
 
     let writer = SqliteWriter::start(db_path, writer_bus)?;
     let reads = ReadPool::open(db_path)?;
@@ -283,13 +284,13 @@ fn build_container(
     // WHY log handler always first: every command benefits from tracing
     // event emissions; `extra_handlers` (injected by the watch dispatcher)
     // are appended after so the log entry always fires before DB writes.
-    let log_handler: Arc<dyn EventBus> = Arc::new(perima_app::LogEventHandler);
-    let mut handlers: Vec<Arc<dyn EventBus>> = vec![log_handler];
+    let log_handler: Box<dyn EventHandler> = Box::new(perima_app::LogEventHandler);
+    let mut handlers: Vec<Box<dyn EventHandler>> = vec![log_handler];
     handlers.extend(extra_handlers);
     Ok(AppContainer::new(deps, handlers))
 }
 
-/// Build a `DbEventHandler` for the `watch` command, wrapped as `Arc<dyn EventBus>`.
+/// Build a `DbEventHandler` for the `watch` command, boxed as `Box<dyn EventHandler>`.
 ///
 /// WHY a dedicated helper: `dispatch_watch` must construct the handler
 /// before calling `build_container` so it can be passed as an `extra_handler`.
@@ -299,19 +300,22 @@ fn build_container(
 /// WHY a fresh writer+pool pair here: `dispatch_watch` builds the
 /// `DbEventHandler` BEFORE calling `build_container`, so the handler's
 /// `SqliteFileRepository` must own its own sender. Both senders ride
-/// into the `CompositeEventBus` via `extra_handlers` and the container
-/// respectively — the writer thread keeps running while any sender lives.
+/// into the Bus via `extra_handlers` and the container respectively —
+/// the writer thread keeps running while any sender lives.
 fn build_watch_db_handler(
     db_path: &Path,
     device_id: perima_core::DeviceId,
-) -> Result<Arc<dyn EventBus>, perima_core::CoreError> {
+) -> Result<Box<dyn EventHandler>, perima_core::CoreError> {
     struct NoopBus;
-    impl EventBus for NoopBus {
+    impl perima_core::events::EventBus for NoopBus {
         fn emit(&self, _: &perima_core::AppEvent) -> Result<(), perima_core::CoreError> {
             Ok(())
         }
     }
-    let writer = SqliteWriter::start(db_path, Arc::new(NoopBus) as Arc<dyn EventBus>)?;
+    let writer = SqliteWriter::start(
+        db_path,
+        Arc::new(NoopBus) as Arc<dyn perima_core::events::EventBus>,
+    )?;
     let reads = ReadPool::open(db_path)?;
     let file_repo = Arc::new(SqliteFileRepository::new(writer.sender(), reads));
     // WHY writer handle dropped here: the sender inside `file_repo` keeps
@@ -383,19 +387,21 @@ async fn dispatch_scan(
         None
     } else {
         struct NoopBus;
-        impl EventBus for NoopBus {
+        impl perima_core::events::EventBus for NoopBus {
             fn emit(&self, _: &perima_core::AppEvent) -> Result<(), perima_core::CoreError> {
                 Ok(())
             }
         }
-        let sentinel_writer =
-            match SqliteWriter::start(&db_path, Arc::new(NoopBus) as Arc<dyn EventBus>) {
-                Ok(w) => w,
-                Err(e) => {
-                    eprintln!("perima: database (sentinel migration): {e}");
-                    return ExitCode::from(1);
-                }
-            };
+        let sentinel_writer = match SqliteWriter::start(
+            &db_path,
+            Arc::new(NoopBus) as Arc<dyn perima_core::events::EventBus>,
+        ) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("perima: database (sentinel migration): {e}");
+                return ExitCode::from(1);
+            }
+        };
         let sentinel_reads = match ReadPool::open(&db_path) {
             Ok(p) => p,
             Err(e) => {
