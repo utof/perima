@@ -124,7 +124,7 @@ export default function App() {
             refetch();
             break;
           case "IndexInvalidated":
-            // TODO Batch H: split per event.data (TagsChanged / FilesChanged
+            // TODO Batch H: split per event.data.reason (TagsChanged / FilesChanged
             // / MetadataChanged / SearchIndexRebuilt) for surgical TanStack
             // invalidation. Currently coarse → debounced refetch matches
             // the File-event behavior.

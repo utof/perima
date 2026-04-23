@@ -58,15 +58,20 @@ export type AppEvent =
         duration_ms: number;
       };
     }
-  | { kind: "IndexInvalidated"; data: InvalidationReason };
+  | { kind: "IndexInvalidated"; data: { reason: InvalidationReason } };
 
 /**
- * Reason for an index invalidation event.
- * Rust: plain unit-variant enum, default serde → bare string (no tag wrapper).
- * Wire shape: `"TagsChanged"` (NOT `{reason: "TagsChanged"}`).
+ * Categorical reason an index was invalidated. Inner field of
+ * AppEvent::IndexInvalidated.data.reason. Wire shape (the whole
+ * envelope): `\{kind: "IndexInvalidated", data: \{reason: "TagsChanged"\}\}`.
  *
  * WHY string union (not discriminated union): commit b00d1ad dropped
- * `#[serde(tag = "reason")]`; default Rust enum serde produces bare strings.
+ * `#[serde(tag = "reason")]`; default Rust enum serde produces bare strings
+ * for the inner InvalidationReason value. The outer IndexInvalidated variant
+ * is a struct variant with a named `reason` field, so #[serde(content = "data")]
+ * wraps the whole struct (\{reason: ...\}) into data — not just the bare string.
+ * Wire-shape oracle: crates/core/tests/serialize_shape.rs:303-314 asserts
+ * v["data"]["reason"] == "TagsChanged".
  */
 export type InvalidationReason =
   | "TagsChanged"
