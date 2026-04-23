@@ -189,6 +189,8 @@ fn rebuild_is_idempotent() {
     assert_eq!(count, 1);
 }
 
+/// I5: calling `SearchRepository::rebuild()` twice produces an identical
+/// result set; no row-count drift in `search_content`.
 #[test]
 fn test_rebuild_idempotence_post_v007() {
     let (_td, db, repo, _writer) = test_db();
