@@ -50,6 +50,7 @@ use rusqlite::Connection;
 
 use crate::cmd::WriteCmd;
 use crate::connection::open_and_migrate;
+use crate::schema::install_fts_triggers;
 
 mod file;
 mod metadata;
@@ -167,6 +168,7 @@ impl SqliteWriter {
         // afterwards against a fully-migrated schema (spec §3.6).
         let conn =
             open_and_migrate(db_path).map_err(|e| CoreError::Internal(format!("migrate: {e}")))?;
+        install_fts_triggers(&conn)?;
         spawn_writer(conn, bus)
     }
 
@@ -191,6 +193,7 @@ impl SqliteWriter {
         embedded::migrations::runner()
             .run(&mut conn)
             .map_err(|e| CoreError::Internal(format!("migrate in-memory: {e}")))?;
+        install_fts_triggers(&conn)?;
         spawn_writer(conn, bus)
     }
 }
@@ -327,5 +330,15 @@ mod tests {
             send_result.is_err(),
             "post-shutdown try_send must fail (got {send_result:?})"
         );
+    }
+
+    #[test]
+    fn start_in_memory_installs_fts_triggers() {
+        let bus: Arc<dyn EventBus> = Arc::new(NoopBus);
+        let h = SqliteWriter::start_in_memory(bus).expect("start_in_memory");
+        // If install_fts_triggers panicked or returned Err, start_in_memory
+        // above would have failed. Reaching here proves the install ran
+        // cleanly.
+        drop(h);
     }
 }
