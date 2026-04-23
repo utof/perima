@@ -414,7 +414,9 @@ pub async fn run_scan_inner_with_metadata(
     // in `flume::Receiver::recv` forever → `pthread_join` on writer
     // hangs the test. Reproduced 2026-04-23 with gdb backtrace
     // (Thread 18 → futex on writer's TID; Thread 17 → flume recv).
-    drop(on_persist); // releases &sentinel_repo borrow
+    // The `on_persist` closure is `Copy` (only borrows `&sentinel_repo`)
+    // so it doesn't need explicit `drop`; its borrow on `sentinel_repo`
+    // ends with the last use inside `run_scan_live` above.
     drop(file_repo);
     drop(vol_repo);
     drop(sentinel_repo);
