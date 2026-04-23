@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import * as api from "./api";
 import type { UnsubscribeFn } from "./api";
 import FileGrid from "./components/FileGrid";
@@ -29,7 +29,7 @@ type ViewMode = "table" | "grid";
  * feature set; introduce a state library (zustand / jotai) when the number of
  * consumers grows beyond 2–3 components.
  */
-export default function App() {
+export default function App({ children }: { children?: ReactNode }) {
   const [files, setFiles] = useState<FileWithTagsPayload[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
   // WHY string | null (not Set<string>): spec models multi-select as Set<string>
@@ -262,6 +262,7 @@ export default function App() {
           />
         )}
         <main className="flex-1 overflow-auto p-4">
+          {children}
           {viewMode === "table" ? (
             <FileTable files={visibleFiles} loading={loading} />
           ) : (
