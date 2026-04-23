@@ -27,8 +27,7 @@ const CAPACITY: usize = 256;
 ///
 /// WHY no ring buffer: deferred per spec §2.2 OUT (umbrella §A7
 /// requirement, but no v1 late-joiner consumer exists). Add when first
-/// late-joiner ships (likely Phase 6 mobile / HTTP shell). See GH issue
-/// `architecture-spec-followup` filed in Batch E Task 13.
+/// late-joiner ships (likely Phase 6 mobile / HTTP shell). See GH #129.
 pub struct Bus {
     sender: Sender<AppEvent>,
     /// WHY `InactiveReceiver`: async-broadcast closes the channel when

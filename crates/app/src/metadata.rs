@@ -46,7 +46,7 @@ use perima_core::{
 ///
 /// WHY 100: matches the CLI's `--limit` `default_value` in
 /// `crates/cli/src/cmd/ls.rs` (`LsArgs::limit` is usize, CLI sets 100).
-const DEFAULT_LIMIT: u32 = 100;
+pub(crate) const DEFAULT_LIMIT: u32 = 100;
 
 /// Inputs to [`MetadataUseCase::execute`].
 #[derive(Debug, Clone)]
@@ -58,7 +58,7 @@ pub enum MetadataCommand {
     /// the caller knows the machine context; the `UseCase` struct is
     /// shared across machines in multi-device CLI scenarios.
     ListFiles {
-        /// Max rows to return; `None` applies [`DEFAULT_LIMIT`].
+        /// Max rows to return; `None` applies `DEFAULT_LIMIT` (100).
         limit: Option<u32>,
         /// Row offset for pagination; `None` applies 0.
         offset: Option<u32>,
@@ -71,7 +71,7 @@ pub enum MetadataCommand {
     /// Locations without a metadata row appear with `metadata: None`;
     /// callers should treat that as "pending extraction", not "absent".
     ListFilesWithMetadata {
-        /// Max rows to return; `None` applies [`DEFAULT_LIMIT`].
+        /// Max rows to return; `None` applies `DEFAULT_LIMIT` (100).
         limit: Option<u32>,
         /// Row offset for pagination; `None` applies 0.
         offset: Option<u32>,
