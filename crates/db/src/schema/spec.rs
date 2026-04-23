@@ -21,28 +21,28 @@ pub enum TriggerEvent {
 /// the matching macro; missing macro = template render error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyKind {
-    /// `sc_after_insert` — search_content → search_index sync on INSERT.
+    /// `sc_after_insert` — `search_content` → `search_index` sync on INSERT.
     SearchContentAfterInsert,
     /// `sc_after_update` — sync on UPDATE (delete + reinsert).
     SearchContentAfterUpdate,
     /// `sc_after_delete` — sync on DELETE.
     SearchContentAfterDelete,
-    /// `search_after_file_locations_insert` — seed search_content from joined live state.
+    /// `search_after_file_locations_insert` — seed `search_content` from joined live state.
     FileLocationsInsert,
-    /// `search_after_location_hash_change_retire` — DELETE OLD search_content row if no sibling.
+    /// `search_after_location_hash_change_retire` — DELETE OLD `search_content` row if no sibling.
     LocationHashChangeRetire,
     /// `search_after_location_hash_change_seed` — INSERT-OR-IGNORE + UPDATE NEW row from live state.
     LocationHashChangeSeed,
     /// `search_after_location_rename` — V007 trigger 2b. Consumes NEW.* directly
-    /// (WHEN-guarded to representative). DO NOT replace with representative_path() macro.
+    /// (WHEN-guarded to representative). DO NOT replace with `representative_path()` macro.
     RenameRepresentative,
     /// `search_after_location_soft_delete` — repoint to surviving sibling or retire.
     LocationSoftDelete,
     /// `search_after_location_restore` — recreate from joined live state.
     LocationRestore,
-    /// `search_after_metadata_insert` — UPSERT search_content row + refresh metadata cols.
+    /// `search_after_metadata_insert` — UPSERT `search_content` row + refresh metadata cols.
     MetadataInsert,
-    /// `search_after_metadata_update` — CASE on deleted_at to refresh-or-clear cols.
+    /// `search_after_metadata_update` — CASE on `deleted_at` to refresh-or-clear cols.
     MetadataUpdate,
     /// `search_after_file_tags_insert` — UPSERT row + refresh tags agg.
     FileTagsInsert,
@@ -83,7 +83,7 @@ pub const LEGACY_TRIGGER_NAMES: &[&str] = &[
 /// The 16 trigger entries the codegen renders.
 ///
 /// Order matters for fire-order on combined-transaction UPDATE statements
-/// (SQLite fires triggers in CREATE order). See spec §7.1 + V007 inline
+/// (`SQLite` fires triggers in CREATE order). See spec §7.1 + V007 inline
 /// comment "fire-order: 2a, 2b, 2c".
 pub const FTS_AGGREGATIONS: &[FtsAggregation] = &[
     // search_content → search_index sync (V007).
