@@ -56,7 +56,18 @@ pre-push:
       env:
         PKG_CONFIG_PATH: /tmp/tauri-pc
         LIBRARY_PATH: /tmp/tauri-libs:/usr/lib/x86_64-linux-gnu
-      run: export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" && cargo test --workspace --all-targets
+      # WHY nextest not `cargo test`: SQLite has a lock-order inversion in
+      # unixClose vs unixLock-from-WAL-close that deadlocks when multiple
+      # Connection handles to the same DB are dropped concurrently. cargo
+      # nextest's process-per-test isolation eliminates the race; the
+      # repo-level `no-cargo-test` check (below + just recipe) prevents
+      # regression. Doctest invocation below stays as `cargo test --doc`
+      # (nextest doesn't run doctests).
+      run: export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH" && cargo nextest run --workspace --all-targets
+    no-cargo-test:
+      # Enforce the "no cargo test" rule across committed automation. Catches
+      # accidental reintroduction at push time. See scripts/no-cargo-test.sh.
+      run: ./scripts/no-cargo-test.sh
     cargo-doctest:
       env:
         PKG_CONFIG_PATH: /tmp/tauri-pc

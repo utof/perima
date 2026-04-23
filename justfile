@@ -14,8 +14,20 @@ export LIBRARY_PATH := "/tmp/tauri-libs:/usr/lib/x86_64-linux-gnu"
 
 default: ci
 
+# WHY nextest not `cargo test`: SQLite lock-order inversion in
+# unixClose vs unixLock-from-WAL-close deadlocks when multiple Connection
+# handles to the same DB drop concurrently (caught locally + on CI several
+# times during arch-audit). cargo nextest's process-per-test isolation
+# eliminates the race. The `no-cargo-test` recipe below enforces the rule
+# repo-wide so accidental reintroduction fails CI.
 test:
-    cargo test --workspace --all-targets
+    cargo nextest run --workspace --all-targets
+
+# Forbid `cargo test` invocations in committed automation files.
+# Doctest forms (cargo test --doc / --workspace --doc) are exempt because
+# nextest doesn't run doctests. See scripts/no-cargo-test.sh + CLAUDE.md.
+no-cargo-test:
+    ./scripts/no-cargo-test.sh
 
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
@@ -63,7 +75,7 @@ ci-fast: fmt-check typos lint-frontend
 
 # Thick gate — pre-push + manual surface. Equivalent to old `ci`;
 # kept for back-compat so `just ci` still runs the full pipeline.
-ci: fmt-check clippy test doctest docs-coverage deny typos build-frontend test-frontend lint-frontend
+ci: fmt-check clippy test no-cargo-test doctest docs-coverage deny typos build-frontend test-frontend lint-frontend
 
 verify:
     @if command -v cargo-kani >/dev/null 2>&1; then \
