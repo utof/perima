@@ -1,7 +1,7 @@
-#![allow(clippy::unwrap_used)] // WHY: integration test; unwrap panics signal bugs.
-
 //! Search behavior tests — query semantics with no trigger-side assertion.
 //! Extracted from `crates/db/src/search_repo.rs::tests` in Batch G.
+
+#![allow(clippy::unwrap_used)] // WHY: integration test; unwrap panics signal bugs.
 
 mod common;
 
@@ -9,7 +9,6 @@ use common::{
     HASH_A, VOL, device, hash_n, insert_file, insert_metadata, seed_conn, test_db,
     test_db_with_tag_repo,
 };
-
 use perima_core::{BlakeHash, SearchRepository, TagRepository};
 
 #[test]
