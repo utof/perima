@@ -1,6 +1,5 @@
 #![allow(clippy::unwrap_used)] // WHY: integration test helpers; unwrap panics signal bugs.
-#![allow(unreachable_pub)]
-// WHY: pub fn in test-binary-local mod; unreachable from any wider crate is by design.
+#![allow(unreachable_pub)] // WHY: pub fn in test-binary-local mod is unreachable by design.
 #![allow(dead_code)]
 // WHY: helpers are consumed by 3 sibling integration-test binaries
 // (search_semantics, search_triggers, search_proptests); each binary
