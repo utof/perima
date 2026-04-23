@@ -15,6 +15,12 @@ const tags = [
 ];
 const counts = { "id-1": 5, "id-2": 2 };
 
+// WHY spyOn(useUiStore.getState(), "setSelectedTagId") (vs setState funnel like
+// SearchBar): TagSidebar has NO useEffect with this action in its deps array, so
+// patching the action's identity does not trigger spurious effect re-runs. If
+// TagSidebar ever grows a useEffect depending on setSelectedTagId, switch these
+// spies to vi.spyOn(useUiStore, "setState") (the SearchBar C1 pattern) to keep
+// effect-deps stable.
 describe("TagSidebar", () => {
   test("renders All + each tag with counts", () => {
     renderWithProviders(
