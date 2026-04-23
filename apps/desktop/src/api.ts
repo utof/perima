@@ -11,6 +11,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ResultAsync } from "neverthrow";
 import type {
+  AppEvent,
   CoreError,
   FileLocationRecord,
   FileWithMetadataPayload,
@@ -19,7 +20,6 @@ import type {
   SearchHit,
   Tag,
   VolumeRecord,
-  FileEvent,
 } from "./bindings";
 
 // ── Error parsing ─────────────────────────────────────────────────────
@@ -144,7 +144,7 @@ export function listVolumes(): ResultAsync<VolumeRecord[], CoreError> {
  * Start watching the given folder for filesystem changes.
  *
  * Cancels any currently active watcher. Events are emitted via the
- * Tauri `file-event` channel; subscribe with {@link subscribeToFileEvents}.
+ * Tauri `app-event` channel; subscribe with {@link subscribeToAppEvents}.
  */
 export function startWatch(path: string): ResultAsync<void, CoreError> {
   return fromInvoke("start_watch", { path });
@@ -160,23 +160,27 @@ export function isWatching(): ResultAsync<boolean, CoreError> {
   return fromInvoke("is_watching", {});
 }
 
-/** Returned by {@link subscribeToFileEvents}; call to stop listening. */
+/** Returned by {@link subscribeToAppEvents}; call to stop listening. */
 export type UnsubscribeFn = () => void;
 
 /**
- * Subscribe to `file-event` notifications emitted by the backend watcher.
+ * Subscribe to `app-event` notifications emitted by the backend bus.
  *
  * Resolves to an unsubscribe function. Consumers MUST call it on cleanup
- * to avoid leaks (e.g., from `useEffect` return).
+ * to avoid leaked listeners (e.g., from `useEffect` return).
+ *
+ * Channel renamed from `"file-event"` to `"app-event"` in Batch E — the
+ * single channel now carries the full `AppEvent` envelope (`File`,
+ * `ScanCompleted`, `IndexInvalidated`).
  *
  * WHY wrap `listen`: the raw `@tauri-apps/api/event` listener passes a
  * `{ payload, event, id, ... }` object to the callback; we unwrap the
- * payload so consumers only deal with the typed `FileEvent`.
+ * payload so consumers only deal with the typed `AppEvent`.
  */
-export async function subscribeToFileEvents(
-  callback: (event: FileEvent) => void,
+export async function subscribeToAppEvents(
+  callback: (event: AppEvent) => void,
 ): Promise<UnsubscribeFn> {
-  return listen<FileEvent>("file-event", (tauriEvent) => {
+  return listen<AppEvent>("app-event", (tauriEvent) => {
     callback(tauriEvent.payload);
   });
 }

@@ -5,14 +5,14 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Mock } from "vitest";
 import App from "../App";
 
-describe("App file-event debounce", () => {
+describe("App app-event handling", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     (invoke as Mock).mockReset();
     (listen as Mock).mockReset();
   });
 
-  test("5 rapid file-events within 300ms trigger at most 1 list_files call", async () => {
+  test("5 rapid File-events within 300ms trigger at most 1 list_files_with_tags call", async () => {
     // Initial mount: both list_files_with_tags and list_tags resolve to [].
     (invoke as Mock).mockImplementation((cmd: string) => {
       if (cmd === "list_tags") return Promise.resolve([]);
@@ -30,19 +30,19 @@ describe("App file-event debounce", () => {
     );
 
     // WHY act() around mount: mount effects schedule async list_files_with_tags
-    // and list_tags and the subscribeToFileEvents promise, all of which land
+    // and list_tags and the subscribeToAppEvents promise, all of which land
     // state updates.
     await act(async () => {
       render(<App />);
       // WHY Promise.resolve chains: flush microtasks from mount effects
-      // (list_files_with_tags, list_tags, subscribeToFileEvents).
+      // (list_files_with_tags, list_tags, subscribeToAppEvents).
       await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
     });
 
     // Ignore the initial list_files_with_tags call from mount — only count
-    // events fired after we start dispatching file-events.
+    // events fired after we start dispatching app-events.
     (invoke as Mock).mockClear();
     (invoke as Mock).mockImplementation((cmd: string) => {
       if (cmd === "list_tags") return Promise.resolve([]);
@@ -67,9 +67,12 @@ describe("App file-event debounce", () => {
       for (let i = 0; i < 5; i++) {
         capturedHandler!({
           payload: {
-            type: "Created",
-            path: `file${i}.txt`,
-            volume: "00000000-0000-0000-0000-000000000000",
+            kind: "File",
+            data: {
+              type: "Created",
+              path: `file${i}.txt`,
+              volume: "00000000-0000-0000-0000-000000000000",
+            },
           },
         });
       }
@@ -98,7 +101,71 @@ describe("App file-event debounce", () => {
     expect(postCalls).toHaveLength(1);
   });
 
-  test("surfaces watcher banner when subscribeToFileEvents fails", async () => {
+  test("ScanCompleted triggers immediate refetch (no debounce)", async () => {
+    (invoke as Mock).mockImplementation((cmd: string) => {
+      if (cmd === "list_tags") return Promise.resolve([]);
+      if (cmd === "list_files_with_tags") return Promise.resolve([]);
+      return Promise.resolve([]);
+    });
+
+    let capturedHandler: ((ev: { payload: unknown }) => void) | null = null;
+    (listen as Mock).mockImplementation(
+      (_event: unknown, handler: (ev: { payload: unknown }) => void) => {
+        capturedHandler = handler;
+        return Promise.resolve(() => { /* noop unsubscribe */ });
+      },
+    );
+
+    await act(async () => {
+      render(<App />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Clear mount calls; only track post-mount invocations.
+    (invoke as Mock).mockClear();
+    (invoke as Mock).mockImplementation((cmd: string) => {
+      if (cmd === "list_tags") return Promise.resolve([]);
+      if (cmd === "list_files_with_tags") return Promise.resolve([]);
+      return Promise.resolve([]);
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+    if (!capturedHandler) {
+      throw new Error("listen handler was never captured");
+    }
+
+    // Fire a ScanCompleted event — should trigger an immediate refetch,
+    // no timer needed.
+    await act(async () => {
+      capturedHandler!({
+        payload: {
+          kind: "ScanCompleted",
+          data: {
+            volume: "00000000-0000-0000-0000-000000000000",
+            files_seen: 10,
+            files_new: 3,
+            duration_ms: 1234,
+          },
+        },
+      });
+      // WHY two microtask flushes: refetch() calls api.listFilesWithTags
+      // which returns a ResultAsync (Promise). The first resolve tick
+      // queues the invoke; the second lets the mock resolve and the
+      // .match() callback run.
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Should refetch IMMEDIATELY without waiting for the 300ms debounce.
+    const calls = (invoke as Mock).mock.calls.filter(
+      ([cmd]) => cmd === "list_files_with_tags",
+    );
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("surfaces watcher banner when subscribeToAppEvents fails", async () => {
     (invoke as Mock).mockImplementation((cmd: string) => {
       if (cmd === "list_tags") return Promise.resolve([]);
       if (cmd === "list_files_with_tags") return Promise.resolve([]);

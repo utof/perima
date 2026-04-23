@@ -10,7 +10,7 @@ import TagSidebar from "./components/TagSidebar";
 import WatcherBanner from "./components/WatcherBanner";
 import { composeVisible, computeFacets, sortByRank } from "./lib/search";
 import { coreErrorMessage } from "./lib/coreError";
-import type { CoreError, FileWithTagsPayload, ScanReport, SearchHit, Tag } from "./bindings";
+import type { AppEvent, CoreError, FileWithTagsPayload, ScanReport, SearchHit, Tag } from "./bindings";
 
 /**
  * Which rendering mode the main file list uses.
@@ -89,26 +89,56 @@ export default function App() {
     // or the debounced refresh resolves post-cleanup.
     let active = true;
 
+    /** Shared refetch helper — called by multiple AppEvent branches. */
+    const refetch = () => {
+      // WHY no listTags() here: the file watcher fires on filesystem
+      // events (file created/deleted/modified). Tags are only mutated
+      // via explicit Tauri commands from within this app — no external
+      // process can change file_tags without going through Tauri. A
+      // tag re-fetch on every file event would be wasteful and
+      // incorrect; tags refresh after scan (handleScanComplete) where
+      // new tags may actually have been created.
+      void api.listFilesWithTags(100).match(
+        (refreshed) => {
+          if (active) setFiles(refreshed);
+        },
+        (err) => {
+          if (active) setError(err);
+        },
+      );
+    };
+
     api
-      .subscribeToFileEvents(() => {
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(() => {
-          // WHY no listTags() here: the file watcher fires on filesystem
-          // events (file created/deleted/modified). Tags are only mutated
-          // via explicit Tauri commands from within this app — no external
-          // process can change file_tags without going through Tauri. A
-          // tag re-fetch on every file event would be wasteful and
-          // incorrect; tags refresh after scan (handleScanComplete) where
-          // new tags may actually have been created.
-          void api.listFilesWithTags(100).match(
-            (refreshed) => {
-              if (active) setFiles(refreshed);
-            },
-            (err) => {
-              if (active) setError(err);
-            },
-          );
-        }, 300);
+      .subscribeToAppEvents((event: AppEvent) => {
+        switch (event.kind) {
+          case "File":
+            // WHY 300ms debounce: a watcher burst (e.g., file-copy of 100
+            // files) shouldn't trigger 100 list_files_with_tags refetches.
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(refetch, 300);
+            break;
+          case "ScanCompleted":
+            // WHY immediate (no debounce): scan-end is rare + intentional;
+            // the user is waiting for their scanned files to appear.
+            if (timer) clearTimeout(timer);
+            refetch();
+            break;
+          case "IndexInvalidated":
+            // TODO Batch H: split per event.data (TagsChanged / FilesChanged
+            // / MetadataChanged / SearchIndexRebuilt) for surgical TanStack
+            // invalidation. Currently coarse → debounced refetch matches
+            // the File-event behavior.
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(refetch, 300);
+            break;
+          default: {
+            // WHY exhaustiveness check: ensures the switch stays complete
+            // as new AppEvent variants are added (matches StatusBar.tsx
+            // pattern from Batch D).
+            const _exhaustive: never = event;
+            throw new Error(`Unhandled AppEvent kind: ${JSON.stringify(_exhaustive)}`);
+          }
+        }
       })
       .then((fn) => {
         if (active) {

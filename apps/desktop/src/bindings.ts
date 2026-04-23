@@ -40,6 +40,41 @@ export type DeviceId = string;
 // ── Enums ────────────────────────────────────────────────────────────
 
 /**
+ * Top-level event envelope emitted by the backend on the `app-event` channel.
+ * Rust: `AppEvent` with `#[serde(tag = "kind", content = "data")]`.
+ *
+ * HAND-CRAFTED (Batch E Task 12): env-limited, cannot run
+ * `cargo build --features specta-export` locally; CI bindings-drift
+ * job gates regeneration.
+ */
+export type AppEvent =
+  | { kind: "File"; data: FileEvent }
+  | {
+      kind: "ScanCompleted";
+      data: {
+        volume: VolumeId;
+        files_seen: number;
+        files_new: number;
+        duration_ms: number;
+      };
+    }
+  | { kind: "IndexInvalidated"; data: InvalidationReason };
+
+/**
+ * Reason for an index invalidation event.
+ * Rust: plain unit-variant enum, default serde → bare string (no tag wrapper).
+ * Wire shape: `"TagsChanged"` (NOT `{reason: "TagsChanged"}`).
+ *
+ * WHY string union (not discriminated union): commit b00d1ad dropped
+ * `#[serde(tag = "reason")]`; default Rust enum serde produces bare strings.
+ */
+export type InvalidationReason =
+  | "TagsChanged"
+  | "FilesChanged"
+  | "MetadataChanged"
+  | "SearchIndexRebuilt";
+
+/**
  * Status of a file location row.
  * Rust: plain unit-variant enum, no serde renaming.
  */
