@@ -524,8 +524,9 @@ async fn dispatch_watch(root: PathBuf, config: &Config, cancel: &Cancellation) -
 
     // WHY build the DbEventHandler here and inject via extra_handlers:
     // watch needs a DB handler so filesystem events mutate location rows.
-    // Constructing it here (before AppContainer::new) keeps CompositeEventBus
-    // construction in exactly one place — container.rs §4 acceptance criterion.
+    // Constructing it here (before AppContainer::new) keeps Bus
+    // construction in exactly one place — Batch E spec §2.1 single-
+    // construction-site invariant.
     let db_handler = match build_watch_db_handler(&db_path, config.device_id) {
         Ok(h) => h,
         Err(e) => {

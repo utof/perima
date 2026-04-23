@@ -162,9 +162,9 @@ fn canonicalize(root: &Path) -> Result<PathBuf, CoreError> {
 /// Run the `watch` subcommand.
 ///
 /// Detects the volume for `root`, then starts a [`DebouncedWatcher`] that
-/// forwards every filesystem event to `container.events` — the shared
-/// [`perima_app::CompositeEventBus`] already wired with the `DbEventHandler`
-/// and `LogEventHandler` by `main.rs::dispatch_watch` before this call.
+/// forwards every filesystem event to `container.events` — the shared bus
+/// already wired with the `DbEventHandler` and `LogEventHandler` by
+/// `main.rs::dispatch_watch` before this call.
 /// Blocks until the cancellation token fires (Ctrl-C).
 ///
 /// # Errors
