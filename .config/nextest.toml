@@ -2,33 +2,11 @@
 # https://nexte.st/docs/configuration/
 
 [profile.default]
-# Default: flag a test as "slow" after 40s and terminate after two slow
-# periods (80s total per test). Rationale: the slowest clean test in
-# perima-{db,app,cli,core,fs,hash,media} is ~14s (fts proptest). Past
-# 40s is a sign of lock contention or deadlock, not legitimate compute.
-# Per-package overrides below relax this for crates with legitimately
-# slow tests (perima-desktop = real Tauri/scan/thumbnail work).
+# Flag a test as "slow" after 40s and terminate after two slow periods
+# (80s total per test). Rationale: the slowest clean test in any crate
+# is ~14s (fts proptest in perima-db). Past 40s is a sign of lock
+# contention or deadlock, not legitimate compute. nextest 0.9.133 lacks
+# a CLI `--slow-timeout` flag, but honors this config key — keeps
+# `timeout NNN cargo nextest ...` wrappers from killing the whole suite
+# on a single hang.
 slow-timeout = { period = "40s", terminate-after = 2 }
-
-# perima-desktop integration tests (`crates/desktop/tests/commands_test.rs`)
-# do real end-to-end scan + metadata + thumbnail work via the `_inner`
-# helpers. On macOS CI runners these can take 60-90s legitimately; per
-# CLAUDE.md baseline `cargo nextest run -p perima-desktop` is 120-300s
-# (Tauri compile + slow tests). Bumping to 90s × 2 = 180s before kill.
-# The deadlock-detection signal stays at 80s for every other crate.
-[[profile.default.overrides]]
-filter = 'package(perima-desktop)'
-slow-timeout = { period = "90s", terminate-after = 2 }
-
-# perima-db tests intermittently hit the SQLite lock-order inversion
-# documented in GH #131 (writer + ReadPool drop race within a single
-# test process). Local reproduction: ~20% per-run hang on the FTS5
-# proptests; macOS CI also surfaced it on plain repo tests like
-# `tag_repo::tests::upsert_tag_inserts_new`. cargo nextest's
-# process-per-test isolation eliminates the cross-test class but not
-# the within-test class. Retry up to 2 times → effective per-test
-# failure rate <1% (0.2³ if independent). Removal pending GH #131
-# production fix or migration off the per-test writer+pool fixture.
-[[profile.default.overrides]]
-filter = 'package(perima-db)'
-retries = 2
