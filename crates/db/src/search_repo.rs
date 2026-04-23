@@ -123,22 +123,16 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use perima_core::{AppEvent, DeviceId, EventBus, TagRepository};
+    use perima_core::{DeviceId, EventBus, TagRepository};
     use tempfile::TempDir;
 
     use crate::pool::ReadPool;
     use crate::tag_repo::SqliteTagRepository;
+    use crate::test_utils::NoopBus;
     use crate::writer::{SqliteWriter, SqliteWriterHandle};
 
     const DEV: &str = "dev";
     const TS: &str = "2026-01-01T00:00:00Z";
-
-    struct NoopBus;
-    impl EventBus for NoopBus {
-        fn emit(&self, _: &AppEvent) -> Result<(), perima_core::CoreError> {
-            Ok(())
-        }
-    }
 
     /// Produce a deterministic 64-hex-char hash from a small integer.
     fn hash_n(n: u8) -> String {

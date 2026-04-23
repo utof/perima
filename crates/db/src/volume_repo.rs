@@ -166,20 +166,13 @@ impl VolumeRepository for SqliteVolumeRepository {
 mod tests {
     use std::sync::Arc;
 
-    use perima_core::{AppEvent, EventBus};
+    use perima_core::EventBus;
     use tempfile::TempDir;
 
     use super::*;
     use crate::pool::ReadPool;
+    use crate::test_utils::NoopBus;
     use crate::writer::{SqliteWriter, SqliteWriterHandle};
-
-    /// No-op event bus used by writer-backed test fixtures.
-    struct NoopBus;
-    impl EventBus for NoopBus {
-        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
-            Ok(())
-        }
-    }
 
     /// Test harness: tempdir-backed DB, writer actor, read pool, repo.
     ///

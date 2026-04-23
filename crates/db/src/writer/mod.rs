@@ -240,17 +240,10 @@ fn handle_file(conn: &mut Connection, cmd: crate::cmd::FileWriteCmd, bus: &Arc<d
 mod tests {
     use std::sync::Arc;
 
-    use perima_core::{AppEvent, CoreError, EventBus};
+    use perima_core::EventBus;
 
     use super::SqliteWriter;
-
-    struct NoopBus;
-
-    impl EventBus for NoopBus {
-        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
-            Ok(())
-        }
-    }
+    use crate::test_utils::NoopBus;
 
     #[test]
     fn writer_spawns_and_shuts_down_cleanly() {

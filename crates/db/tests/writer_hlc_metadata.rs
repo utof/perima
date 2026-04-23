@@ -18,18 +18,9 @@
 
 use std::sync::Arc;
 
-use perima_core::{
-    AppEvent, BlakeHash, CoreError, DeviceId, EventBus, MediaMetadata, MetadataRepository,
-};
-use perima_db::{ReadPool, SqliteMetadataRepository, SqliteWriter};
+use perima_core::{BlakeHash, DeviceId, EventBus, MediaMetadata, MetadataRepository};
+use perima_db::{ReadPool, SqliteMetadataRepository, SqliteWriter, test_utils::NoopBus};
 use rusqlite::{Connection, OpenFlags};
-
-struct NoopBus;
-impl EventBus for NoopBus {
-    fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
-        Ok(())
-    }
-}
 
 fn sample_metadata() -> MediaMetadata {
     let hash = BlakeHash::parse_hex(&"a".repeat(64)).expect("hash");

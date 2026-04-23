@@ -30,18 +30,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use perima_core::{
-    AppEvent, BlakeHash, CoreError, DeviceId, EventBus, FileRepository, FileSize, HashedFile,
-    LocationStatus, MediaPath, UpsertOutcome, VolumeId,
+    BlakeHash, DeviceId, EventBus, FileRepository, FileSize, HashedFile, LocationStatus, MediaPath,
+    UpsertOutcome, VolumeId,
 };
-use perima_db::{ReadPool, SqliteFileRepository, SqliteWriter};
+use perima_db::{ReadPool, SqliteFileRepository, SqliteWriter, test_utils::NoopBus};
 use rusqlite::{Connection, OpenFlags};
-
-struct NoopBus;
-impl EventBus for NoopBus {
-    fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
-        Ok(())
-    }
-}
 
 fn sample_hashed_file(content: &[u8], rel_path: &str) -> HashedFile {
     let hash = BlakeHash::from_bytes(*blake3::hash(content).as_bytes());

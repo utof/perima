@@ -13,16 +13,9 @@
 
 use std::sync::Arc;
 
-use perima_core::{AppEvent, CoreError, DeviceId, EventBus, VolumeIdentifiers, VolumeRepository};
-use perima_db::{ReadPool, SqliteVolumeRepository, SqliteWriter};
+use perima_core::{DeviceId, EventBus, VolumeIdentifiers, VolumeRepository};
+use perima_db::{ReadPool, SqliteVolumeRepository, SqliteWriter, test_utils::NoopBus};
 use rusqlite::{Connection, OpenFlags};
-
-struct NoopBus;
-impl EventBus for NoopBus {
-    fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
-        Ok(())
-    }
-}
 
 fn ident(label: &str, cap: u64) -> VolumeIdentifiers {
     VolumeIdentifiers {

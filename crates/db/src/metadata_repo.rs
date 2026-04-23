@@ -431,22 +431,15 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use perima_core::{AppEvent, DiscoveredFile, EventBus, FileRepository, HashedFile};
+    use perima_core::{DiscoveredFile, EventBus, FileRepository, HashedFile};
     use tempfile::TempDir;
 
     use super::*;
     use crate::connection::open_and_migrate;
     use crate::file_repo::SqliteFileRepository;
     use crate::pool::ReadPool;
+    use crate::test_utils::NoopBus;
     use crate::writer::{SqliteWriter, SqliteWriterHandle};
-
-    /// No-op event bus used by writer-backed test fixtures.
-    struct NoopBus;
-    impl EventBus for NoopBus {
-        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
-            Ok(())
-        }
-    }
 
     /// Test harness: tempdir-backed DB, writer actor, read pool, repo.
     ///

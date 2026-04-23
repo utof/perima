@@ -24,3 +24,6 @@ pub use search_repo::SqliteSearchRepository;
 pub use tag_repo::SqliteTagRepository;
 pub use volume_repo::SqliteVolumeRepository;
 pub use writer::{SqliteWriter, SqliteWriterHandle};
+
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils;
