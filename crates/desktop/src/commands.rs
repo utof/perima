@@ -73,6 +73,21 @@ fn parse_tag_id(s: &str) -> Result<uuid::Uuid, CoreError> {
 /// that a stuck extractor cannot hang the Tauri command indefinitely.
 const METADATA_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Production stub `EventBus` for the `_inner` test-helper writers.
+///
+/// WHY a single module-level definition: `clippy::items_after_statements`
+/// fires on inline `struct NoopBus` declarations inside the `_inner`
+/// helpers. Hoisting once here removes the lint and consolidates the
+/// shell-local stub. The shared `perima_db::test_utils::NoopBus` is
+/// gated behind the `test-utils` feature and not available to production
+/// builds — see #119/#125 for the long-term consolidation issue.
+struct LocalNoopBus;
+impl EventBus for LocalNoopBus {
+    fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Event handlers
 //
@@ -99,6 +114,16 @@ pub struct DbEventHandler {
     device: DeviceId,
 }
 
+impl std::fmt::Debug for DbEventHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // WHY manual: `Arc<SqliteFileRepository>` lacks `Debug`.
+        // Print the type name + device for tracing-instrument span context.
+        f.debug_struct("DbEventHandler")
+            .field("device", &self.device)
+            .finish_non_exhaustive()
+    }
+}
+
 impl DbEventHandler {
     /// Construct a [`DbEventHandler`] bound to the given file repository
     /// and device.
@@ -122,10 +147,10 @@ impl EventHandler for DbEventHandler {
     async fn handle(&mut self, event: AppEvent) {
         // Desktop DB handler only acts on FileEvents — ScanCompleted and
         // IndexInvalidated are handled by TauriEventHandler for the frontend.
-        if let AppEvent::File(file_event) = event {
-            if let Err(e) = self.record_file_event(&file_event) {
-                tracing::warn!(error = %e, "failed to record file event");
-            }
+        if let AppEvent::File(file_event) = event
+            && let Err(e) = self.record_file_event(&file_event)
+        {
+            tracing::warn!(error = %e, "failed to record file event");
         }
     }
 }
@@ -342,13 +367,7 @@ pub async fn run_scan_inner_with_metadata(
     // handle is dropped at end of scope — its `Sender` is held via
     // `vol_repo` + `file_repo` + `sentinel_repo` for the duration of
     // this function call.
-    struct NoopBus;
-    impl EventBus for NoopBus {
-        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
-            Ok(())
-        }
-    }
-    let writer = SqliteWriter::start(&db_path, Arc::new(NoopBus))?;
+    let writer = SqliteWriter::start(&db_path, Arc::new(LocalNoopBus))?;
     let reads = ReadPool::open(&db_path)?;
 
     // WHY clone `reads` for each adapter: `ReadPool` is cheap to
@@ -458,13 +477,7 @@ pub fn list_files_inner(
     // access to the AppContainer / Tauri state. The writer is dropped at
     // end of scope; the read pool keeps its connection alive until after
     // the query completes.
-    struct NoopBus;
-    impl EventBus for NoopBus {
-        fn emit(&self, _: &AppEvent) -> Result<(), CoreError> {
-            Ok(())
-        }
-    }
-    let writer = SqliteWriter::start(&db_path, Arc::new(NoopBus))?;
+    let writer = SqliteWriter::start(&db_path, Arc::new(LocalNoopBus))?;
     let reads = ReadPool::open(&db_path)?;
     let repo = SqliteFileRepository::new(writer.sender(), reads);
     // WHY explicit drop: close the writer sender before returning so

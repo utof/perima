@@ -5,6 +5,13 @@
 //! which accept plain `Path` + `DeviceId` arguments. The underlying logic is
 //! identical — only the Tauri IPC wrapping is absent.
 
+// WHY file-level allow: each test fn defines an inline `struct NoopBus`
+// stub. Hoisting one helper at module scope is the long-term consolidation
+// target (#119/#125), but for v1 these test fixtures intentionally stay
+// self-contained — moving them now would expand the diff beyond the
+// "make CI green" scope.
+#![allow(clippy::items_after_statements)]
+
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;

@@ -41,6 +41,31 @@ use tauri_specta::{Builder, collect_commands};
 use crate::commands::DbEventHandler;
 use crate::events::TauriEventHandler;
 
+/// Production stub `EventBus` for writers built outside `AppContainer::new`.
+///
+/// WHY a single module-level definition: `clippy::items_after_statements`
+/// fires on inline `struct NoopBus` declarations inside `setup` (watch path)
+/// and `build_container`. Hoisting once removes the lint and consolidates
+/// the shell-local stub. The shared `perima_db::test_utils::NoopBus` is
+/// gated behind the `test-utils` feature and not available to production
+/// builds — see #119/#125 for long-term consolidation.
+struct LocalNoopBus;
+impl EventBus for LocalNoopBus {
+    fn emit(&self, _: &perima_core::AppEvent) -> Result<(), perima_core::CoreError> {
+        Ok(())
+    }
+}
+
+/// Tuple returned by [`build_container`] — collapsed via type alias to
+/// satisfy `clippy::type_complexity`.
+type BuildContainerOutput = (
+    Arc<AppContainer>,
+    SqliteWriterHandle,
+    Arc<SqliteTagRepository>,
+    Arc<SqliteMetadataRepository>,
+    Arc<SqliteSearchRepository>,
+);
+
 /// Boxed error type used by [`run`].
 ///
 /// WHY: the `run()` body assembles errors from three distinct origins —
@@ -144,14 +169,8 @@ pub fn run() -> Result<(), RunError> {
             // handler fires — events originate only from
             // `DebouncedWatcher` which only runs while `start_watch`
             // has been invoked.
-            struct WatchNoopBus;
-            impl EventBus for WatchNoopBus {
-                fn emit(&self, _: &perima_core::AppEvent) -> Result<(), perima_core::CoreError> {
-                    Ok(())
-                }
-            }
             let watch_writer =
-                SqliteWriter::start(&db_path, Arc::new(WatchNoopBus) as Arc<dyn EventBus>)
+                SqliteWriter::start(&db_path, Arc::new(LocalNoopBus) as Arc<dyn EventBus>)
                     .map_err(|e| format!("watch writer: {e}"))?;
             let watch_reads = ReadPool::open(&db_path).map_err(|e| format!("watch pool: {e}"))?;
             let watch_file_repo = Arc::new(SqliteFileRepository::new(
@@ -213,28 +232,13 @@ pub fn run() -> Result<(), RunError> {
 fn build_container(
     db_path: &Path,
     handlers: Vec<Box<dyn EventHandler>>,
-) -> Result<
-    (
-        Arc<AppContainer>,
-        SqliteWriterHandle,
-        Arc<SqliteTagRepository>,
-        Arc<SqliteMetadataRepository>,
-        Arc<SqliteSearchRepository>,
-    ),
-    perima_core::CoreError,
-> {
+) -> Result<BuildContainerOutput, perima_core::CoreError> {
     // WHY a `NoopBus` to the writer: the writer's after-COMMIT emission
     // path is scaffolded but `AppEvent` emission is handled by
     // `AppContainer`'s `Bus` (Batch E). Batch E's `async-broadcast`
     // will re-plumb this once the single-construction-site invariant is
     // relaxed. Spec §§3.3 + 4.8 (A4.8 first bullet).
-    struct NoopBus;
-    impl EventBus for NoopBus {
-        fn emit(&self, _: &perima_core::AppEvent) -> Result<(), perima_core::CoreError> {
-            Ok(())
-        }
-    }
-    let writer_bus: Arc<dyn EventBus> = Arc::new(NoopBus);
+    let writer_bus: Arc<dyn EventBus> = Arc::new(LocalNoopBus);
     let writer = SqliteWriter::start(db_path, writer_bus)?;
     let reads = ReadPool::open(db_path)?;
 

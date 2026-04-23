@@ -33,7 +33,7 @@ pub struct AppState {
     /// (`run_scan_inner`, `list_files_inner`, `list_volumes_inner`) still
     /// open short-lived per-call connections rooted at this directory.
     /// Remove once those sites are fully ported (tracked as post-Batch-B
-    /// cleanup; see spec §5 risk mitigation "additive AppState").
+    /// cleanup; see spec §5 risk mitigation "additive `AppState`").
     pub data_dir: PathBuf,
     /// Stable device identifier.
     pub device_id: DeviceId,
@@ -61,7 +61,7 @@ pub struct AppState {
     /// one of the `UseCase` fields on this container.
     ///
     /// WHY `Arc<AppContainer>`: `AppContainer` is already internally
-    /// `Arc`-shared across its UseCase fields (see `perima_app::container`).
+    /// `Arc`-shared across its `UseCase` fields (see `perima_app::container`).
     /// Wrapping the container itself in an `Arc` lets Tauri's
     /// `manage(state)` move the value without forcing a clone per command
     /// dispatch; every command then accesses `state.container.*` through
