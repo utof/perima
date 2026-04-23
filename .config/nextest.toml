@@ -2,11 +2,20 @@
 # https://nexte.st/docs/configuration/
 
 [profile.default]
-# Flag any test as "slow" after 60s and terminate after two slow periods
-# (120s total per test). Rationale: the slowest clean proptest in this
-# repo (fts_consistent_under_tag_churn) runs ~14s. Anything past ~60s is
-# a sign of lock contention or deadlock, not legitimate compute.
-# nextest 0.9.133 lacks a CLI `--slow-timeout` flag, but honors this
-# config key — keeps `timeout NNN cargo nextest ...` wrappers from
-# killing the whole suite on a single hang.
+# Default: flag a test as "slow" after 40s and terminate after two slow
+# periods (80s total per test). Rationale: the slowest clean test in
+# perima-{db,app,cli,core,fs,hash,media} is ~14s (fts proptest). Past
+# 40s is a sign of lock contention or deadlock, not legitimate compute.
+# Per-package overrides below relax this for crates with legitimately
+# slow tests (perima-desktop = real Tauri/scan/thumbnail work).
 slow-timeout = { period = "40s", terminate-after = 2 }
+
+# perima-desktop integration tests (`crates/desktop/tests/commands_test.rs`)
+# do real end-to-end scan + metadata + thumbnail work via the `_inner`
+# helpers. On macOS CI runners these can take 60-90s legitimately; per
+# CLAUDE.md baseline `cargo nextest run -p perima-desktop` is 120-300s
+# (Tauri compile + slow tests). Bumping to 90s × 2 = 180s before kill.
+# The deadlock-detection signal stays at 80s for every other crate.
+[[profile.default.overrides]]
+filter = 'package(perima-desktop)'
+slow-timeout = { period = "90s", terminate-after = 2 }
