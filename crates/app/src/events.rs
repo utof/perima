@@ -32,16 +32,11 @@ pub trait EventHandler: Send + 'static {
 }
 
 /// Run the recv loop for a single handler. Spawned by
-/// `AppContainer::new`.
+/// [`crate::container::AppContainer::new`] (Batch E Task 6).
 ///
 /// Exits when the bus closes (all senders dropped — typically
 /// container shutdown). On `Overflowed(n)` from the receiver, logs +
 /// continues. On panic inside `handle`, logs + continues to next event.
-///
-/// WHY `dead_code` allow: `recv_loop` is `pub(crate)` and its only
-/// caller will be `AppContainer::new` in Task 6 (not yet landed).
-/// Remove this allow once Task 6 wires it up.
-#[allow(dead_code)]
 pub(crate) async fn recv_loop(
     name: &'static str,
     mut handler: Box<dyn EventHandler>,

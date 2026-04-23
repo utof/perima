@@ -13,44 +13,16 @@
 //! shell-local in both CLI and Desktop.
 
 use crate::events::EventHandler;
-use perima_core::{AppEvent, CoreError, EventBus};
+use perima_core::AppEvent;
 
 /// Logs every application event at INFO level via `tracing`.
 ///
 /// WHY `Default` + `Debug`: wire-up sites construct this with
-/// `Arc::new(LogEventHandler)` today; derived `Default` keeps the
+/// `Box::new(LogEventHandler)` today; derived `Default` keeps the
 /// zero-field shape future-proof, and `Debug` makes the handler
 /// printable inside `AppContainer` diagnostics without special-casing.
 #[derive(Debug, Default)]
 pub struct LogEventHandler;
-
-impl EventBus for LogEventHandler {
-    fn emit(&self, event: &AppEvent) -> Result<(), CoreError> {
-        match event {
-            AppEvent::File(file_event) => {
-                tracing::info!(event = ?file_event, "file event");
-            }
-            AppEvent::ScanCompleted {
-                volume,
-                files_new,
-                files_seen,
-                duration_ms,
-            } => {
-                tracing::info!(
-                    ?volume,
-                    files_new,
-                    files_seen,
-                    duration_ms,
-                    "scan completed"
-                );
-            }
-            AppEvent::IndexInvalidated { reason } => {
-                tracing::info!(?reason, "index invalidated");
-            }
-        }
-        Ok(())
-    }
-}
 
 #[async_trait::async_trait]
 impl EventHandler for LogEventHandler {
@@ -64,10 +36,9 @@ impl EventHandler for LogEventHandler {
         // inside the AppEvent::File arm.
         match event {
             AppEvent::File(file_event) => {
-                // WHY verbatim from EventBus::emit: preserves the
-                // `event = ?file_event` field name already established
-                // by the pre-coexistence impl. Do NOT change field names
-                // or log level without a coordinated rename in both impls.
+                // WHY `event = ?file_event` field name: preserves the
+                // log schema the pre-Batch-E `EventBus::emit` impl
+                // established. Downstream log consumers may rely on it.
                 tracing::info!(event = ?file_event, "file event");
             }
             AppEvent::ScanCompleted {
@@ -97,49 +68,50 @@ mod tests {
     use perima_core::{FileEvent, InvalidationReason, MediaPath, VolumeId};
     use uuid::Uuid;
 
-    #[test]
-    fn log_handler_never_errors_on_file_created() {
-        let handler = LogEventHandler;
+    #[tokio::test]
+    async fn log_handler_handles_file_created() {
+        let mut handler = LogEventHandler;
         let event = AppEvent::File(FileEvent::Created {
             path: MediaPath::new("foo.txt"),
             volume: VolumeId(Uuid::nil()),
         });
-        assert!(handler.emit(&event).is_ok());
+        // `handle` returns (); success = no panic.
+        handler.handle(event).await;
     }
 
-    #[test]
-    fn log_handler_never_errors_on_file_renamed() {
+    #[tokio::test]
+    async fn log_handler_handles_file_renamed() {
         // WHY `LogEventHandler` (not `::default()`): clippy's
         // `default_constructed_unit_structs` flags the latter on zero-field
         // structs. The derived `Default` still matters for symmetry with
         // future non-unit shapes and for `#[derive]` consumers.
-        let handler = LogEventHandler;
+        let mut handler = LogEventHandler;
         let event = AppEvent::File(FileEvent::Renamed {
             from: MediaPath::new("a.txt"),
             to: MediaPath::new("b.txt"),
             volume: VolumeId(Uuid::nil()),
         });
-        assert!(handler.emit(&event).is_ok());
+        handler.handle(event).await;
     }
 
-    #[test]
-    fn log_handler_never_errors_on_scan_completed() {
-        let handler = LogEventHandler;
+    #[tokio::test]
+    async fn log_handler_handles_scan_completed() {
+        let mut handler = LogEventHandler;
         let event = AppEvent::ScanCompleted {
             volume: VolumeId(Uuid::nil()),
             files_seen: 10,
             files_new: 3,
             duration_ms: 500,
         };
-        assert!(handler.emit(&event).is_ok());
+        handler.handle(event).await;
     }
 
-    #[test]
-    fn log_handler_never_errors_on_index_invalidated() {
-        let handler = LogEventHandler;
+    #[tokio::test]
+    async fn log_handler_handles_index_invalidated() {
+        let mut handler = LogEventHandler;
         let event = AppEvent::IndexInvalidated {
             reason: InvalidationReason::TagsChanged,
         };
-        assert!(handler.emit(&event).is_ok());
+        handler.handle(event).await;
     }
 }

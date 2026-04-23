@@ -36,7 +36,7 @@ pub mod telemetry;
 pub mod volume;
 
 pub use bus::Bus;
-pub use container::{AppContainer, AppDeps, CompositeEventBus};
+pub use container::{AppContainer, AppDeps};
 pub use events::EventHandler;
 pub use metadata::{MetadataCommand, MetadataOutput, MetadataUseCase};
 pub use scan::{
