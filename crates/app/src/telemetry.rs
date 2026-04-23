@@ -12,6 +12,7 @@
 //! would force `perima-app` to depend on a concrete adapter. It stays
 //! shell-local in both CLI and Desktop.
 
+use crate::events::EventHandler;
 use perima_core::{AppEvent, CoreError, EventBus};
 
 /// Logs every application event at INFO level via `tracing`.
@@ -48,6 +49,45 @@ impl EventBus for LogEventHandler {
             }
         }
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl EventHandler for LogEventHandler {
+    fn name(&self) -> &'static str {
+        "log_event_handler"
+    }
+
+    async fn handle(&mut self, event: AppEvent) {
+        // WHY match on outer kind first: log statement varies per
+        // variant; the existing FileEvent log shape is preserved
+        // inside the AppEvent::File arm.
+        match event {
+            AppEvent::File(file_event) => {
+                // WHY verbatim from EventBus::emit: preserves the
+                // `event = ?file_event` field name already established
+                // by the pre-coexistence impl. Do NOT change field names
+                // or log level without a coordinated rename in both impls.
+                tracing::info!(event = ?file_event, "file event");
+            }
+            AppEvent::ScanCompleted {
+                volume,
+                files_new,
+                files_seen,
+                duration_ms,
+            } => {
+                tracing::info!(
+                    ?volume,
+                    files_new,
+                    files_seen,
+                    duration_ms,
+                    "scan completed"
+                );
+            }
+            AppEvent::IndexInvalidated { reason } => {
+                tracing::info!(?reason, "index invalidated");
+            }
+        }
     }
 }
 
