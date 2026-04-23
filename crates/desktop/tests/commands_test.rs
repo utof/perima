@@ -111,7 +111,7 @@ async fn scan_indexes_files() {
 
 /// After a successful scan, `list_files_inner` must return all 3 records.
 ///
-/// WHY ignored on CI: hits the SQLite lock-order inversion in `unixClose` vs
+/// WHY ignored on CI: hits the `SQLite` lock-order inversion in `unixClose` vs
 /// `unixLock`-from-`sqlite3WalClose` (GH #131). Test creates writer + read
 /// pool against a single DB; at end-of-test the writer thread + pool drop
 /// concurrently and the lock-order cycle deadlocks. Tracked locally via gdb
@@ -146,7 +146,7 @@ async fn list_files_after_scan() {
 /// `list_files_with_metadata_inner` helper must return at least one row
 /// with metadata fields populated from the stored record.
 ///
-/// WHY ignored on CI: same SQLite lock-order deadlock as
+/// WHY ignored on CI: same `SQLite` lock-order deadlock as
 /// `list_files_after_scan` above. See GH #131.
 #[tokio::test]
 #[ignore = "GH #131 — SQLite lock-order inversion deadlocks under concurrent Connection drops"]
@@ -254,7 +254,7 @@ async fn list_volumes_after_scan() {
 /// disk under `<data_dir>/thumbnails/` — the same subtree the Tauri
 /// asset-protocol scope exposes.
 ///
-/// WHY ignored on CI: same SQLite lock-order deadlock as
+/// WHY ignored on CI: same `SQLite` lock-order deadlock as
 /// `list_files_after_scan` above. See GH #131.
 #[tokio::test]
 #[ignore = "GH #131 — SQLite lock-order inversion deadlocks under concurrent Connection drops"]
