@@ -404,22 +404,13 @@ pub async fn run_scan_inner_with_metadata(
     )
     .await;
 
-    // WHY drop ALL sender-holding values before `writer.join()`:
-    // `SqliteWriterHandle::join` waits for the writer thread to exit,
-    // which only happens when ALL `Sender<WriteCmd>` clones drop and
-    // the channel closes. `file_repo`, `vol_repo`, and `sentinel_repo`
-    // each hold one sender clone via `writer.sender()` calls above;
-    // `on_persist` borrows `sentinel_repo`. Dropping only `vol_repo`
-    // (the previous bug) left two senders alive → writer thread parked
-    // in `flume::Receiver::recv` forever → `pthread_join` on writer
-    // hangs the test. Reproduced 2026-04-23 with gdb backtrace
-    // (Thread 18 → futex on writer's TID; Thread 17 → flume recv).
-    // The `on_persist` closure is `Copy` (only borrows `&sentinel_repo`)
-    // so it doesn't need explicit `drop`; its borrow on `sentinel_repo`
-    // ends with the last use inside `run_scan_live` above.
-    drop(file_repo);
-    drop(vol_repo);
-    drop(sentinel_repo);
+    // WHY plain `writer.join()` (no explicit repo drops): the handle's
+    // Drop / join sends `WriteCmd::Shutdown` directly, so the writer
+    // thread exits regardless of how many `Sender<WriteCmd>` clones
+    // (held by `file_repo` / `vol_repo` / `sentinel_repo`) are still in
+    // scope. Pre-Shutdown, this site needed an N-deep `drop(repo)`
+    // ladder matching how many senders had been cloned — the magic-drop
+    // antipattern that produced GH #131.
     writer.join();
 
     result

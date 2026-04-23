@@ -40,6 +40,22 @@ pub enum WriteCmd {
     File(FileWriteCmd),
     /// Search-repo writes (populated Task 6).
     Search(SearchWriteCmd),
+    /// Cooperative shutdown signal — when the writer thread receives
+    /// this it exits its loop. Sent by `SqliteWriterHandle::join` and
+    /// the `Drop` impl.
+    ///
+    /// WHY explicit shutdown signal: prior to its introduction,
+    /// shutdown depended on every cloned `Sender<WriteCmd>` (held by
+    /// repos / handlers) being dropped before `writer.join()` was
+    /// called — otherwise the channel never closed and the writer
+    /// parked in `recv` forever, hanging `pthread_join`. The pattern
+    /// produced "magic-drop" callsites that listed N explicit drops
+    /// matching how many senders the function had cloned (e.g. GH
+    /// #131's 3-of-3 fix in `run_scan_inner_with_metadata`). With the
+    /// explicit `Shutdown` variant, sender clones become harmless —
+    /// after the writer breaks, subsequent sends fail with
+    /// `Disconnected` instead of deadlocking on shutdown.
+    Shutdown,
 }
 
 /// Volume-repo write commands. Populated by Task 2.
