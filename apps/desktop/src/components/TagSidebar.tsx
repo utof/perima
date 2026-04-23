@@ -1,4 +1,5 @@
 import type { Tag } from "../bindings";
+import { useUiStore } from "../stores/ui";
 
 interface TagSidebarProps {
   /** Full tag list (all known tags). */
@@ -7,31 +8,34 @@ interface TagSidebarProps {
   counts: Record<string, number>;
   /** Total visible file count (displayed on the "All" row). */
   totalCount: number;
-  selectedTagId: string | null;
-  onSelect: (tagId: string | null) => void;
   /**
-   * Rendering mode (optional; defaults to "all" so existing callers
-   * that don't pass this prop continue to work):
+   * Rendering mode:
    * - "all": show every tag in `tags` (no search active).
    * - "facets": show only tags with counts \> 0 (search active; the
    *   sidebar becomes a facet panel over the current results).
    */
-  mode?: "all" | "facets";
+  mode: "all" | "facets";
+  // selectedTagId + onSelect REMOVED — store-driven now.
 }
 
 /**
  * Left-column filter: "All" + per-tag rows with attachment counts and
  * aria-pressed toggle state. Single-select for v0.5.x; multi-select
  * tracked as post-v1 per issue #32.
+ *
+ * WHY store-driven selectedTagId (not props): Batch H Task 9 — removing
+ * the prop threading from IndexRoute keeps IndexRoute clean and TagSidebar
+ * self-contained.
  */
 export default function TagSidebar({
   tags,
   counts,
   totalCount,
-  selectedTagId,
-  onSelect,
-  mode = "all",
+  mode,
 }: TagSidebarProps) {
+  const selectedTagId = useUiStore((s) => s.selectedTagId);
+  const setSelectedTagId = useUiStore((s) => s.setSelectedTagId);
+
   const visibleTags =
     mode === "facets"
       ? tags.filter((t) => (counts[t.id] ?? 0) > 0)
@@ -46,7 +50,7 @@ export default function TagSidebar({
         label="All"
         count={totalCount}
         active={selectedTagId === null}
-        onClick={() => { onSelect(null); }}
+        onClick={() => { setSelectedTagId(null); }}
       />
       {mode === "facets" && visibleTags.length === 0 && (
         <p className="px-2 py-1.5 text-xs text-gray-500 italic">
@@ -59,7 +63,7 @@ export default function TagSidebar({
           label={t.name}
           count={counts[t.id] ?? 0}
           active={selectedTagId === t.id}
-          onClick={() => { onSelect(t.id); }}
+          onClick={() => { setSelectedTagId(t.id); }}
         />
       ))}
     </nav>

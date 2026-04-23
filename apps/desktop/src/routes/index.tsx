@@ -23,8 +23,7 @@ export default function IndexRoute() {
   const { data: files = [], isLoading: filesLoading } = useFiles(100);
   const { data: tags = [] } = useTags();
   const viewMode = useUiStore((s) => s.viewMode);
-  const selectedTagId = useUiStore((s) => s.selectedTagId);
-  const setSelectedTagId = useUiStore((s) => s.setSelectedTagId);
+  const selectedTagId = useUiStore((s) => s.selectedTagId); // WHY kept: still used by composeVisible below
   // WHY debouncedQuery (not searchQuery): per spec §5.11 dual-field store,
   // only the post-300ms-debounce sanitised query drives `useSearch`. The
   // raw `searchQuery` field exists for the input value binding only.
@@ -50,8 +49,6 @@ export default function IndexRoute() {
           tags={tags}
           counts={facetCounts}
           totalCount={searchActive ? visibleFiles.length : files.length}
-          selectedTagId={selectedTagId}
-          onSelect={(id) => { setSelectedTagId(id); }}
           mode={searchActive ? "facets" : "all"}
         />
       )}
