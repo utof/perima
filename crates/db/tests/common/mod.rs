@@ -1,7 +1,13 @@
 #![allow(clippy::unwrap_used)] // WHY: integration test helpers; unwrap panics signal bugs.
-#![allow(unreachable_pub)] // WHY: pub fn in test-binary-local mod; unreachable from any wider crate is by design.
+#![allow(unreachable_pub)]
+// WHY: pub fn in test-binary-local mod; unreachable from any wider crate is by design.
 #![allow(dead_code)]
-// WHY: helpers are consumed by 3 sibling integration-test binaries (search_semantics, search_triggers, search_proptests); each binary compiles common/mod.rs but only uses a subset. Without this, dead_code (workspace -D warnings) fires per binary for helpers used elsewhere. Workaround per rust-lang/rust#46379. Keep it permanent — adding a 4th test binary later means the same problem recurs.
+// WHY: helpers are consumed by 3 sibling integration-test binaries
+// (search_semantics, search_triggers, search_proptests); each binary
+// compiles common/mod.rs but only uses a subset. Without this, dead_code
+// (-D warnings) fires per binary for helpers used elsewhere. Workaround
+// per rust-lang/rust#46379. Keep it permanent — a 4th test binary later
+// means the same problem recurs.
 
 //! Shared raw-SQL helpers for `crates/db/tests/search_*.rs` integration
 //! tests. Extracted from `crates/db/src/search_repo.rs::tests` in Batch G

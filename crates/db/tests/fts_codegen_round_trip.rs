@@ -53,8 +53,7 @@ fn shadow_hash(slot: usize, is_b: bool) -> String {
     format!("{high:02x}{}", "0".repeat(62))
 }
 
-/// Open a direct raw connection for seeding. Mirrors the
-/// `search_repo::tests::seed_conn` helper.
+/// Open a direct raw connection for seeding. Mirrors `common::seed_conn`.
 ///
 /// WHY raw connection: each op below is a single autocommit `UPDATE` /
 /// `INSERT` that exercises an FTS trigger in isolation. The writer
@@ -202,7 +201,7 @@ fn detach_tag_raw(conn: &Connection, hash: &str, tag_name: &str) {
 }
 
 /// Build a tempfile-on-disk DB + writer + read pool + search repo.
-/// Mirrors `search_repo::tests::test_db`.
+/// Mirrors `common::test_db`.
 fn test_db() -> (
     tempfile::TempDir,
     std::path::PathBuf,
