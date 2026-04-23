@@ -20,12 +20,15 @@ slow-timeout = { period = "40s", terminate-after = 2 }
 filter = 'package(perima-desktop)'
 slow-timeout = { period = "90s", terminate-after = 2 }
 
-# perima-db FTS5 proptests intermittently hit the SQLite lock-order
-# inversion documented in GH #131 (within-test internal-thread race).
-# Local reproduction: ~20% per-run hang. `cargo nextest run`'s
+# perima-db tests intermittently hit the SQLite lock-order inversion
+# documented in GH #131 (writer + ReadPool drop race within a single
+# test process). Local reproduction: ~20% per-run hang on the FTS5
+# proptests; macOS CI also surfaced it on plain repo tests like
+# `tag_repo::tests::upsert_tag_inserts_new`. cargo nextest's
 # process-per-test isolation eliminates the cross-test class but not
-# the within-test class. Retry up to 2 times → effective failure rate
-# below 1%. Removal pending GH #131 production fix.
+# the within-test class. Retry up to 2 times → effective per-test
+# failure rate <1% (0.2³ if independent). Removal pending GH #131
+# production fix or migration off the per-test writer+pool fixture.
 [[profile.default.overrides]]
-filter = 'package(perima-db) and (test(fts_matches_ground_truth_under_soft_delete_churn) or test(fts_consistent_under_tag_churn))'
+filter = 'package(perima-db)'
 retries = 2
