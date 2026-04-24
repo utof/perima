@@ -84,16 +84,25 @@ impl MetadataExtractor for ImageExtractor {
 /// Returns `(None, None, None)` if the file has no EXIF segment, the
 /// segment is malformed, or the individual fields are absent. A missing
 /// EXIF block is expected for PNGs and many camera-exported JPEGs —
-/// treating it as an error would be noisy. Any I/O or parser error is
-/// traced at `debug` level.
+/// treating it as an error would be noisy. I/O errors (file-open failures,
+/// permission errors, symlink loops) are traced at `warn`; EXIF parse
+/// failures are traced at `debug` (normal for many containers).
 fn read_exif(path: &Path) -> (Option<String>, Option<String>, Option<String>) {
     let ms = match nom_exif::MediaSource::file_path(path) {
         Ok(ms) => ms,
         Err(err) => {
-            tracing::debug!(
+            // WHY warn (not debug): MediaSource::file_path failure means
+            // we couldn't open the file at all (permissions, I/O, symlink
+            // loop) — semantically distinct from "file opens fine but has
+            // no EXIF block" (the parse-error arm below stays at debug).
+            // GH #110: surface real I/O bugs in logs without forcing
+            // RUST_LOG=debug. The trailing parenthetical clarifies that
+            // EXIF extraction is being skipped (the outer `extract` still
+            // returns metadata with empty EXIF fields).
+            tracing::warn!(
                 path = %path.display(),
                 error = %err,
-                "nom-exif: could not open file as MediaSource",
+                "nom-exif: could not open file as MediaSource (likely I/O — skipping EXIF for this file)",
             );
             return (None, None, None);
         }
