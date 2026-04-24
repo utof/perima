@@ -29,10 +29,11 @@ fn debug_report_writes_header_and_active_log() {
     );
     assert!(body.contains("perima version:"), "version line missing");
     assert!(body.contains("Git SHA:"), "git sha line missing");
-    assert!(
-        body.contains("=== active log: perima.log ==="),
-        "active divider missing"
-    );
+    // WHY: divider is "=== active log: <name> ===" where <name> is the
+    // most-recent rolling-appender file ("perima.YYYY-MM-DD-HH") OR "(none)"
+    // on a cold-start where no log file exists yet (test runs before any
+    // log line is emitted to disk by the non-blocking appender flush).
+    assert!(body.contains("=== active log: "), "active divider missing");
     assert!(
         body.contains("=== end of report ==="),
         "footer divider missing"
