@@ -275,11 +275,6 @@ pub fn init_subscriber(opts: SubscriberOpts) -> Result<WorkerGuard, CoreError> {
 /// Truncate a string to `n` characters (UTF-8 safe). Used by
 /// `#[tracing::instrument(fields(query = %truncated(...)))]` so user-input
 /// strings can't bloat span fields.
-///
-/// WHY `#[allow(dead_code)]`: Task I-5 wires `truncated` into `SearchUseCase`
-/// instrument; until then clippy flags it unused because `pub(crate)` is
-/// not visible outside the crate to the usage checker.
-#[allow(dead_code)]
 pub(crate) fn truncated(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }

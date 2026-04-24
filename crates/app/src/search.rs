@@ -14,6 +14,8 @@ use std::time::Instant;
 
 use perima_core::{CoreError, EventBus, SearchHit, SearchRepository};
 
+use crate::telemetry::truncated;
+
 /// Inputs to [`SearchUseCase::execute`].
 #[derive(Debug, Clone)]
 pub enum SearchCommand {
@@ -34,6 +36,33 @@ pub enum SearchCommand {
     /// drifts (e.g. after a crash mid-trigger). Mirrors CLI's
     /// `perima search --rebuild` and Desktop's `search_rebuild` command.
     Rebuild,
+}
+
+impl SearchCommand {
+    /// Short kind name for tracing spans. WHY: enum Debug print is too noisy;
+    /// `?cmd` would dump full bodies into spans. (Batch I Task 5.)
+    pub(crate) const fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Query { .. } => "query",
+            Self::Rebuild => "rebuild",
+        }
+    }
+
+    /// Query string for the span field; empty for non-query variants.
+    pub(crate) const fn query_str(&self) -> &str {
+        match self {
+            Self::Query { q, .. } => q.as_str(),
+            Self::Rebuild => "",
+        }
+    }
+
+    /// Effective limit for the span field; 0 for non-query variants.
+    pub(crate) fn limit_val(&self) -> u32 {
+        match self {
+            Self::Query { limit, .. } => limit.unwrap_or(50),
+            Self::Rebuild => 0,
+        }
+    }
 }
 
 /// Output of a successful search or rebuild.
@@ -92,6 +121,12 @@ impl SearchUseCase {
     // impl without touching callers. Removing `async` now would force a
     // caller-side churn when the trait gains async variants.
     #[allow(clippy::unused_async)]
+    #[tracing::instrument(
+        name = "search",
+        skip(self, cmd),
+        fields(search_kind = cmd.kind_str(), query = %truncated(cmd.query_str(), 64), limit = cmd.limit_val()),
+        err(level = "warn", Display)
+    )]
     pub async fn execute(&self, cmd: SearchCommand) -> Result<SearchOutput, CoreError> {
         // WHY touch self.events: held for the Batch-E event-emit path;
         // reference the field so `unused` lints don't fire before

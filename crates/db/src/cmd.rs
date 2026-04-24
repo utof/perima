@@ -58,6 +58,21 @@ pub enum WriteCmd {
     Shutdown,
 }
 
+impl WriteCmd {
+    /// Short kind name for tracing spans. WHY: enum Debug print is too noisy;
+    /// `?cmd` would dump full bodies into spans. (Batch I Task 5.)
+    pub(crate) const fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Volume(_) => "volume",
+            Self::Tag(_) => "tag",
+            Self::Metadata(_) => "metadata",
+            Self::File(_) => "file",
+            Self::Search(_) => "search",
+            Self::Shutdown => "shutdown",
+        }
+    }
+}
+
 /// Volume-repo write commands. Populated by Task 2.
 ///
 /// WHY `ReplyTx<T>` carries `Debug`: `flume::Sender` implements `Debug`

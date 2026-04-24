@@ -98,6 +98,33 @@ impl std::fmt::Debug for ScanCommand {
     }
 }
 
+impl ScanCommand {
+    /// Short kind name for tracing spans. WHY: enum Debug print is too noisy;
+    /// `?cmd` would dump full bodies into spans. (Batch I Task 5.)
+    pub(crate) const fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Full(_) => "full",
+            Self::Rescan { .. } => "rescan",
+        }
+    }
+
+    /// Display the path inside any variant. WHY: `Full(FullScan { path, .. })`
+    /// and `Rescan { path, .. }` both have a path; this surfaces it for the span.
+    pub(crate) fn path_display(&self) -> impl std::fmt::Display + '_ {
+        // PathRef wrapping needed to return a single concrete Display from both arms.
+        struct PathRef<'a>(&'a std::path::Path);
+        impl std::fmt::Display for PathRef<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.display().fmt(f)
+            }
+        }
+        match self {
+            Self::Full(f) => PathRef(&f.path),
+            Self::Rescan { path, .. } => PathRef(path.as_path()),
+        }
+    }
+}
+
 /// Payload for [`ScanCommand::Full`].
 ///
 // WHY allow struct_excessive_bools: each flag corresponds to a distinct
@@ -304,6 +331,12 @@ impl ScanUseCase {
     /// - `CoreError::Io` from the canonicalization + walk path.
     /// - Propagates `CoreError` from the scanner, hasher, volume
     ///   detection, and repository adapters.
+    #[tracing::instrument(
+        name = "scan",
+        skip(self, cmd),
+        fields(scan_kind = cmd.kind_str(), path = %cmd.path_display()),
+        err(level = "warn", Display)
+    )]
     pub async fn execute(&self, cmd: ScanCommand) -> Result<ScanReport, CoreError> {
         match cmd {
             ScanCommand::Full(full) => self.execute_full(full).await,

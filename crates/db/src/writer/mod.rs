@@ -235,6 +235,11 @@ fn run_writer_loop(mut conn: Connection, receiver: Receiver<WriteCmd>, bus: Arc<
     tracing::debug!("sqlite writer actor exiting (channel disconnected)");
 }
 
+#[tracing::instrument(
+    name = "write_cmd",
+    skip(conn, cmd, bus),
+    fields(cmd_kind = cmd.kind_str())
+)]
 fn dispatch(conn: &mut Connection, cmd: WriteCmd, bus: &Arc<dyn EventBus>) {
     // WHY the match-level dispatch: each per-repo handler owns its own
     // commit + event-emit pattern. The shared shape each handler must
