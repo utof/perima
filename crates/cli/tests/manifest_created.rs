@@ -39,6 +39,13 @@ const fn bin() -> &'static str {
 }
 
 #[test]
+// WHY ignore on Windows: see #138. Concurrent CLI test binaries write to the
+// shared C:\.perima\manifest.db (volume root C:\ is writable on GHA runners),
+// causing a write race that strips our 3 rows from the manifest by the time
+// this test asserts. Linux/macOS are unaffected (/.perima/ is root-only;
+// manifest write silently fails and the test takes its else-branch which
+// validates the more interesting graceful-degradation contract).
+#[cfg_attr(target_os = "windows", ignore = "see #138 — windows manifest race")]
 fn manifest_db_created_after_scan() {
     let td = tempfile::tempdir().expect("tempdir");
     let env_dir = tempfile::tempdir().expect("env dir");
