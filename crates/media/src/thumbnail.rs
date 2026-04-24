@@ -493,43 +493,32 @@ mod tests {
     }
 
     #[test]
-    // WHY cfg_attr ignore on debug: in unoptimized builds the scratch-buffer +
-    // CPU-dispatch-cache savings from Resizer reuse are invisible against the
-    // ~450ms-per-iter pixel-processing cost (measured 1.01x vs 1.06x release).
-    // The 5% threshold only holds when SIMD is active (release / opt-level ≥ 2).
-    // In release CI: `cargo nextest run --release -p perima-media` covers it.
-    // WHY not #[ignore] unconditionally: this was the pre-Batch-J state, and it
-    // referenced `cargo test` (banned via scripts/no-cargo-test.sh). Removing
-    // the unconditional ignore means release CI exercises the assertion.
-    #[cfg_attr(
-        debug_assertions,
-        ignore = "amortization only measurable with SIMD (release builds); \
-                  run: cargo nextest run --release -p perima-media \
-                  resize_only_bench_baseline_vs_reused_proves_amortization"
-    )]
     #[allow(clippy::unwrap_used, clippy::print_stderr)]
     fn resize_only_bench_baseline_vs_reused_proves_amortization() {
-        // Regression test for GH #111 + Batch J: assert that reusing one
-        // Resizer across N iterations is at least 5% faster than allocating a
-        // fresh one per call.
-        //
-        // WHY 5% (vs audit's 10% target): CI-flake margin. The expected win on
-        // 1920×1080 is dominated by SIMD CPU-extension dispatch cache reuse +
-        // scratch-buffer reuse — fast_image_resize README benchmarks suggest
-        // 50%+ pure-resize speedup, but per-iter image-copy overhead dilutes
-        // that. 5% is a comfortable lower bound in release; if CI variance
-        // exceeds ~3% (measured per spec §7), drop to 2% or convert to
-        // print-only and file a follow-up.
+        // Print-only regression test for GH #111 + Batch J. Runs both arms
+        // (baseline = fresh `Resizer::new()` per iter; reused = single shared
+        // Resizer) and prints the speedup ratio. NO assertion — the signal is
+        // currently dominated by `DynamicImage::clone()` (~6 MB memcpy/iter for
+        // 1920×1080 RGB) + WebP encode, and per a 15-run release reproduction
+        // the per-call-vs-reused ratio swings 0.89x–1.06x (27% flake rate
+        // against any ≥1.05 threshold). Per spec §7 option B + §8 risk #4 the
+        // assertion is converted to print-only until the test is restructured
+        // to isolate `Resizer::resize` cost from clone+encode overhead.
+        // Follow-up tracked: GH #135 for the test-restructuring
+        // investigation (isolate Resizer cost from clone+encode). Baseline
+        // numbers in the
+        // eprintln line still let a human spot a regression by reading CI
+        // logs across runs even without an assertion.
         use std::time::Instant;
         // N=20 iters at 1920×1080 keeps total wall-clock <20s in debug and
-        // provides enough samples for a stable 5% speedup signal in release.
+        // provides enough samples for a meaningful eprintln summary.
         const ITERS: u32 = 20;
         let tmp = tempfile::tempdir().unwrap();
         let tgen = ThumbnailGenerator::with_max_size(tmp.path().to_path_buf(), 512);
 
         // 1920×1080 gives a meaningful SIMD workload without hitting the
-        // nextest slow-timeout (40s). 4928×3279 at 50 iters × 2 loops takes
-        // >80s in debug unoptimized builds.
+        // nextest slow-timeout (60s). Larger sources at 50 iters × 2 loops
+        // routinely time out under debug.
         let rgb = image::RgbImage::from_pixel(1920, 1080, image::Rgb([128, 64, 32]));
         let src_dyn = image::DynamicImage::ImageRgb8(rgb);
 
@@ -560,17 +549,8 @@ mod tests {
         eprintln!(
             "resize_only_bench: baseline {ITERS} iters in {baseline_elapsed:?} \
              ({baseline_per_iter:?}/iter); reused {ITERS} iters in {reused_elapsed:?} \
-             ({reused_per_iter:?}/iter); speedup ratio {speedup_ratio:.3}x"
-        );
-
-        // Audit acceptance: ≥10% throughput, conservative lower bound 5%.
-        // speedup_ratio = baseline / reused; ≥1.05 means reused is ≥5% faster.
-        assert!(
-            speedup_ratio >= 1.05,
-            "Resizer reuse should yield ≥5% speedup; got {speedup_ratio:.3}x \
-             (baseline {baseline_elapsed:?}, reused {reused_elapsed:?}). \
-             If CI variance is causing flake, see Batch J spec §7 \
-             (D-3 noise-floor calibration)."
+             ({reused_per_iter:?}/iter); speedup ratio {speedup_ratio:.3}x \
+             (PRINT-ONLY — no assertion until test isolates Resizer cost)"
         );
     }
 
