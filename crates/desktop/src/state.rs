@@ -92,7 +92,7 @@ impl AppState {
     /// invariant — callers that forget to pass `container` get a compile
     /// error rather than a silently missing dependency.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         data_dir: PathBuf,
         device_id: DeviceId,
         metadata_repo: Arc<SqliteMetadataRepository>,
@@ -101,8 +101,10 @@ impl AppState {
         container: Arc<AppContainer>,
         log_guard: tracing_appender::non_blocking::WorkerGuard,
     ) -> Self {
-        // WHY `const` removed: `WorkerGuard` involves heap allocation and a
-        // background-thread spawn — neither is const-constructible. (Batch I Task 4.)
+        // WHY const restored: clippy 1.95's missing_const_for_fn fires here
+        // because the body is purely field assignment — no heap alloc inside
+        // this fn. The earlier WHY ("WorkerGuard blocks const") was wrong:
+        // construction of WorkerGuard happens in the *caller*, not here.
         Self {
             data_dir,
             device_id,
