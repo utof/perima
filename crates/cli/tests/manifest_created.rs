@@ -117,12 +117,30 @@ fn manifest_db_created_after_scan() {
         );
 
         // manifest_files must contain one row per scanned file (3 fixtures).
+        // WHY filter by tempdir basename: on Windows the volume root (C:\) is
+        // writable, so parallel test binaries (scan_persists, scan_with_volumes,
+        // etc.) all share `C:\.perima\manifest.db` and accumulate each other's
+        // rows. On Linux/macOS `/.perima/` is root-only so the manifest write
+        // silently fails and the `else` branch handles it. The tempdir basename
+        // (`.tmpXXXXXX`) is unique per test invocation, so a LIKE filter
+        // isolates this test's rows from concurrent writes.
+        let basename = td
+            .path()
+            .file_name()
+            .expect("tempdir basename")
+            .to_str()
+            .expect("tempdir basename utf8");
+        let pattern = format!("%{basename}%");
         let file_count: i64 = mconn
-            .query_row("SELECT COUNT(*) FROM manifest_files", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM manifest_files WHERE relative_path LIKE ?1",
+                [&pattern],
+                |r| r.get(0),
+            )
             .expect("count manifest_files");
         assert_eq!(
             file_count, 3,
-            "manifest must have 3 file rows, got {file_count}"
+            "manifest must have 3 file rows for this tempdir, got {file_count}"
         );
     } else {
         // Manifest write silently failed (permission denied at the volume root).
