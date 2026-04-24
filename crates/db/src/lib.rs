@@ -9,6 +9,7 @@ pub mod file_repo;
 pub mod manifest;
 pub mod metadata_repo;
 pub mod pool;
+pub mod schema;
 pub mod search_repo;
 pub mod tag_repo;
 pub mod volume_repo;

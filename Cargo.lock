@@ -2730,6 +2730,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "memo-map"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "38d1115007560874e373613744c6fba374c17688327a71c1476d1a5954cc857b"
+
+[[package]]
 name = "memoffset"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2782,6 +2788,16 @@ checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
 dependencies = [
  "mime",
  "unicase",
+]
+
+[[package]]
+name = "minijinja"
+version = "2.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "805bfd7352166bae857ee569628b52bcd85a1cecf7810861ebceb1686b72b75d"
+dependencies = [
+ "memo-map",
+ "serde",
 ]
 
 [[package]]
@@ -3378,7 +3394,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -3388,6 +3403,7 @@ version = "0.6.4"
 dependencies = [
  "async-broadcast",
  "async-trait",
+ "directories",
  "futures",
  "insta",
  "perima-core",
@@ -3405,6 +3421,8 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -3430,6 +3448,8 @@ dependencies = [
  "blake3",
  "chrono",
  "flume",
+ "insta",
+ "minijinja",
  "perima-core",
  "perima-db",
  "proptest",
@@ -3471,6 +3491,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-appender",
  "uuid",
 ]
 
@@ -5052,6 +5073,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "symlink"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7973cce6668464ea31f176d85b13c7ab3bba2cb3b77a2ed26abd7801688010a"
+
+[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5873,6 +5900,19 @@ dependencies = [
  "pin-project-lite",
  "tracing-attributes",
  "tracing-core",
+]
+
+[[package]]
+name = "tracing-appender"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "050686193eb999b4bb3bc2acfa891a13da00f79734704c4b8b4ef1a10b368a3c"
+dependencies = [
+ "crossbeam-channel",
+ "symlink",
+ "thiserror 2.0.18",
+ "time",
+ "tracing-subscriber",
 ]
 
 [[package]]

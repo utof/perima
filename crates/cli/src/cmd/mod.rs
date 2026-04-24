@@ -1,5 +1,6 @@
 //! CLI subcommand modules.
 
+pub(crate) mod debug_report;
 pub(crate) mod format;
 pub(crate) mod ls;
 pub(crate) mod metadata;

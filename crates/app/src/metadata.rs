@@ -80,6 +80,17 @@ pub enum MetadataCommand {
     },
 }
 
+impl MetadataCommand {
+    /// Short kind name for tracing spans. WHY: enum Debug print is too noisy;
+    /// `?cmd` would dump full bodies into spans. (Batch I Task 5.)
+    pub(crate) const fn kind_str(&self) -> &'static str {
+        match self {
+            Self::ListFiles { .. } => "list_files",
+            Self::ListFilesWithMetadata { .. } => "list_files_with_metadata",
+        }
+    }
+}
+
 /// Output of a successful metadata operation.
 #[derive(Debug, Clone)]
 pub enum MetadataOutput {
@@ -147,6 +158,7 @@ impl MetadataUseCase {
     // callers. Removing `async` now would force caller-side churn when
     // the trait gains async variants.
     #[allow(clippy::unused_async)]
+    #[tracing::instrument(name = "metadata", skip(self, cmd), fields(cmd_kind = cmd.kind_str()), err(level = "warn", Display))]
     pub async fn execute(&self, cmd: MetadataCommand) -> Result<MetadataOutput, CoreError> {
         // WHY touch self.events: held for the Batch-E event-emit path;
         // reference the field so `unused` lints don't fire before

@@ -1,0 +1,114 @@
+---
+source: crates/db/src/schema/mod.rs
+assertion_line: 152
+expression: "render_for_source(\"file_metadata\")"
+---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+DROP TRIGGER IF EXISTS search_after_metadata_insert;
+DROP TRIGGER IF EXISTS search_after_metadata_update;
+
+
+
+
+
+CREATE TRIGGER search_after_metadata_insert
+AFTER INSERT ON file_metadata
+WHEN NEW.deleted_at IS NULL
+BEGIN
+INSERT OR IGNORE INTO search_content (blake3_hash, filename, relative_path)
+    SELECT NEW.blake3_hash, fl.relative_path, fl.relative_path
+    FROM file_locations fl
+    WHERE fl.blake3_hash = NEW.blake3_hash AND fl.deleted_at IS NULL
+    ORDER BY fl.first_seen ASC, fl.id ASC LIMIT 1;
+
+    UPDATE search_content
+    SET mime_type    = COALESCE(NEW.mime_type, ''),
+        camera_model = COALESCE(NEW.camera_model, ''),
+        captured_at  = COALESCE(NEW.captured_at, '')
+    WHERE blake3_hash = NEW.blake3_hash;
+END;
+
+
+CREATE TRIGGER search_after_metadata_update
+AFTER UPDATE ON file_metadata
+BEGIN
+UPDATE search_content
+    SET mime_type    = CASE WHEN NEW.deleted_at IS NULL
+                            THEN COALESCE(NEW.mime_type, '')
+                            ELSE '' END,
+        camera_model = CASE WHEN NEW.deleted_at IS NULL
+                            THEN COALESCE(NEW.camera_model, '')
+                            ELSE '' END,
+        captured_at  = CASE WHEN NEW.deleted_at IS NULL
+                            THEN COALESCE(NEW.captured_at, '')
+                            ELSE '' END
+    WHERE blake3_hash = NEW.blake3_hash;
+END;

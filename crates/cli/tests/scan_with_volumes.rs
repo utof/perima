@@ -57,7 +57,11 @@ fn scan_uses_real_volume() {
     run_scan(td.path(), env_dir.path());
 
     let db_path = env_dir.path().join("perima.db");
-    let conn = rusqlite::Connection::open(&db_path).expect("open db");
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .expect("open db");
 
     // The `volumes` table must have at least one row.
     let vol_count: i64 = conn
@@ -111,6 +115,13 @@ fn sentinel_rows_migrated() {
     // the binary create the schema, then poison one row.
     let db_path = env_dir.path().join("perima.db");
     {
+        // WHY #[allow]: this Connection performs an UPDATE so it must be
+        // read-write. The `perima scan` subprocess (writer actor) has
+        // already exited by the time this test code runs, so there is no
+        // concurrent second writable Connection — the GH #131 lock-order-inversion bug
+        // class does not apply. The clippy lint cannot prove the
+        // subprocess-then-direct-Connection sequencing, hence the allow.
+        #[allow(clippy::disallowed_methods)]
         let conn = rusqlite::Connection::open(&db_path).expect("open db for sentinel injection");
         // Pick the first active file_locations row and set its volume_id to
         // the sentinel. LIMIT 1 keeps the test deterministic.
@@ -131,7 +142,11 @@ fn sentinel_rows_migrated() {
 
     // Verify the injection worked.
     {
-        let conn = rusqlite::Connection::open(&db_path).expect("re-open db");
+        let conn = rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("re-open db");
         let sentinel_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM file_locations WHERE volume_id = ?1",
@@ -147,7 +162,11 @@ fn sentinel_rows_migrated() {
     run_scan(td.path(), env_dir.path());
 
     // Step 4: assert no sentinel rows remain.
-    let conn = rusqlite::Connection::open(&db_path).expect("open db after second scan");
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .expect("open db after second scan");
     let sentinel_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM file_locations WHERE volume_id = ?1",

@@ -1,56 +1,75 @@
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import * as api from "../api";
-import { coreErrorMessage } from "../lib/coreError";
-import type { ScanReport } from "../bindings";
-
-/** Props for {@link ScanButton}. */
-interface ScanButtonProps {
-  /**
-   * Called when a scan completes successfully with the result summary and
-   * the absolute path that was scanned.
-   *
-   * WHY path is passed: the parent needs it to auto-start the filesystem
-   * watcher on the folder that was just scanned (phase 3b).
-   */
-  onScanComplete: (result: ScanReport, path: string) => void;
-  /** Called immediately before the scan starts (use to set loading state). */
-  onScanStart: () => void;
-  /** When true, show the disabled "Scanning..." state. */
-  scanning: boolean;
-}
-
 /**
- * Button that opens a native OS folder picker and triggers a perima scan.
- *
- * WHY: The dialog is delegated to the Tauri plugin so the OS-native picker is
- * used rather than a web `<input type="file">`, which can't return arbitrary
- * directory paths in the Tauri WebView.
+ * Scan-folder button. After Batch H, owns its own mutation; dispatches
+ * results into the Zustand scan slice (StatusBar reads from there).
  */
-export default function ScanButton({
-  onScanComplete,
-  onScanStart,
-  scanning,
-}: ScanButtonProps) {
-  async function handleClick() {
-    const selected = await openDialog({ directory: true, multiple: false });
-    if (!selected || typeof selected !== "string") return;
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { open } from "@tauri-apps/plugin-dialog";
+import * as api from "../api";
+import { filesKeys } from "../queries/files";
+import { tagsKeys } from "../queries/tags";
+import { useUiStore } from "../stores/ui";
+import type { CoreError, ScanReport } from "../bindings";
 
-    onScanStart();
-    void api.scan(selected, false).match(
-      (result) => { onScanComplete(result, selected); },
-      // WHY coreErrorMessage: helper centralises the data-payload stringification
-      // (plain string vs Io's { kind, message } struct) with cyclic-object safety.
-      (err) => { window.alert(`Scan failed [${err.kind}]: ${coreErrorMessage(err)}`); },
-    );
-  }
+export default function ScanButton() {
+  const queryClient = useQueryClient();
+  const notify = useUiStore((s) => s.notify);
+  const notifyError = useUiStore((s) => s.notifyError);
+  const setScanStatus = useUiStore((s) => s.setScanStatus);
+  const setLastScanReport = useUiStore((s) => s.setLastScanReport);
+  const status = useUiStore((s) => s.scan.status);
 
+  const scanMutation = useMutation<ScanReport, CoreError, { path: string; dryRun: boolean }>({
+    mutationKey: ["scan"],
+    mutationFn: ({ path, dryRun }) =>
+      api.scan(path, dryRun).match(
+        (report) => report,
+        // WHY eslint-disable: TanStack Query mutationFn accepts any thrown value;
+        // CoreError is the registered defaultError type so the typed discriminant
+        // reaches onError without wrapping.
+        // eslint-disable-next-line @typescript-eslint/only-throw-error
+        (err) => { throw err; },
+      ),
+    onMutate: () => { setScanStatus("scanning"); },
+    onSuccess: (report, { path }) => {
+      setLastScanReport(report);
+      setScanStatus("done");
+      notify("info", `Scanned ${report.files_seen} files`);
+      void queryClient.invalidateQueries({ queryKey: filesKeys.all });
+      void queryClient.invalidateQueries({ queryKey: tagsKeys.all });
+      // WHY void: startWatch is fire-and-forget; errors surface via notifyError,
+      // not by blocking the onSuccess flow.
+      void api.startWatch(path).match(
+        () => undefined,
+        (err) => { notifyError(err); },
+      );
+    },
+    onError: (err) => {
+      setScanStatus("idle");
+      notifyError(err);
+    },
+  });
+
+  const onClick = async () => {
+    // WHY @tauri-apps/plugin-dialog open: native OS folder picker, not
+    // <input type="file"> which cannot return arbitrary directory paths in
+    // the Tauri WebView.
+    const selected = await open({ directory: true, multiple: false });
+    if (typeof selected !== "string") return;
+    scanMutation.mutate({ path: selected, dryRun: false });
+  };
+
+  // WHY both conditions: status may be "scanning" from a previous render
+  // cycle (set by onMutate) before isPending becomes true, and isPending
+  // covers the mutation lifecycle between mutate() and onMutate settling.
+  const busy = status === "scanning" || scanMutation.isPending;
   return (
     <button
-      onClick={() => { void handleClick(); }}
-      disabled={scanning}
-      className="px-4 py-2 rounded bg-blue-600 text-white font-semibold hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+      type="button"
+      onClick={() => { void onClick(); }}
+      disabled={busy}
+      className="px-3 py-1.5 text-sm font-medium rounded bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed"
     >
-      {scanning ? "Scanning..." : "Scan Folder"}
+      {busy ? "Scanning…" : "Scan folder"}
     </button>
   );
 }

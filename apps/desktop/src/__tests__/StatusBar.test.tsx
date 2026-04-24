@@ -1,9 +1,19 @@
-import { render, screen } from "@testing-library/react";
+/**
+ * StatusBar — store-driven post-Batch-H. Reads `scan.status` and
+ * `scan.lastReport` from useUiStore.
+ *
+ * Branches under test:
+ *   - status === "scanning"            → "Scanning…"
+ *   - status !== "scanning" + report   → "Last scan: N files"
+ *   - status === "idle", no report     → "Ready"
+ */
 import { describe, it, expect } from "vitest";
+import { screen } from "@testing-library/react";
 import StatusBar from "../components/StatusBar";
-import type { ScanReport, CoreError } from "../bindings";
+import type { ScanReport } from "../bindings";
+import { renderWithProviders } from "./test-utils";
 
-const mockResult: ScanReport = {
+const mockReport: ScanReport = {
   files_seen: 42,
   files_new: 5,
   files_updated: 37,
@@ -15,41 +25,38 @@ const mockResult: ScanReport = {
 };
 
 describe("StatusBar", () => {
-  it("shows scan summary when scanResult is present", () => {
-    render(<StatusBar scanResult={mockResult} error={null} />);
-    expect(screen.getByText(/scanned 42 files/i)).toBeInTheDocument();
-    expect(screen.getByText(/5 new/i)).toBeInTheDocument();
-    expect(screen.getByText(/37 updated/i)).toBeInTheDocument();
+  it("shows 'Scanning…' when scan.status === 'scanning'", () => {
+    renderWithProviders(<StatusBar />, {
+      initialStoreState: { scan: { status: "scanning", lastReport: null } },
+    });
+    expect(screen.getByText(/scanning/i)).toBeInTheDocument();
   });
 
-  it("shows error string when error is present", () => {
-    const err: CoreError = { kind: "Internal", data: "disk read failure" };
-    render(<StatusBar scanResult={null} error={err} />);
-    const errEl = screen.getByText(/disk read failure/i);
-    expect(errEl).toBeInTheDocument();
-    // WHY: error text must be visually distinct (red) — check for a red class.
-    expect(errEl.closest("[class]")).toHaveClass("text-red-400");
+  it("shows 'Scanning…' even if a previous report is present", () => {
+    renderWithProviders(<StatusBar />, {
+      initialStoreState: { scan: { status: "scanning", lastReport: mockReport } },
+    });
+    expect(screen.getByText(/scanning/i)).toBeInTheDocument();
+    // The "Last scan: ..." string MUST NOT render while scanning.
+    expect(screen.queryByText(/last scan/i)).not.toBeInTheDocument();
   });
 
-  it("shows No scans yet when both scanResult and error are null", () => {
-    render(<StatusBar scanResult={null} error={null} />);
-    expect(screen.getByText("No scans yet")).toBeInTheDocument();
+  it("shows 'Last scan: N files' when status !== 'scanning' and a report is present", () => {
+    renderWithProviders(<StatusBar />, {
+      initialStoreState: { scan: { status: "done", lastReport: mockReport } },
+    });
+    expect(screen.getByText(/last scan: 42 files/i)).toBeInTheDocument();
   });
 
-  // WHY: These two tests pin the switch(err.kind) discriminated-union branches
-  // added in Task 11 — NotFound renders distinct UX; all other variants fall
-  // through to the generic catch-all path.
-
-  it("shows 'No results found.' for NotFound errors (distinct UX branch)", () => {
-    const err: CoreError = { kind: "NotFound", data: "query returned nothing" };
-    render(<StatusBar scanResult={null} error={err} />);
-    expect(screen.getByText("No results found.")).toBeInTheDocument();
+  it("shows 'Ready' when status is idle and no report", () => {
+    renderWithProviders(<StatusBar />, {
+      initialStoreState: { scan: { status: "idle", lastReport: null } },
+    });
+    expect(screen.getByText(/^ready$/i)).toBeInTheDocument();
   });
 
-  it("shows generic error message for Internal errors (catch-all branch)", () => {
-    const err: CoreError = { kind: "Internal", data: "unexpected db error" };
-    render(<StatusBar scanResult={null} error={err} />);
-    expect(screen.getByText(/something went wrong/i)).toBeInTheDocument();
-    expect(screen.getByText(/unexpected db error/i)).toBeInTheDocument();
+  it("defaults to 'Ready' when no initial store state is supplied", () => {
+    renderWithProviders(<StatusBar />);
+    expect(screen.getByText(/^ready$/i)).toBeInTheDocument();
   });
 });

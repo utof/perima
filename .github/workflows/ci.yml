@@ -27,19 +27,46 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - uses: taiki-e/install-action@just
-
       # WHY: `just ci` runs `cargo deny check`, `typos`, and
       # `cargo nextest run`. All three are external binaries — none ship
       # with the Rust toolchain. Using taiki-e/install-action fetches
       # prebuilt binaries (seconds) rather than `cargo install` (minutes),
       # which matters on the 3-OS matrix. Nextest swap landed in commit
-      # adopting `cargo nextest run` workspace-wide (closes #121) — the
-      # SQLite lock-order inversion that `cargo test` reproduces ~20% is
-      # documented in CLAUDE.md + GH #131.
-      - uses: taiki-e/install-action@cargo-deny
-      - uses: taiki-e/install-action@typos
-      - uses: taiki-e/install-action@cargo-nextest
+      # adopting `cargo nextest run` workspace-wide (closes #121).
+      #
+      # WHY split Windows from Linux/macOS: taiki-e/install-action's
+      # PowerShell wrapper aborts on windows-latest when the runner image
+      # leaks BASH_FUNC_* env vars (Shellshock mitigation correctly
+      # rejects them; their 10-iter retry doesn't catch it; manual reruns
+      # don't help — see issue #137 for full analysis + reproduction).
+      # cargo-binstall fetches the same prebuilt release binaries without
+      # going through bash, sidestepping the env leak entirely.
+      - name: Install just (Linux/macOS)
+        if: runner.os != 'Windows'
+        uses: taiki-e/install-action@just
+      - name: Install cargo-deny (Linux/macOS)
+        if: runner.os != 'Windows'
+        uses: taiki-e/install-action@cargo-deny
+      - name: Install typos (Linux/macOS)
+        if: runner.os != 'Windows'
+        uses: taiki-e/install-action@typos
+      - name: Install cargo-nextest (Linux/macOS)
+        if: runner.os != 'Windows'
+        uses: taiki-e/install-action@cargo-nextest
+
+      # WHY cargo-binstall on Windows only — workaround for #137. binstall
+      # is a prebuilt-binary fetcher; doesn't invoke bash so the windows-
+      # latest BASH_FUNC_* leak doesn't apply. Self-install is one zip
+      # extract; per-tool install is ~5s. If the runner image fix lands
+      # upstream, revert this step + drop the `if: runner.os != 'Windows'`
+      # gates above and verify 5+ consecutive Windows runs stay green.
+      - name: Install just/cargo-deny/typos/cargo-nextest (Windows via cargo-binstall — workaround #137)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/cargo-bins/cargo-binstall/releases/latest/download/cargo-binstall-x86_64-pc-windows-msvc.zip" -OutFile binstall.zip
+          Expand-Archive binstall.zip -DestinationPath "$env:USERPROFILE\.cargo\bin" -Force
+          cargo binstall --no-confirm --locked just cargo-deny typos-cli cargo-nextest
 
       - uses: actions/setup-node@v4
         with:

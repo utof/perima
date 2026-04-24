@@ -66,6 +66,17 @@ pub enum VolumeCommand {
     },
 }
 
+impl VolumeCommand {
+    /// Short kind name for tracing spans. WHY: enum Debug print is too noisy;
+    /// `?cmd` would dump full bodies into spans. (Batch I Task 5.)
+    pub(crate) const fn kind_str(&self) -> &'static str {
+        match self {
+            Self::List { .. } => "list",
+            Self::RecordMount { .. } => "record_mount",
+        }
+    }
+}
+
 /// Output of a successful volume operation.
 #[derive(Debug, Clone)]
 pub enum VolumeOutput {
@@ -120,6 +131,7 @@ impl VolumeUseCase {
     // impl without touching callers. Removing `async` now would force a
     // caller-side churn when the trait gains async variants.
     #[allow(clippy::unused_async)]
+    #[tracing::instrument(name = "volume", skip(self, cmd), fields(cmd_kind = cmd.kind_str()), err(level = "warn", Display))]
     pub async fn execute(&self, cmd: VolumeCommand) -> Result<VolumeOutput, CoreError> {
         // WHY touch self.events: held for the Batch-E event-emit path;
         // reference the field so `unused` lints don't fire before Batch E

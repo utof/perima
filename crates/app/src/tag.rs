@@ -152,6 +152,19 @@ pub enum TagOutput {
     FilesWithTags(Vec<FileWithTags>),
 }
 
+impl TagCommand {
+    /// Short kind name for tracing spans. WHY: enum Debug print is too noisy;
+    /// `?cmd` would dump full bodies into spans. (Batch I Task 5.)
+    pub(crate) const fn kind_str(&self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Attach { .. } => "attach",
+            Self::Detach { .. } => "detach",
+            Self::ListFilesWithTags { .. } => "list_files_with_tags",
+        }
+    }
+}
+
 /// Orchestrator: tag list, attach, detach, and file-tag queries.
 ///
 /// Dependencies are carried as `Arc<dyn Port>` fields; there are zero
@@ -210,6 +223,7 @@ impl TagUseCase {
     // channel) can evolve the impl without touching callers. Removing `async`
     // now would force a caller-side churn when the trait gains async variants.
     #[allow(clippy::unused_async)]
+    #[tracing::instrument(name = "tag", skip(self, cmd), fields(cmd_kind = cmd.kind_str()), err(level = "warn", Display))]
     pub async fn execute(&self, cmd: TagCommand) -> Result<TagOutput, CoreError> {
         // WHY touch self.events: held for the Batch-E event-emit path;
         // reference the field so `unused` lints don't fire before Batch E

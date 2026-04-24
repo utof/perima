@@ -16,6 +16,7 @@ tracing.workspace   = true
 uuid.workspace      = true
 chrono.workspace    = true
 flume.workspace     = true
+minijinja.workspace = true
 r2d2.workspace      = true
 r2d2_sqlite.workspace = true
 
@@ -30,6 +31,7 @@ test-utils = []
 tempfile.workspace  = true
 blake3.workspace    = true
 proptest.workspace  = true
+insta.workspace     = true
 # WHY self-dep: integration tests live in `tests/` and consume perima-db
 # as an external crate, so they need the `test-utils` feature enabled
 # explicitly. Cargo's dev-dependency self-reference is the canonical

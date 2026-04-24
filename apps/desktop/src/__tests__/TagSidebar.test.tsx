@@ -1,23 +1,30 @@
-import { render, screen } from "@testing-library/react";
+/**
+ * TagSidebar — store-driven post-Batch-H Task 9. selection is read from
+ * useUiStore, click handlers dispatch to the store. Tests render via
+ * renderWithProviders so store seeding (selectedTagId) is straightforward.
+ */
 import { describe, expect, it, test, vi } from "vitest";
+import { screen, fireEvent } from "@testing-library/react";
 import TagSidebar from "../components/TagSidebar";
+import { useUiStore } from "../stores/ui";
+import { renderWithProviders } from "./test-utils";
 
+const tags = [
+  { id: "id-1", name: "vacation", first_seen: "2026-04-16T00:00:00Z" },
+  { id: "id-2", name: "sunset", first_seen: "2026-04-16T00:00:00Z" },
+];
+const counts = { "id-1": 5, "id-2": 2 };
+
+// WHY spyOn(useUiStore.getState(), "setSelectedTagId") (vs setState funnel like
+// SearchBar): TagSidebar has NO useEffect with this action in its deps array, so
+// patching the action's identity does not trigger spurious effect re-runs. If
+// TagSidebar ever grows a useEffect depending on setSelectedTagId, switch these
+// spies to vi.spyOn(useUiStore, "setState") (the SearchBar C1 pattern) to keep
+// effect-deps stable.
 describe("TagSidebar", () => {
-  const tags = [
-    { id: "id-1", name: "vacation", first_seen: "2026-04-16T00:00:00Z" },
-    { id: "id-2", name: "sunset", first_seen: "2026-04-16T00:00:00Z" },
-  ];
-  const counts = { "id-1": 5, "id-2": 2 };
-
-  test("renders All + each tag", () => {
-    render(
-      <TagSidebar
-        tags={tags}
-        counts={counts}
-        totalCount={7}
-        selectedTagId={null}
-        onSelect={() => {}}
-      />,
+  test("renders All + each tag with counts", () => {
+    renderWithProviders(
+      <TagSidebar tags={tags} counts={counts} totalCount={7} mode="all" />,
     );
     expect(screen.getByText("All")).toBeInTheDocument();
     expect(screen.getByText("vacation")).toBeInTheDocument();
@@ -26,79 +33,55 @@ describe("TagSidebar", () => {
     expect(screen.getByText("2")).toBeInTheDocument();
   });
 
-  test("clicking a tag calls onSelect with its id", () => {
-    const onSelect = vi.fn();
-    render(
-      <TagSidebar
-        tags={tags}
-        counts={counts}
-        totalCount={7}
-        selectedTagId={null}
-        onSelect={onSelect}
-      />,
+  test("clicking a tag dispatches setSelectedTagId(id) to the store", () => {
+    const setSpy = vi.spyOn(useUiStore.getState(), "setSelectedTagId");
+    renderWithProviders(
+      <TagSidebar tags={tags} counts={counts} totalCount={7} mode="all" />,
     );
-    screen.getByText("vacation").click();
-    expect(onSelect).toHaveBeenCalledWith("id-1");
+    fireEvent.click(screen.getByText("vacation"));
+    expect(setSpy).toHaveBeenCalledWith("id-1");
   });
 
-  test("clicking All calls onSelect with null", () => {
-    const onSelect = vi.fn();
-    render(
-      <TagSidebar
-        tags={tags}
-        counts={counts}
-        totalCount={7}
-        selectedTagId={"id-1"}
-        onSelect={onSelect}
-      />,
+  test("clicking All dispatches setSelectedTagId(null)", () => {
+    const setSpy = vi.spyOn(useUiStore.getState(), "setSelectedTagId");
+    renderWithProviders(
+      <TagSidebar tags={tags} counts={counts} totalCount={7} mode="all" />,
+      { initialStoreState: { selectedTagId: "id-1" } },
     );
-    screen.getByText("All").click();
-    expect(onSelect).toHaveBeenCalledWith(null);
+    fireEvent.click(screen.getByText("All"));
+    expect(setSpy).toHaveBeenCalledWith(null);
   });
 
-  test("selected tag has aria-pressed=true", () => {
-    render(
-      <TagSidebar
-        tags={tags}
-        counts={counts}
-        totalCount={7}
-        selectedTagId={"id-1"}
-        onSelect={() => {}}
-      />,
+  test("selected tag has aria-pressed=true (from store)", () => {
+    renderWithProviders(
+      <TagSidebar tags={tags} counts={counts} totalCount={7} mode="all" />,
+      { initialStoreState: { selectedTagId: "id-1" } },
     );
     const vacationBtn = screen.getByRole("button", { name: /vacation/i });
     expect(vacationBtn).toHaveAttribute("aria-pressed", "true");
   });
 
   test("All row shows total file count", () => {
-    render(
-      <TagSidebar
-        tags={tags}
-        counts={counts}
-        totalCount={7}
-        selectedTagId={null}
-        onSelect={() => {}}
-      />,
+    renderWithProviders(
+      <TagSidebar tags={tags} counts={counts} totalCount={7} mode="all" />,
     );
     expect(screen.getByText("7")).toBeInTheDocument();
   });
 });
 
 describe("TagSidebar facets mode", () => {
-  const tags = [
+  const facetTags = [
     { id: "t1", name: "vacation", first_seen: "2026-01-01T00:00:00Z" },
     { id: "t2", name: "sunset", first_seen: "2026-01-01T00:00:00Z" },
     { id: "t3", name: "beach", first_seen: "2026-01-01T00:00:00Z" },
   ];
 
   it("hides tags with 0 counts when mode=facets", () => {
-    render(
+    renderWithProviders(
       <TagSidebar
-        tags={tags}
+        tags={facetTags}
         counts={{ t1: 3, t2: 1 }}
         totalCount={4}
-        selectedTagId={null}
-        onSelect={vi.fn()}
         mode="facets"
       />,
     );
@@ -109,13 +92,11 @@ describe("TagSidebar facets mode", () => {
   });
 
   it("shows empty-state row when all counts are 0", () => {
-    render(
+    renderWithProviders(
       <TagSidebar
-        tags={tags}
+        tags={facetTags}
         counts={{}}
         totalCount={0}
-        selectedTagId={null}
-        onSelect={vi.fn()}
         mode="facets"
       />,
     );
@@ -123,32 +104,27 @@ describe("TagSidebar facets mode", () => {
   });
 
   it("All row count is totalCount in facets mode (= sum of counts)", () => {
-    render(
+    renderWithProviders(
       <TagSidebar
-        tags={tags}
+        tags={facetTags}
         counts={{ t1: 3, t2: 1 }}
         totalCount={4}
-        selectedTagId={null}
-        onSelect={vi.fn()}
         mode="facets"
       />,
     );
     // The "All" row should show count 4 (= sum of visible).
     // WHY getByText + closest: the button's accessible name includes the count
     // span ("All 4"), so /^All$/i would not match the full accessible name.
-    // Navigating to the wrapping button via closest is the stable pattern here.
     const allRow = screen.getByText("All").closest("button")!;
     expect(allRow.textContent).toContain("4");
   });
 
   it("shows all tags in mode=all regardless of counts", () => {
-    render(
+    renderWithProviders(
       <TagSidebar
-        tags={tags}
+        tags={facetTags}
         counts={{ t1: 3 }}
         totalCount={100}
-        selectedTagId={null}
-        onSelect={vi.fn()}
         mode="all"
       />,
     );

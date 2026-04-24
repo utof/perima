@@ -67,6 +67,13 @@ pub struct AppState {
     /// dispatch; every command then accesses `state.container.*` through
     /// a single dereference.
     pub container: Arc<AppContainer>,
+    /// Held for process lifetime; drops the rolling-file appender's
+    /// background-flush thread on Drop.
+    ///
+    /// WHY underscore prefix: never read — only the Drop side-effect matters.
+    /// Dropping this guard early loses any buffered log lines still in the
+    /// non-blocking appender's channel. (Batch I Task 4.)
+    _log_guard: tracing_appender::non_blocking::WorkerGuard,
 }
 
 impl std::fmt::Debug for AppState {
@@ -92,7 +99,12 @@ impl AppState {
         tag_repo: Arc<SqliteTagRepository>,
         search_repo: Arc<SqliteSearchRepository>,
         container: Arc<AppContainer>,
+        log_guard: tracing_appender::non_blocking::WorkerGuard,
     ) -> Self {
+        // WHY const restored: clippy 1.95's missing_const_for_fn fires here
+        // because the body is purely field assignment — no heap alloc inside
+        // this fn. The earlier WHY ("WorkerGuard blocks const") was wrong:
+        // construction of WorkerGuard happens in the *caller*, not here.
         Self {
             data_dir,
             device_id,
@@ -100,6 +112,7 @@ impl AppState {
             tag_repo,
             search_repo,
             container,
+            _log_guard: log_guard,
         }
     }
 }

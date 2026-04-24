@@ -73,7 +73,11 @@ fn scan_persists_metadata_rows_for_images() {
     // tight. WHY: `perima ls --with-metadata` would work too but it
     // layers another parser over the same rows.
     let db_path = env_dir.path().join("perima.db");
-    let conn = rusqlite::Connection::open(&db_path).expect("open db");
+    let conn = rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .expect("open db");
 
     // The queue is drained synchronously at scan exit, so by the time
     // `Command::output()` returns the rows should already be present.

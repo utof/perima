@@ -14,6 +14,8 @@ use std::time::Instant;
 
 use perima_core::{CoreError, EventBus, SearchHit, SearchRepository};
 
+use crate::telemetry::truncated;
+
 /// Inputs to [`SearchUseCase::execute`].
 #[derive(Debug, Clone)]
 pub enum SearchCommand {
@@ -34,6 +36,33 @@ pub enum SearchCommand {
     /// drifts (e.g. after a crash mid-trigger). Mirrors CLI's
     /// `perima search --rebuild` and Desktop's `search_rebuild` command.
     Rebuild,
+}
+
+impl SearchCommand {
+    /// Short kind name for tracing spans. WHY: enum Debug print is too noisy;
+    /// `?cmd` would dump full bodies into spans. (Batch I Task 5.)
+    pub(crate) const fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Query { .. } => "query",
+            Self::Rebuild => "rebuild",
+        }
+    }
+
+    /// Query string for the span field; empty for non-query variants.
+    pub(crate) const fn query_str(&self) -> &str {
+        match self {
+            Self::Query { q, .. } => q.as_str(),
+            Self::Rebuild => "",
+        }
+    }
+
+    /// Effective limit for the span field; 0 for non-query variants.
+    pub(crate) fn limit_val(&self) -> u32 {
+        match self {
+            Self::Query { limit, .. } => limit.unwrap_or(50),
+            Self::Rebuild => 0,
+        }
+    }
 }
 
 /// Output of a successful search or rebuild.
@@ -92,6 +121,12 @@ impl SearchUseCase {
     // impl without touching callers. Removing `async` now would force a
     // caller-side churn when the trait gains async variants.
     #[allow(clippy::unused_async)]
+    #[tracing::instrument(
+        name = "search",
+        skip(self, cmd),
+        fields(search_kind = cmd.kind_str(), query = %truncated(cmd.query_str(), 64), limit = cmd.limit_val()),
+        err(level = "warn", Display)
+    )]
     pub async fn execute(&self, cmd: SearchCommand) -> Result<SearchOutput, CoreError> {
         // WHY touch self.events: held for the Batch-E event-emit path;
         // reference the field so `unused` lints don't fire before
@@ -166,6 +201,14 @@ mod tests {
     /// `WAL` mode.
     fn seed_via_conn(db_path: &std::path::Path, hash: &str, path: &str, mime: &str) {
         use rusqlite::Connection;
+        // WHY #[allow]: opens a second writable Connection alongside the
+        // SqliteWriter actor to seed `search_content` directly. Post-GH #131
+        // (SQLite 3.51.3) this no longer hits the lock-order-inversion close race that
+        // afflicted 3.51.0-3.51.1. The pattern remains fragile to future
+        // SQLite regressions; see clippy.toml header. Migrating this seed
+        // to a writer-routed test helper is tracked separately and is the
+        // canonical structural fix.
+        #[allow(clippy::disallowed_methods)]
         let conn = Connection::open(db_path).unwrap();
         // WHY explicit column list: matches V007 `search_content` schema
         // (blake3_hash, filename, relative_path, mime_type, camera_model,

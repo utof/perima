@@ -59,6 +59,7 @@ thiserror    = "2"
 serde        = { version = "1", features = ["derive"] }
 serde_json   = "1"
 tracing      = "0.1"
+tracing-appender   = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tokio        = { version = "1", features = ["full"] }
 tokio-util   = { version = "0.7", features = ["rt"] }
@@ -98,6 +99,7 @@ image        = "0.25"
 nom-exif     = "2.7"
 mp4parse     = "0.17"
 mime_guess   = "2"
+minijinja    = { version = "2", default-features = false, features = ["macros", "loader"] }
 
 [profile.release]
 lto = "thin"
