@@ -67,6 +67,13 @@ pub struct AppState {
     /// dispatch; every command then accesses `state.container.*` through
     /// a single dereference.
     pub container: Arc<AppContainer>,
+    /// Held for process lifetime; drops the rolling-file appender's
+    /// background-flush thread on Drop.
+    ///
+    /// WHY underscore prefix: never read — only the Drop side-effect matters.
+    /// Dropping this guard early loses any buffered log lines still in the
+    /// non-blocking appender's channel. (Batch I Task 4.)
+    _log_guard: tracing_appender::non_blocking::WorkerGuard,
 }
 
 impl std::fmt::Debug for AppState {
@@ -85,14 +92,17 @@ impl AppState {
     /// invariant — callers that forget to pass `container` get a compile
     /// error rather than a silently missing dependency.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         data_dir: PathBuf,
         device_id: DeviceId,
         metadata_repo: Arc<SqliteMetadataRepository>,
         tag_repo: Arc<SqliteTagRepository>,
         search_repo: Arc<SqliteSearchRepository>,
         container: Arc<AppContainer>,
+        log_guard: tracing_appender::non_blocking::WorkerGuard,
     ) -> Self {
+        // WHY `const` removed: `WorkerGuard` involves heap allocation and a
+        // background-thread spawn — neither is const-constructible. (Batch I Task 4.)
         Self {
             data_dir,
             device_id,
@@ -100,6 +110,7 @@ impl AppState {
             tag_repo,
             search_repo,
             container,
+            _log_guard: log_guard,
         }
     }
 }

@@ -117,6 +117,15 @@ pub fn run() -> Result<(), RunError> {
         "../../apps/desktop/src/bindings.ts",
     )?;
 
+    // WHY before tauri::Builder::default(): handler-side tracing::*! macros
+    // emitted during .setup() need a subscriber attached when they fire.
+    // Placing init here ensures all events from .setup onward are captured.
+    // (Batch I Task 4.)
+    let log_guard = perima_app::telemetry::init_subscriber(
+        perima_app::telemetry::SubscriberOpts::desktop_default(),
+    )
+    .map_err(|e| format!("init_subscriber: {e}"))?;
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state::WatcherState::new())
@@ -210,6 +219,7 @@ pub fn run() -> Result<(), RunError> {
                 tag_repo,
                 search_repo,
                 container,
+                log_guard, // captured by the `move` closure; held until AppState drops
             );
             app.manage(app_state);
 
