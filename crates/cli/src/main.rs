@@ -128,6 +128,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// Bundle the active log + recent rotated logs + env context into a single
+    /// file. Attach to bug reports.
+    DebugReport {
+        /// Output path. Default: `./perima-debug-report-<TIMESTAMP>.log`
+        path: Option<PathBuf>,
+        /// Number of rotated log files to include (default 2).
+        #[arg(long, default_value_t = 2)]
+        include_rotated: usize,
+    },
 }
 
 /// Entry point.
@@ -208,6 +218,27 @@ async fn main() -> ExitCode {
         Command::Watch { root } => dispatch_watch(root, &config, &cancel).await,
 
         Command::Metadata { path, json } => dispatch_metadata(path, json, &config).await,
+
+        Command::DebugReport {
+            path,
+            include_rotated,
+        } => dispatch_debug_report(path, include_rotated),
+    }
+}
+
+/// Run the `debug-report` subcommand.
+///
+/// WHY sync (no `async`): `debug-report` reads log files and writes a bundle
+/// — pure file I/O, no database or async port involved. Calling it from the
+/// async `main` without `.await` is valid; the compiler accepts a sync return
+/// from inside an `async fn`.
+fn dispatch_debug_report(path: Option<PathBuf>, include_rotated: usize) -> ExitCode {
+    match cmd::debug_report::run(path, include_rotated) {
+        Ok(()) => ExitCode::from(0),
+        Err(e) => {
+            eprintln!("perima: {e}");
+            ExitCode::from(1)
+        }
     }
 }
 
