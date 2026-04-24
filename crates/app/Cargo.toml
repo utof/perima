@@ -28,6 +28,7 @@ tokio-util.workspace = true
 thiserror.workspace = true
 tracing.workspace        = true
 tracing-appender.workspace   = true
+tracing-subscriber.workspace = true
 # WHY serde: ScanReport + ScanReportEntry derive Serialize so the
 # desktop handler can return the UseCase output directly across the
 # IPC boundary (Batch D Task 8 — no shell-side ScanResult mirror).
