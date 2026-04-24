@@ -13,7 +13,6 @@
 
 mod cmd;
 mod config;
-mod logging;
 mod panic;
 mod signals;
 
@@ -141,10 +140,20 @@ async fn main() -> ExitCode {
     panic::install();
     let cli = Cli::parse();
 
-    if let Err(e) = logging::init(cli.verbose) {
-        eprintln!("perima: logging init failed: {e}");
-        return ExitCode::from(1);
-    }
+    // WHY _log_guard (not _): `tracing-appender` non-blocking writer is
+    // backed by a background flush thread. Binding to `_` drops the
+    // WorkerGuard immediately (RAII), killing the thread and losing any
+    // buffered log lines before main() returns. The leading underscore
+    // signals "held but not read" to clippy without triggering early drop.
+    let _log_guard = match perima_app::telemetry::init_subscriber(
+        perima_app::telemetry::SubscriberOpts::cli_default(cli.verbose),
+    ) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("perima: logging init failed: {e}");
+            return ExitCode::from(1);
+        }
+    };
 
     let cancel = match signals::install() {
         Ok(c) => c,
