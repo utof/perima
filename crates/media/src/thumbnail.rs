@@ -530,12 +530,12 @@ mod tests {
         let src = DynamicImage::ImageRgb8(rgb);
 
         let mut resizer = Resizer::new();
-        let resized = tgen.resize_image(src, &mut resizer).expect("resize_image");
+        let output_img = tgen.resize_image(src, &mut resizer).expect("resize_image");
 
         assert!(
-            matches!(resized, DynamicImage::ImageRgb8(_)),
+            matches!(output_img, DynamicImage::ImageRgb8(_)),
             "RGB source must stay RGB after resize; got {:?}",
-            resized.color()
+            output_img.color()
         );
     }
 
@@ -548,12 +548,12 @@ mod tests {
         let src = DynamicImage::ImageRgba8(rgba);
 
         let mut resizer = Resizer::new();
-        let resized = tgen.resize_image(src, &mut resizer).expect("resize_image");
+        let output_img = tgen.resize_image(src, &mut resizer).expect("resize_image");
 
         assert!(
-            matches!(resized, DynamicImage::ImageRgba8(_)),
+            matches!(output_img, DynamicImage::ImageRgba8(_)),
             "RGBA source must stay RGBA after resize; got {:?}",
-            resized.color()
+            output_img.color()
         );
     }
 
@@ -570,15 +570,15 @@ mod tests {
         let src = DynamicImage::ImageRgb16(rgb16);
 
         let mut resizer = Resizer::new();
-        let resized = tgen.resize_image(src, &mut resizer).expect("resize_image");
+        let output_img = tgen.resize_image(src, &mut resizer).expect("resize_image");
 
         assert!(
             matches!(
-                resized,
+                output_img,
                 DynamicImage::ImageRgba8(_) | DynamicImage::ImageRgb8(_)
             ),
             "16-bit source must coerce to 8-bit variant; got {:?}",
-            resized.color()
+            output_img.color()
         );
     }
 
@@ -593,12 +593,12 @@ mod tests {
         let src = DynamicImage::ImageLuma8(luma);
 
         let mut resizer = Resizer::new();
-        let resized = tgen.resize_image(src, &mut resizer).expect("resize_image");
+        let output_img = tgen.resize_image(src, &mut resizer).expect("resize_image");
 
         assert!(
-            matches!(resized, DynamicImage::ImageLuma8(_)),
+            matches!(output_img, DynamicImage::ImageLuma8(_)),
             "Luma8 source must stay Luma8 after resize; got {:?}",
-            resized.color()
+            output_img.color()
         );
     }
 
@@ -620,12 +620,12 @@ mod tests {
         let src = DynamicImage::ImageLumaA8(lumaa);
 
         let mut resizer = Resizer::new();
-        let resized = tgen.resize_image(src, &mut resizer).expect("resize_image");
+        let output_img = tgen.resize_image(src, &mut resizer).expect("resize_image");
 
         assert!(
-            matches!(resized, DynamicImage::ImageRgba8(_)),
+            matches!(output_img, DynamicImage::ImageRgba8(_)),
             "LumaA8 source must coerce to RGBA8 after resize; got {:?}",
-            resized.color()
+            output_img.color()
         );
     }
 

@@ -12,13 +12,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use fast_image_resize::Resizer;
 use perima_core::{BlakeHash, CoreError, DeviceId, MetadataExtractor, MetadataRepository};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::thumbnail::ThumbnailGenerator;
-use fast_image_resize::Resizer;
 
 /// Bounded channel capacity.
 ///
