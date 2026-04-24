@@ -178,11 +178,19 @@ impl ThumbnailGenerator {
     ///
     /// Returns `CoreError::Internal` if `fast_image_resize` cannot handle
     /// the pixel type after coercion (should be unreachable in practice).
-    fn resize_image(&self, img: image::DynamicImage) -> Result<image::DynamicImage, CoreError> {
+    fn resize_image(
+        &self,
+        img: image::DynamicImage,
+        resizer: &mut Resizer,
+    ) -> Result<image::DynamicImage, CoreError> {
         // WHY fast_image_resize: 3-10× faster than image::imageops::resize
         // (SIMD Lanczos3: SSE4.1/AVX2/NEON/WASM). Audit §Q5. Default algorithm
         // for Resizer::new() is Lanczos3 for convolution-capable pixel types,
         // so no ResizeOptions needed.
+        // WHY &mut Resizer arg: scratch buffers + CPU-extension dispatch cache
+        // amortize across worker iterations. The Resizer is owned by the
+        // MetadataQueue worker task (see queue.rs::MetadataQueue::spawn).
+        // Per-call Resizer::new() (the pre-Batch-J pattern) discards both.
 
         // Normalize exotic variants (16-bit, HDR, LumaA) to 8-bit before resize.
         // Common RGB/RGBA/Luma8 pass through unchanged.
@@ -202,7 +210,7 @@ impl ThumbnailGenerator {
 
         let mut dst = Image::new(dst_w, dst_h, pixel_type);
 
-        Resizer::new()
+        resizer
             .resize(&img, &mut dst, None)
             .map_err(|e| CoreError::Internal(format!("fast_image_resize: {e}")))?;
 
@@ -210,7 +218,7 @@ impl ThumbnailGenerator {
         // WHY into_vec(): consumes `dst` and returns the already-allocated Vec<u8>
         // without copying (BufferContainer::Owned path in fast_image_resize 6.x).
         let buf = dst.into_vec();
-        let resized = match pixel_type {
+        let output_img = match pixel_type {
             fast_image_resize::PixelType::U8x3 => image::DynamicImage::ImageRgb8(
                 image::RgbImage::from_raw(dst_w, dst_h, buf).ok_or_else(|| {
                     CoreError::Internal("RgbImage::from_raw returned None".into())
@@ -237,7 +245,7 @@ impl ThumbnailGenerator {
             }
         };
 
-        Ok(resized)
+        Ok(output_img)
     }
 
     /// Decode `source`, resize to fit `max_size` while preserving
@@ -259,7 +267,12 @@ impl ThumbnailGenerator {
     ///
     /// Quality target: q=85 per spec (documentary today — see the
     /// module-level note on the `image` v0.25 WebP encoder).
-    pub fn generate(&self, hash: &BlakeHash, source: &Path) -> Result<Option<PathBuf>, CoreError> {
+    pub fn generate(
+        &self,
+        hash: &BlakeHash,
+        source: &Path,
+        resizer: &mut Resizer,
+    ) -> Result<Option<PathBuf>, CoreError> {
         if !self.enabled {
             return Ok(None);
         }
@@ -284,7 +297,7 @@ impl ThumbnailGenerator {
             .decode()
             .map_err(|e| CoreError::Internal(format!("decode {}: {e}", source.display())))?;
 
-        let resized = self.resize_image(img)?;
+        let scaled = self.resize_image(img, resizer)?;
 
         // WHY atomic write: without `.tmp` + `rename` a crash mid-
         // encode leaves a half-written `.webp` that passes the
@@ -295,7 +308,7 @@ impl ThumbnailGenerator {
         {
             let mut buf = std::fs::File::create(&tmp)
                 .map_err(|e| CoreError::Internal(format!("create tmp {}: {e}", tmp.display())))?;
-            resized
+            scaled
                 .write_to(&mut buf, image::ImageFormat::WebP)
                 .map_err(|e| CoreError::Internal(format!("encode webp: {e}")))?;
             // `buf` dropped here flushes the File before rename.
@@ -384,8 +397,9 @@ mod tests {
         let tg = generator(&data_dir, 256);
         let hash = hash_of(b"wide");
 
+        let mut resizer = Resizer::new();
         let out = tg
-            .generate(&hash, &src)
+            .generate(&hash, &src, &mut resizer)
             .expect("generate")
             .expect("enabled generator returns Some");
         assert!(out.exists(), "thumbnail must be created at {out:?}");
@@ -406,8 +420,9 @@ mod tests {
         let tg = generator(&data_dir, 256);
         let hash = hash_of(b"idem");
 
+        let mut resizer = Resizer::new();
         let out1 = tg
-            .generate(&hash, &src)
+            .generate(&hash, &src, &mut resizer)
             .expect("first")
             .expect("enabled generator returns Some");
         let meta1 = std::fs::metadata(&out1).expect("meta1");
@@ -417,7 +432,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
 
         let out2 = tg
-            .generate(&hash, &src)
+            .generate(&hash, &src, &mut resizer)
             .expect("second")
             .expect("enabled generator returns Some");
         assert_eq!(out1, out2, "path must be deterministic");
@@ -441,8 +456,9 @@ mod tests {
         let tg = generator(&data_dir, 256);
         let hash = hash_of(b"tmpcheck");
 
+        let mut resizer = Resizer::new();
         let out = tg
-            .generate(&hash, &src)
+            .generate(&hash, &src, &mut resizer)
             .expect("generate")
             .expect("enabled generator returns Some");
         let dir = out.parent().expect("thumbnail path must have a parent dir");
@@ -466,7 +482,8 @@ mod tests {
         let tg = ThumbnailGenerator::disabled();
         let hash = hash_of(b"off");
 
-        let out = tg.generate(&hash, &src).expect("generate");
+        let mut resizer = Resizer::new();
+        let out = tg.generate(&hash, &src, &mut resizer).expect("generate");
         assert!(
             out.is_none(),
             "disabled generator must return Ok(None); got {out:?}"
@@ -488,9 +505,12 @@ mod tests {
         let rgb = image::RgbImage::from_pixel(4928, 3279, image::Rgb([128, 64, 32]));
         let src_dyn = image::DynamicImage::ImageRgb8(rgb);
 
+        let mut resizer = Resizer::new();
         let start = Instant::now();
         for _ in 0..50 {
-            let _ = tgen.resize_image(src_dyn.clone()).expect("resize_image");
+            let _ = tgen
+                .resize_image(src_dyn.clone(), &mut resizer)
+                .expect("resize_image");
         }
         let elapsed = start.elapsed();
         eprintln!(
@@ -509,7 +529,8 @@ mod tests {
         let rgb = image::RgbImage::from_pixel(200, 100, image::Rgb([200, 100, 50]));
         let src = DynamicImage::ImageRgb8(rgb);
 
-        let resized = tgen.resize_image(src).expect("resize_image");
+        let mut resizer = Resizer::new();
+        let resized = tgen.resize_image(src, &mut resizer).expect("resize_image");
 
         assert!(
             matches!(resized, DynamicImage::ImageRgb8(_)),
@@ -526,7 +547,8 @@ mod tests {
         let rgba = image::RgbaImage::from_pixel(200, 100, image::Rgba([200, 100, 50, 180]));
         let src = DynamicImage::ImageRgba8(rgba);
 
-        let resized = tgen.resize_image(src).expect("resize_image");
+        let mut resizer = Resizer::new();
+        let resized = tgen.resize_image(src, &mut resizer).expect("resize_image");
 
         assert!(
             matches!(resized, DynamicImage::ImageRgba8(_)),
@@ -547,7 +569,8 @@ mod tests {
         );
         let src = DynamicImage::ImageRgb16(rgb16);
 
-        let resized = tgen.resize_image(src).expect("resize_image");
+        let mut resizer = Resizer::new();
+        let resized = tgen.resize_image(src, &mut resizer).expect("resize_image");
 
         assert!(
             matches!(
@@ -569,7 +592,8 @@ mod tests {
         let luma = image::GrayImage::from_pixel(200, 100, image::Luma([128_u8]));
         let src = DynamicImage::ImageLuma8(luma);
 
-        let resized = tgen.resize_image(src).expect("resize_image");
+        let mut resizer = Resizer::new();
+        let resized = tgen.resize_image(src, &mut resizer).expect("resize_image");
 
         assert!(
             matches!(resized, DynamicImage::ImageLuma8(_)),
@@ -595,7 +619,8 @@ mod tests {
         );
         let src = DynamicImage::ImageLumaA8(lumaa);
 
-        let resized = tgen.resize_image(src).expect("resize_image");
+        let mut resizer = Resizer::new();
+        let resized = tgen.resize_image(src, &mut resizer).expect("resize_image");
 
         assert!(
             matches!(resized, DynamicImage::ImageRgba8(_)),
@@ -629,8 +654,9 @@ mod tests {
         let hash_bytes = *blake3::hash(b"16bit-png-test-fixture").as_bytes();
         let hash = perima_core::BlakeHash::from_bytes(hash_bytes);
 
+        let mut resizer = Resizer::new();
         let out = tgen
-            .generate(&hash, &src_path)
+            .generate(&hash, &src_path, &mut resizer)
             .expect("generate")
             .expect("Some path");
         assert!(out.exists(), "Thumbnail file should exist at {out:?}");

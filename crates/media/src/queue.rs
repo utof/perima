@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::thumbnail::ThumbnailGenerator;
+use fast_image_resize::Resizer;
 
 /// Bounded channel capacity.
 ///
@@ -75,6 +76,16 @@ impl MetadataQueue {
     ) -> Self {
         let (tx, mut rx) = mpsc::channel::<Work>(QUEUE_CAPACITY);
         let worker = tokio::spawn(async move {
+            // WHY one Resizer per worker task: amortizes scratch-buffer
+            // alloc + CPU-extension dispatch cache across thumbnail
+            // iterations. Per-call Resizer::new() (pre-Batch-J) discarded
+            // both. Future multi-worker = each spawn gets its own
+            // Resizer; do NOT hoist to a shared Mutex<Resizer> (would
+            // re-introduce contention defeating the amortization).
+            // Resizer: Send (fast_image_resize 6.0 supertrait), so
+            // owning it in this `async move` future is sound under
+            // tokio's multi-thread work-stealing runtime.
+            let mut resizer = Resizer::new();
             loop {
                 tokio::select! {
                     biased;
@@ -96,6 +107,7 @@ impl MetadataQueue {
                             thumbnailer.as_ref(),
                             device,
                             &work,
+                            &mut resizer,
                         );
                     }
                 }
@@ -167,6 +179,7 @@ fn process(
     thumbnailer: &ThumbnailGenerator,
     device: DeviceId,
     work: &Work,
+    resizer: &mut Resizer,
 ) {
     // WHY `mime_guess::from_path` after dequeue: keeps `mime_guess`
     // confined to `perima-media` (scanner never sees it) and avoids a
@@ -225,7 +238,7 @@ fn process(
         return;
     }
 
-    match thumbnailer.generate(&work.hash, &work.absolute_path) {
+    match thumbnailer.generate(&work.hash, &work.absolute_path, resizer) {
         Ok(None) => {
             // Disabled generator (`--no-thumbnails`): leave the row's
             // thumbnail_status at its migration default ("pending").
