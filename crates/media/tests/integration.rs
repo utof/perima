@@ -351,3 +351,28 @@ fn video_extractor_mp4_audio_first_then_video_picks_video() {
         meta.duration_ms,
     );
 }
+
+#[test]
+fn image_extractor_jpeg_corrupt_tiff_returns_default() {
+    // WHY: exercises read_exif's `parser.parse(ms)` Err arm (debug log)
+    // per slice 2 spec §4 D-2 B2. The fixture has has_exif() == true
+    // (APP1 segment present with Exif\0\0 identifier) but TIFF magic is
+    // bogus ("XX"), so parse() fails. Must NOT propagate; returns
+    // (None, None, None) for EXIF fields.
+    let td = tempdir().expect("tempdir");
+    let path = td.path().join("corrupt.jpg");
+    common::make_jpeg_with_corrupt_tiff(&path);
+
+    let extractor = ImageExtractor::new();
+    let meta = extractor
+        .extract(dummy_hash(), &path, "image/jpeg")
+        .expect("extract must not propagate parse errors");
+
+    assert_eq!(meta.captured_at, None);
+    assert_eq!(meta.camera_make, None);
+    assert_eq!(meta.camera_model, None);
+    // Note: image_dimensions ALSO fails on this synthetic JPEG (no real
+    // image data after EOI), so width/height = None too. That's
+    // acceptable; the test point is the EXIF parse arm.
+    assert_eq!(meta.mime_type.as_deref(), Some("image/jpeg"));
+}

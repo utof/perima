@@ -497,3 +497,53 @@ pub fn make_mp4_audio_first_then_video(path: &Path) -> PathBuf {
     file.sync_all().expect("sync");
     path.to_path_buf()
 }
+
+/// Build a minimal JPEG containing SOI + APP0(JFIF) + APP1(EXIF) + EOI
+/// where the TIFF magic bytes inside APP1 are corrupted. Used to
+/// exercise `read_exif`'s `parser.parse(ms)` Err arm (spec §4 D-2 B2).
+///
+/// WHY this shape: nom-exif's `MediaParser` opens the file, sees the APP1
+/// segment, reports `has_exif() == true` (because the segment exists),
+/// then fails when `parser.parse()` encounters the bogus TIFF magic. This
+/// reaches a different branch than `image_extractor_jpeg_without_exif`
+/// (which fails at `has_exif() == false`).
+///
+/// WHY Strategy A (`b"XX"` magic) vs Strategy B (valid magic + corrupt IFD0):
+/// `has_exif()` in nom-exif checks for the APP1 segment's `Exif\0\0` identifier
+/// presence only (not the TIFF magic itself), so `b"XX"` magic causes
+/// `has_exif() == true` while `parse()` fails. Strategy B (valid `b"II"` +
+/// `tag_count = 0xFFFF` garbage) is the fallback if Strategy A accidentally
+/// routes through the wrong branch.
+pub fn make_jpeg_with_corrupt_tiff(path: &Path) -> PathBuf {
+    // Build a TIFF block with WRONG magic ("XX" instead of "II"/"MM").
+    // The TIFF body still has plausible bytes after, so nom-exif's
+    // streaming parser doesn't bail at has_exif() but does fail in parse().
+    let bogus_tiff: Vec<u8> = {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"XX"); // WRONG magic (real: "II" or "MM")
+        v.extend_from_slice(&42_u16.to_le_bytes()); // TIFF version
+        v.extend_from_slice(&8_u32.to_le_bytes()); // IFD0 offset
+        // 16 bytes of garbage where IFD0 would be
+        v.extend_from_slice(&[0u8; 16]);
+        v
+    };
+
+    let app1_payload_len = 2 + 6 + bogus_tiff.len();
+    let app1_len =
+        u16::try_from(app1_payload_len).expect("APP1 payload too large for a single segment");
+
+    let file = File::create(path).expect("create jpeg");
+    let mut w = BufWriter::new(file);
+    w.write_all(&[0xFF, 0xD8]).expect("SOI");
+    w.write_all(&[0xFF, 0xE0, 0x00, 0x10])
+        .expect("APP0 marker+len");
+    w.write_all(b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00")
+        .expect("JFIF payload");
+    w.write_all(&[0xFF, 0xE1]).expect("APP1 marker");
+    w.write_all(&app1_len.to_be_bytes()).expect("APP1 length");
+    w.write_all(b"Exif\0\0").expect("Exif identifier");
+    w.write_all(&bogus_tiff).expect("bogus TIFF body");
+    w.write_all(&[0xFF, 0xD9]).expect("EOI");
+    w.flush().expect("flush jpeg");
+    path.to_path_buf()
+}
