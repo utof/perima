@@ -38,6 +38,14 @@ insta.workspace     = true
 # pattern for this (used by serde, tokio, etc.) — it's surprising the
 # first time you see it but standard.
 perima-db = { path = ".", features = ["test-utils"] }
+# WHY criterion: slice 4 of T1 test-architecture decomposition adds
+# FTS5 search-latency benchmark on a seeded SQLite DB. Observability-
+# only per spec D-4.
+criterion = "0.5"
+
+[[bench]]
+name = "fts"
+harness = false  # WHY: criterion installs its own harness; libtest off.
 
 [lints]
 workspace = true

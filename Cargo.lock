@@ -3554,6 +3554,7 @@ version = "0.6.4"
 dependencies = [
  "blake3",
  "chrono",
+ "criterion",
  "flume",
  "insta",
  "minijinja",
