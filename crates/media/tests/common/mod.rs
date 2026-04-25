@@ -406,3 +406,94 @@ pub fn make_test_mp4(path: &Path) -> PathBuf {
     file.sync_all().expect("sync mp4");
     path.to_path_buf()
 }
+
+/// Synthesise a minimal valid MP4 with an audio track FIRST, then a
+/// video track. Used to exercise `video_tracks_summary`'s "first video
+/// track wins; non-video tracks skipped" branch (spec §4 D-2 B8).
+///
+/// WHY: the existing `make_test_mp4` emits a single-video-track file,
+/// which exercises the loop's first iteration only. This helper places
+/// audio at index 0 so the loop must skip past it before finding video.
+pub fn make_mp4_audio_first_then_video(path: &Path) -> PathBuf {
+    use mp4::{
+        AacConfig, AudioObjectType, AvcConfig, ChannelConfig, MediaConfig, Mp4Config, Mp4Sample,
+        Mp4Writer, SampleFreqIndex, TrackConfig, TrackType,
+    };
+
+    let config = Mp4Config {
+        major_brand: "isom".parse().expect("major_brand"),
+        minor_version: 512,
+        compatible_brands: vec![
+            "isom".parse().expect("brand"),
+            "iso2".parse().expect("brand"),
+            "avc1".parse().expect("brand"),
+            "mp41".parse().expect("brand"),
+        ],
+        timescale: 1000,
+    };
+
+    let mut file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .expect("open mp4 rw");
+
+    let mut writer = Mp4Writer::write_start(&mut file, &config).expect("write_start");
+
+    // AUDIO TRACK FIRST — track_id = 1
+    let audio_config = TrackConfig {
+        track_type: TrackType::Audio,
+        timescale: 48000,
+        language: "und".into(),
+        media_conf: MediaConfig::AacConfig(AacConfig {
+            bitrate: 128_000,
+            profile: AudioObjectType::AacLowComplexity,
+            freq_index: SampleFreqIndex::Freq48000,
+            chan_conf: ChannelConfig::Stereo,
+        }),
+    };
+    writer.add_track(&audio_config).expect("add_track audio");
+
+    // VIDEO TRACK SECOND — track_id = 2
+    let video_config = TrackConfig {
+        track_type: TrackType::Video,
+        timescale: 1000,
+        language: "und".into(),
+        media_conf: MediaConfig::AvcConfig(AvcConfig {
+            width: 32,
+            height: 16,
+            seq_param_set: vec![0x67, 0x42, 0xC0, 0x0A, 0xDB, 0x02, 0x80, 0xBF, 0xE5, 0x01],
+            pic_param_set: vec![0x68, 0xCE, 0x38, 0x80],
+        }),
+    };
+    writer.add_track(&video_config).expect("add_track video");
+
+    // One audio sample (track 1), one video sample (track 2).
+    let audio_sample = Mp4Sample {
+        start_time: 0,
+        duration: 1024,
+        rendering_offset: 0,
+        is_sync: true,
+        bytes: mp4::Bytes::from(vec![0u8; 32]),
+    };
+    writer
+        .write_sample(1, &audio_sample)
+        .expect("write audio sample");
+
+    let video_sample = Mp4Sample {
+        start_time: 0,
+        duration: 1000,
+        rendering_offset: 0,
+        is_sync: true,
+        bytes: mp4::Bytes::from(vec![0u8; 64]),
+    };
+    writer
+        .write_sample(2, &video_sample)
+        .expect("write video sample");
+
+    writer.write_end().expect("write_end");
+    file.sync_all().expect("sync");
+    path.to_path_buf()
+}

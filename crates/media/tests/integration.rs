@@ -308,3 +308,46 @@ fn video_extractor_garbage_mp4_returns_default() {
     assert_eq!(meta.codec, None);
     assert_eq!(meta.mime_type.as_deref(), Some("video/mp4"));
 }
+
+#[test]
+fn video_extractor_mp4_audio_first_then_video_picks_video() {
+    // WHY: exercises video_tracks_summary's loop-then-break branch
+    // (spec §4 D-2 B8). With audio at track index 0 and video at
+    // track index 1, video_tracks_summary must skip the audio track
+    // (it isn't TrackType::Video) and pick up width/height/codec
+    // from the video track. Existing test (mp4_duration) only has
+    // a video track at index 0 so the loop's "skip non-video" arm
+    // is never exercised.
+    let td = tempdir().expect("tempdir");
+    let path = td.path().join("audio_first.mp4");
+    common::make_mp4_audio_first_then_video(&path);
+
+    let extractor = VideoExtractor::new();
+    let meta = extractor
+        .extract(dummy_hash(), &path, "video/mp4")
+        .expect("extract mp4");
+
+    // The video track is at index 1; width/height come from it (32x16).
+    assert_eq!(
+        meta.width,
+        Some(32),
+        "width must come from video track, not audio"
+    );
+    assert_eq!(
+        meta.height,
+        Some(16),
+        "height must come from video track, not audio"
+    );
+    assert!(
+        matches!(meta.codec.as_deref(), Some("h264")),
+        "codec must be h264 (video track), got {:?}",
+        meta.codec,
+    );
+    assert_eq!(meta.mime_type.as_deref(), Some("video/mp4"));
+    // Duration should be from the video track (1000 ms = 1s @ 1000 timescale).
+    assert!(
+        meta.duration_ms.unwrap_or(0) > 0,
+        "duration should be > 0, got {:?}",
+        meta.duration_ms,
+    );
+}
