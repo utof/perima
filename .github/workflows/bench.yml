@@ -8,9 +8,9 @@
 
 name: bench
 
+# WHY cron disabled (2026-04-25): user opted to run this manually for now;
+# weekly automation will resume when re-added. workflow_dispatch retained.
 on:
-  schedule:
-    - cron: '0 7 * * 1'  # Mondays 07:00 UTC (1h after slice 3 cargo-fuzz)
   workflow_dispatch:
     inputs:
       sample_size:

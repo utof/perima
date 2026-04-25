@@ -8,8 +8,13 @@
 # merge during slice 1 (continue-on-error swallows non-zero exit).
 
 name: mutants
+# WHY workflow_dispatch added (2026-04-25): allows on-demand "real deal"
+# workspace-wide mutation runs (no --in-diff filter) — much longer than
+# per-PR mode (HOURS, not 1-2 minutes). The per-PR `pull_request:` trigger
+# stays as-is; the run-step branches on github.event_name to choose mode.
 on:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,9 +24,13 @@ env:
 
 jobs:
   mutants:
-    name: cargo mutants --in-diff
+    name: cargo mutants
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    # WHY no `if:` gate: both pull_request AND workflow_dispatch run the job;
+    # the run-step itself branches on github.event_name to pick --in-diff vs
+    # workspace-wide mode. Adding an event-name gate here would skip
+    # workflow_dispatch entirely (the prior `== 'pull_request'` was a leftover
+    # from PR-only-mode and would now block manual runs).
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,19 +69,32 @@ jobs:
       # the CI log so reviewers can see what cargo-mutants will operate
       # on without downloading the artifact. Matches the canonical
       # mutants.rs/in-diff example.
+      #
+      # WHY only on pull_request: workflow_dispatch has no base branch to
+      # diff against; the run-step's workspace mode skips this file.
       - name: Compute diff against base branch
+        if: github.event_name == 'pull_request'
         run: git diff origin/${{ github.base_ref }}.. | tee git.diff
 
-      # WHY continue-on-error: per spec D-4, this slice is observability-
-      # only. cargo-mutants exits 2 when mutants survive, 3 on timeout,
-      # 4 on baseline failure. Without continue-on-error the very first
-      # PR with a survivor blocks the workflow + defeats the
-      # observability-first calibration goal. Precedent: kani.yml uses
-      # the same pattern. Drop this in a future slice once the survivor
-      # baseline is stable.
-      - name: cargo mutants --in-diff
+      # WHY continue-on-error: per spec D-4, observability-only mode.
+      # cargo-mutants exits 2 when mutants survive, 3 on timeout, 4 on
+      # baseline failure. Without continue-on-error the very first PR
+      # (or workspace run) with a survivor blocks the workflow + defeats
+      # the observability-first calibration goal. Precedent: kani.yml
+      # uses the same pattern.
+      #
+      # WHY branch on event_name: pull_request → --in-diff mode (fast,
+      # mutates only changed code per spec slice 1 D-2). workflow_dispatch
+      # → workspace-wide (HOURS, baseline-collection mode). Same workflow
+      # file serves both cadences.
+      - name: cargo mutants
         continue-on-error: true
-        run: cargo mutants --no-shuffle -vV --in-diff git.diff
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            cargo mutants --no-shuffle -vV --in-diff git.diff
+          else
+            cargo mutants --no-shuffle -vV
+          fi
 
       - name: Upload mutants.out
         if: always()

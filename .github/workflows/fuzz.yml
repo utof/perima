@@ -9,9 +9,9 @@
 
 name: fuzz
 
+# WHY cron disabled (2026-04-25): user opted to run this manually for now;
+# weekly automation will resume when re-added. workflow_dispatch retained.
 on:
-  schedule:
-    - cron: '0 6 * * 1'  # Mondays 06:00 UTC
   workflow_dispatch:
     inputs:
       max_total_time:
