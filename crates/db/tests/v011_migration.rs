@@ -10,7 +10,7 @@
 mod common;
 use perima_db::SqliteWriter;
 use perima_db::test_utils::NoopBus;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 #[test]
 fn v011_adds_file_uuid_quick_hash_columns_and_cache_table() {
@@ -19,7 +19,14 @@ fn v011_adds_file_uuid_quick_hash_columns_and_cache_table() {
     let writer = SqliteWriter::start(&db_path, std::sync::Arc::new(NoopBus)).unwrap();
     drop(writer);
 
-    let conn = Connection::open(&db_path).unwrap();
+    // WHY open_with_flags + READ_ONLY: clippy.toml bans rusqlite::Connection::open
+    // (CLAUDE.md "Second-Connection bug class (GH #131) prevention"). RO inspection
+    // is the canonical pattern for post-migration assertions.
+    let conn = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .unwrap();
 
     // file_uuid + quick_hash + verified_distinct on files
     let cols: Vec<String> = conn
