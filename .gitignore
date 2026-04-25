@@ -1,13 +1,11 @@
 **/*.md
 !CHANGELOG.md
-# WHY exception for docs/routines + .claude: cloud agents (scheduled
-# remote triggers) clone the repo fresh and need binding rules to
-# continue autonomous work across sessions. Local WIP .md files
-# elsewhere in the repo remain gitignored.
-# TEMPORARY: CLAUDE.md and docs/superpowers/** re-added to gitignore
-# this session per user request to keep `git status` short and avoid
-# bloating prompt context. Restore the `!CLAUDE.md` and
-# `!docs/superpowers/**/*.md` exceptions when the user lifts the hold.
+!CLAUDE.md
+# WHY exception for docs/superpowers + CLAUDE.md: cloud agents
+# (scheduled remote triggers) clone the repo fresh and need spec/plan
+# artifacts + binding rules to continue autonomous work across
+# sessions. Local WIP .md files elsewhere in the repo remain gitignored.
+!docs/superpowers/**/*.md
 !docs/routines/**/*.md
 !.claude/**/*.md
 # WHY: issue templates (.yml) and any future workflow docs live under
