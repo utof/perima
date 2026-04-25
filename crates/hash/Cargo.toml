@@ -16,6 +16,15 @@ tracing.workspace   = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# WHY criterion: slice 4 of T1 test-architecture decomposition adds
+# Blake3Service hash-throughput benchmarks (3 sizes × 2 hash modes).
+# Observability-only per spec D-4: weekly cron prints results, no
+# threshold gate.
+criterion = "0.5"
+
+[[bench]]
+name = "blake3"
+harness = false  # WHY: criterion installs its own harness; libtest off.
 
 [lints]
 workspace = true
