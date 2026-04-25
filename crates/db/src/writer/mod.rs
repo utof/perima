@@ -52,6 +52,7 @@ use crate::cmd::WriteCmd;
 use crate::connection::open_and_migrate;
 use crate::schema::install_fts_triggers;
 
+mod cache;
 mod file;
 mod metadata;
 mod search;
@@ -270,6 +271,7 @@ fn dispatch(conn: &mut Connection, cmd: WriteCmd, bus: &Arc<dyn EventBus>) {
         WriteCmd::Metadata(c) => metadata::handle(conn, c, bus),
         WriteCmd::File(c) => handle_file(conn, c, bus),
         WriteCmd::Search(c) => search::handle(conn, c, bus),
+        WriteCmd::Cache(c) => cache::handle(conn, c, bus),
         // WHY unreachable: Shutdown is short-circuited in
         // `run_writer_loop` BEFORE this dispatch is invoked. Reaching
         // here means the loop ordering changed without updating

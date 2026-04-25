@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use flume::Sender;
 
 use perima_core::{
-    BlakeHash, CoreError, DeviceId, HashedFile, LocationStatus, MediaMetadata, MediaPath, Tag,
-    UpsertOutcome, VolumeId, VolumeIdentifiers,
+    BlakeHash, CacheEntry, CacheKey, CoreError, DeviceId, HashedFile, LocationStatus,
+    MediaMetadata, MediaPath, Tag, UpsertOutcome, VolumeId, VolumeIdentifiers,
 };
 use uuid::Uuid;
 
@@ -40,6 +40,8 @@ pub enum WriteCmd {
     File(FileWriteCmd),
     /// Search-repo writes (populated Task 6).
     Search(SearchWriteCmd),
+    /// Identity-cache writes (populated Task 6 — cache port).
+    Cache(CacheWriteCmd),
     /// Cooperative shutdown signal — when the writer thread receives
     /// this it exits its loop. Sent by `SqliteWriterHandle::join` and
     /// the `Drop` impl.
@@ -68,6 +70,7 @@ impl WriteCmd {
             Self::Metadata(_) => "metadata",
             Self::File(_) => "file",
             Self::Search(_) => "search",
+            Self::Cache(c) => c.kind_str(),
             Self::Shutdown => "shutdown",
         }
     }
@@ -334,4 +337,63 @@ pub enum SearchWriteCmd {
         /// Reply channel; writer sends `Ok(())` on success.
         reply: ReplyTx<()>,
     },
+}
+
+/// Identity-cache write commands.
+///
+/// WHY device-local (no HLC): `file_identity_cache` caches per-device
+/// filesystem metadata (inode, mtime, size) to avoid rehashing unchanged
+/// files. It is never synced across devices, so CLAUDE.md "Schema rules
+/// expansion" exempts it from the `hlc` column requirement.
+///
+/// WHY writer-side select-then-insert for upsert: the lookup index
+/// `idx_fic_lookup (device_id, volume_id, fs_file_id, size_bytes, mtime_ns)`
+/// is NON-UNIQUE (`mtime_ns` is mutable — CLAUDE.md forbids UNIQUE on
+/// mutable columns). `INSERT … ON CONFLICT DO UPDATE` requires a UNIQUE
+/// target; without one we run a SELECT-then-INSERT-or-UPDATE inside a
+/// single transaction on the writer thread, avoiding a second connection.
+///
+/// WHY no `AppEvent` emission: cache writes affect only device-local state.
+/// The search/files/tags indexes are not stale after a cache write, so
+/// emitting `IndexInvalidated` would cause spurious frontend refreshes.
+#[derive(Debug)]
+pub enum CacheWriteCmd {
+    /// Insert or update the cache row whose lookup tuple matches `key`.
+    ///
+    /// The writer handler runs a transaction that:
+    /// 1. SELECTs the existing live row for `key`.
+    /// 2. If no row exists: INSERTs a fresh UUIDv7-PKd row.
+    /// 3. If a row exists: UPDATEs its `quick_hash` / `full_hash` /
+    ///    `last_verified` / `updated_at`.
+    ///
+    /// Either path sends `Ok(())` on success.
+    UpsertCacheRow {
+        /// Lookup key identifying the file snapshot.
+        key: CacheKey,
+        /// Cached hash data to store (or refresh).
+        entry: CacheEntry,
+        /// Reply channel; writer sends `Ok(())` on success.
+        reply: ReplyTx<()>,
+    },
+    /// Soft-delete the live cache row whose lookup tuple matches `key`.
+    ///
+    /// Sets `deleted_at = NOW` and `updated_at = NOW` on the matched row.
+    /// If no live row exists the operation completes successfully (idempotent).
+    SoftDeleteCacheRow {
+        /// Lookup key identifying the file snapshot to soft-delete.
+        key: CacheKey,
+        /// Reply channel; writer sends `Ok(())` on success.
+        reply: ReplyTx<()>,
+    },
+}
+
+impl CacheWriteCmd {
+    /// Short kind name for tracing spans. WHY: mirrors `WriteCmd::kind_str`
+    /// for per-variant observability (Batch I Task 5 pattern).
+    pub(crate) const fn kind_str(&self) -> &'static str {
+        match self {
+            Self::UpsertCacheRow { .. } => "upsert_cache_row",
+            Self::SoftDeleteCacheRow { .. } => "soft_delete_cache_row",
+        }
+    }
 }

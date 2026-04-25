@@ -2,6 +2,7 @@
 
 pub mod file_repo;
 pub mod hash;
+pub mod identity_cache;
 pub mod metadata_repo;
 pub mod scanner;
 pub mod search_repo;
@@ -10,6 +11,7 @@ pub mod volume_repo;
 
 pub use file_repo::FileRepository;
 pub use hash::HashService;
+pub use identity_cache::{CacheEntry, CacheKey, IdentityCacheRepository};
 pub use metadata_repo::MetadataRepository;
 pub use scanner::Scanner;
 pub use search_repo::SearchRepository;
