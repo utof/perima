@@ -25,17 +25,23 @@ ALTER TABLE files ADD COLUMN quick_hash TEXT;
 
 -- Backfill file_uuid for existing rows.
 -- WHY this encoding: SQLite has no native UUIDv7 generator; the backfill
--- uses current UTC milliseconds in the high 16 hex chars (48 bits) followed
--- by 20 hex chars from randomblob(10) for the low bits.
--- printf '%016x' gives exactly 16 hex chars for the ms timestamp;
--- hex(randomblob(10)) gives exactly 20 hex chars.  lower() matches the
--- UUIDv7-hex convention used elsewhere (uuid crate's to_string is lower-case).
+-- emits 8-4-4-4-12 hyphenated lowercase form to match `Uuid::now_v7().to_string()`
+-- written by the writer actor for newly-inserted rows. The `7` nibble pins the
+-- version (UUIDv7); the `8` nibble pins the variant (RFC 4122 10xx).
+-- WHY hyphenated: the writer's `Uuid::now_v7().to_string()` and other UUID
+-- columns in this schema (tags.id, volumes.volume_id, file_tags.tag_id) all
+-- use the hyphenated form. Mixing hyphenated + unhyphenated would silently
+-- break any future cross-row TEXT comparison (e.g. cache lookup, IPC
+-- argument round-trip).
 -- Acceptable for legacy rows: no semantic ordering is required for
--- pre-migration data.
+-- pre-migration data — high 8 hex chars are random, not a packed timestamp.
 UPDATE files
 SET file_uuid = lower(
-    printf('%016x', CAST((julianday('now') - 2440587.5) * 86400.0 * 1000 AS INTEGER))
-    || hex(randomblob(10))
+    substr(hex(randomblob(4)), 1, 8) || '-' ||
+    substr(hex(randomblob(2)), 1, 4) || '-' ||
+    '7' || substr(hex(randomblob(2)), 1, 3) || '-' ||
+    '8' || substr(hex(randomblob(2)), 1, 3) || '-' ||
+    hex(randomblob(6))
 )
 WHERE file_uuid IS NULL;
 

@@ -347,12 +347,13 @@ fn upsert_location_impl(
         None => {
             let id = perima_core::ids::new_id().to_string();
             // WHY file_uuid via subquery: post-V011 + Task 3 trigger pivot,
-            // FTS5 triggers join on file_uuid (spec §4.1.4). The owning
-            // `files` row was upserted earlier in the same scan command,
-            // so its file_uuid is available via blake3_hash lookup. NULL
-            // result here would mean the caller violated the
-            // upsert-file-before-upsert-location contract — defensive
-            // COALESCE retains historical behaviour without crashing.
+            // FTS5 triggers join on file_uuid. The owning `files` row was
+            // upserted earlier in the same scan command, so its file_uuid
+            // is available via blake3_hash lookup. NULL result here would
+            // mean the caller violated the upsert-file-before-upsert-location
+            // contract — the bare subquery returns NULL silently, which keeps
+            // the INSERT alive (file_uuid TEXT is nullable in V011) and
+            // surfaces the bug downstream rather than crashing the writer.
             tx.execute(
                 "INSERT INTO file_locations
                  (id, blake3_hash, file_uuid, volume_id, relative_path, status,
