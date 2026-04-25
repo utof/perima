@@ -1,0 +1,41 @@
+[package]
+name = "perima-fuzz"
+version = "0.0.0"
+publish = false
+# WHY edition 2024: matches the workspace's [workspace.package] edition = "2024"
+# (workspace rust-version = "1.88"). cargo-fuzz templates default to 2021 but
+# the libfuzzer-sys macros work fine on 2024; aligning eliminates a needless
+# mismatch that would surface as a clippy warning under -D warnings.
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3"
+perima-core = { path = "../crates/core" }
+perima-hash = { path = "../crates/hash" }
+perima-media = { path = "../crates/media" }
+
+[[bin]]
+name = "exif"
+path = "fuzz_targets/exif.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "blake3"
+path = "fuzz_targets/blake3.rs"
+test = false
+doc = false
+bench = false
+
+# WHY [workspace] members = [] (load-bearing): tells Cargo this is a leaf
+# workspace independent of the parent (../Cargo.toml). Without it, Cargo
+# would treat the parent as the workspace root and force the parent's
+# stable toolchain on the fuzz crate, breaking the nightly pin in
+# rust-toolchain.toml.
+[workspace]
+members = []

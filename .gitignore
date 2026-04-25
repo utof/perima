@@ -12,6 +12,10 @@
 # .github/; the blanket **/*.md rule would otherwise exclude markdown
 # files added there (e.g. pull_request_template.md).
 !.github/**
+# WHY: fuzz/README.md is a contributor-facing quick-start doc for the
+# cargo-fuzz harness; it needs to be tracked so new contributors can
+# find invocation + triage instructions without reading source files.
+!fuzz/README.md
 target/
 .DS_Store
 *.swp

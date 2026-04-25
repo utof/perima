@@ -1,0 +1,35 @@
+# cargo-mutants config — see https://mutants.rs/configuration
+#
+# WHY this file exists: per-PR mutation testing wired as a CI workflow
+# (.github/workflows/mutants.yml) needs centralised scope + test-runner
+# config that survives independent of the workflow file. See spec
+# docs/superpowers/specs/2026-04-24-cargo-mutants-design.md.
+
+# WHY test_tool = "nextest" (mandatory): CLAUDE.md "Test stack" bans
+# `cargo test` for non-doc tests because of the SQLite lock-order
+# inversion deadlock (GH #131). cargo-mutants defaults to `cargo test`;
+# this override routes through `cargo nextest` instead. The repo-level
+# scripts/no-cargo-test.sh enforces the ban only on yml/sh/justfile
+# string scans, so cargo-mutants invoked via `cargo mutants` would NOT
+# be caught — but the deadlock still hits, hence the override is
+# load-bearing for correctness.
+test_tool = "nextest"
+
+# WHY exclude_globs targets crates/desktop/**: Tauri/GTK system-dep
+# friction (see Batch D known env limitation in
+# docs/superpowers/plans/architecture-audit-done-cheatsheet.md). Most
+# desktop code is wire-up; mutation surface is low value. Re-introducing
+# desktop coverage requires a separate Linux-deps setup commit + a
+# justification for the CPU cost. This is the SOLE mechanism scoping
+# mutation generation — do NOT also pass `--workspace --exclude
+# perima-desktop` via `additional_cargo_args` (that key is for build
+# flags like `--release`/`--all-features` and would clash with
+# cargo-mutants' own per-package selection layer).
+exclude_globs = ["crates/desktop/**"]
+
+# WHY timeout_multiplier = 5.0: ScanUseCase + WriteCmd dispatch are
+# fundamentally async + spawned tasks; cargo-mutants' default per-mutant
+# timeout heuristics over-trigger on async fns. 5x default ≈ 25s per
+# mutant kill attempt before cargo-mutants logs `TIMEOUT`. Tune down
+# once baseline is observed across ~10 PRs.
+timeout_multiplier = 5.0
