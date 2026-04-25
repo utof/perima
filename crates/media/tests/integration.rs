@@ -261,3 +261,26 @@ fn image_extractor_directory_path_returns_default() {
     assert_eq!(meta.width, None);
     assert_eq!(meta.height, None);
 }
+
+#[test]
+fn image_extractor_garbage_png_returns_no_dims() {
+    // WHY: exercises the `image::image_dimensions` Err arm in
+    // ImageExtractor::extract (debug log path). 16 zero bytes are
+    // not a valid PNG header (PNG signature is "\x89PNG\r\n\x1a\n").
+    // Contract: extract returns Ok with width=None, height=None,
+    // mime_type populated. read_exif also fails (not a parseable
+    // image) but does not propagate.
+    use std::fs;
+    let td = tempdir().expect("tempdir");
+    let path = td.path().join("garbage.png");
+    fs::write(&path, [0u8; 16]).expect("write garbage");
+
+    let extractor = ImageExtractor::new();
+    let meta = extractor
+        .extract(dummy_hash(), &path, "image/png")
+        .expect("extract must not propagate decode errors");
+
+    assert_eq!(meta.width, None, "garbage PNG must have width = None");
+    assert_eq!(meta.height, None, "garbage PNG must have height = None");
+    assert_eq!(meta.mime_type.as_deref(), Some("image/png"));
+}
