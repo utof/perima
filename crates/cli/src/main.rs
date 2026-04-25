@@ -23,12 +23,12 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use perima_app::{AppContainer, AppDeps, EventHandler};
 use perima_core::{
-    FileRepository, HashService, MetadataRepository, Scanner, SearchRepository, TagRepository,
-    VolumeRepository,
+    FileRepository, HashService, IdentityCacheRepository, MetadataRepository, Scanner,
+    SearchRepository, TagRepository, VolumeRepository,
 };
 use perima_db::{
-    ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository,
-    SqliteTagRepository, SqliteVolumeRepository, SqliteWriter,
+    ReadPool, SqliteFileRepository, SqliteIdentityCacheRepository, SqliteMetadataRepository,
+    SqliteSearchRepository, SqliteTagRepository, SqliteVolumeRepository, SqliteWriter,
 };
 use perima_fs::WalkdirScanner;
 use perima_hash::Blake3Service;
@@ -308,7 +308,9 @@ fn build_container(
         reads.clone(),
     ));
     let search: Arc<dyn SearchRepository> =
-        Arc::new(SqliteSearchRepository::new(writer.sender(), reads));
+        Arc::new(SqliteSearchRepository::new(writer.sender(), reads.clone()));
+    let identity_cache: Arc<dyn IdentityCacheRepository> =
+        Arc::new(SqliteIdentityCacheRepository::new(writer.sender(), reads));
     let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
     let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());
     // WHY no explicit `writer` keep-alive: every adapter above holds a
@@ -337,6 +339,7 @@ fn build_container(
         tags,
         metadata,
         search,
+        identity_cache,
         hasher,
         scanner,
         thumbnailer,

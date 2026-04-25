@@ -28,8 +28,8 @@ pub use types::{
 
 pub mod ports;
 pub use ports::{
-    CacheEntry, CacheKey, FileRepository, HashService, IdentityCacheRepository, MetadataRepository,
-    Scanner, SearchRepository, TagRepository, VolumeRepository,
+    CacheEntry, CacheKey, FileRepository, FileStat, HashService, IdentityCacheRepository,
+    MetadataRepository, Scanner, SearchRepository, TagRepository, VolumeRepository,
 };
 
 /// Marker placeholder. Retained as a public symbol for phase-0

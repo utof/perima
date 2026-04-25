@@ -8,11 +8,12 @@ use std::sync::{Arc, Mutex};
 
 use perima_app::{FullScan, ScanCommand, ScanUseCase};
 use perima_core::{
-    AppEvent, CoreError, EventBus, FileRepository, HashService, MetadataRepository, Scanner,
-    VolumeRepository,
+    AppEvent, CoreError, EventBus, FileRepository, HashService, IdentityCacheRepository,
+    MetadataRepository, Scanner, VolumeRepository,
 };
 use perima_db::{
-    ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteVolumeRepository, SqliteWriter,
+    ReadPool, SqliteFileRepository, SqliteIdentityCacheRepository, SqliteMetadataRepository,
+    SqliteVolumeRepository, SqliteWriter,
 };
 use perima_fs::WalkdirScanner;
 use perima_hash::Blake3Service;
@@ -94,8 +95,12 @@ async fn scan_use_case_emits_scan_completed_on_success() {
         Arc::new(SqliteFileRepository::new(writer.sender(), reads.clone()));
     let volumes: Arc<dyn VolumeRepository> =
         Arc::new(SqliteVolumeRepository::new(writer.sender(), reads.clone()));
-    let metadata: Arc<dyn MetadataRepository> =
-        Arc::new(SqliteMetadataRepository::new(writer.sender(), reads));
+    let metadata: Arc<dyn MetadataRepository> = Arc::new(SqliteMetadataRepository::new(
+        writer.sender(),
+        reads.clone(),
+    ));
+    let cache: Arc<dyn IdentityCacheRepository> =
+        Arc::new(SqliteIdentityCacheRepository::new(writer.sender(), reads));
 
     let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());
     let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
@@ -110,6 +115,7 @@ async fn scan_use_case_emits_scan_completed_on_success() {
         files,
         volumes,
         metadata,
+        cache,
         scanner,
         hasher,
         thumbnailer,

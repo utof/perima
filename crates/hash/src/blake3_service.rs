@@ -111,6 +111,24 @@ impl HashService for Blake3Service {
         hash_file(path, None).map_err(Into::into)
     }
 
+    /// MUST-OVERRIDE implementation (spec §4.4) — forwards to the inherent
+    /// [`Blake3Service::quick_hash_prefix_suffix`] so trait-object callers
+    /// (e.g. `ScanUseCase`'s `Arc<dyn HashService>`) get the prefix-‖-suffix
+    /// shape and not the trait's `quick_hash` fallback.
+    ///
+    /// WHY UFCS form `Self::...`: `self.quick_hash_prefix_suffix(...)` would
+    /// resolve to the trait method (the one we're implementing) and
+    /// infinite-recurse. `Self::quick_hash_prefix_suffix(self, ...)` pins
+    /// the call to the inherent impl above (rustc resolves inherent method
+    /// names ahead of trait method names — see Rust ref. §6.10.1).
+    fn quick_hash_prefix_suffix(
+        &self,
+        path: &Path,
+        size_bytes: u64,
+    ) -> Result<BlakeHash, CoreError> {
+        Self::quick_hash_prefix_suffix(self, path, size_bytes)
+    }
+
     /// MUST-OVERRIDE implementation (spec §4.5.1) — dispatch matrix:
     ///
     /// | Size          | HDD             | SSD / Unknown     |

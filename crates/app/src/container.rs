@@ -22,8 +22,8 @@
 use std::sync::Arc;
 
 use perima_core::{
-    FileRepository, HashService, MetadataRepository, Scanner, SearchRepository, TagRepository,
-    VolumeRepository, events::EventBus,
+    FileRepository, HashService, IdentityCacheRepository, MetadataRepository, Scanner,
+    SearchRepository, TagRepository, VolumeRepository, events::EventBus,
 };
 use perima_media::ThumbnailGenerator;
 
@@ -58,6 +58,12 @@ pub struct AppDeps {
     pub metadata: Arc<dyn MetadataRepository>,
     /// Search repository port (FTS5-backed in the live adapter).
     pub search: Arc<dyn SearchRepository>,
+    /// Tier-0 identity-cache repository port (device-local; stores
+    /// `quick_hash` and optional `full_hash` keyed on the tuple
+    /// `(device, volume, fs_file_id, size, mtime_ns)`). Wired into
+    /// `ScanUseCase` so re-scans skip rehashing unchanged files
+    /// (spec §4.3 — the v0.6.x perf landing).
+    pub identity_cache: Arc<dyn IdentityCacheRepository>,
     /// Content-hash service port.
     pub hasher: Arc<dyn HashService>,
     /// Filesystem walker port.
@@ -210,6 +216,7 @@ impl AppContainer {
             Arc::clone(&deps.files),
             Arc::clone(&deps.volumes),
             Arc::clone(&deps.metadata),
+            Arc::clone(&deps.identity_cache),
             Arc::clone(&deps.scanner),
             Arc::clone(&deps.hasher),
             Arc::clone(&deps.thumbnailer),
@@ -281,8 +288,9 @@ mod tests {
 
     use perima_core::{AppEvent, FileEvent, MediaPath, VolumeId};
     use perima_db::{
-        ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository,
-        SqliteTagRepository, SqliteVolumeRepository, SqliteWriter, SqliteWriterHandle,
+        ReadPool, SqliteFileRepository, SqliteIdentityCacheRepository, SqliteMetadataRepository,
+        SqliteSearchRepository, SqliteTagRepository, SqliteVolumeRepository, SqliteWriter,
+        SqliteWriterHandle,
     };
     use perima_fs::WalkdirScanner;
     use perima_hash::Blake3Service;
@@ -349,7 +357,9 @@ mod tests {
             reads.clone(),
         ));
         let search: Arc<dyn SearchRepository> =
-            Arc::new(SqliteSearchRepository::new(writer.sender(), reads));
+            Arc::new(SqliteSearchRepository::new(writer.sender(), reads.clone()));
+        let identity_cache: Arc<dyn perima_core::IdentityCacheRepository> =
+            Arc::new(SqliteIdentityCacheRepository::new(writer.sender(), reads));
         let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
         let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());
         let thumbnailer: Arc<ThumbnailGenerator> = Arc::new(ThumbnailGenerator::disabled());
@@ -362,6 +372,7 @@ mod tests {
                 tags,
                 metadata,
                 search,
+                identity_cache,
                 hasher,
                 scanner,
                 thumbnailer,

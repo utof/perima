@@ -25,12 +25,13 @@ use std::sync::Arc;
 
 use perima_app::{AppContainer, AppDeps, EventHandler, LogEventHandler};
 use perima_core::{
-    EventBus, FileRepository, HashService, MetadataRepository, Scanner, SearchRepository,
-    TagRepository, VolumeRepository,
+    EventBus, FileRepository, HashService, IdentityCacheRepository, MetadataRepository, Scanner,
+    SearchRepository, TagRepository, VolumeRepository,
 };
 use perima_db::{
-    ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository,
-    SqliteTagRepository, SqliteVolumeRepository, SqliteWriter, SqliteWriterHandle,
+    ReadPool, SqliteFileRepository, SqliteIdentityCacheRepository, SqliteMetadataRepository,
+    SqliteSearchRepository, SqliteTagRepository, SqliteVolumeRepository, SqliteWriter,
+    SqliteWriterHandle,
 };
 use perima_fs::WalkdirScanner;
 use perima_hash::Blake3Service;
@@ -280,7 +281,9 @@ fn build_container(
         writer.sender(),
         reads.clone(),
     ));
-    let search_repo = Arc::new(SqliteSearchRepository::new(writer.sender(), reads));
+    let search_repo = Arc::new(SqliteSearchRepository::new(writer.sender(), reads.clone()));
+    let identity_cache: Arc<dyn IdentityCacheRepository> =
+        Arc::new(SqliteIdentityCacheRepository::new(writer.sender(), reads));
     // WHY `.clone()` not `Arc::clone(&_)`: `AppDeps::{tags,metadata,search}`
     // are `Arc<dyn _>`. Method-syntax `.clone()` anchors `T = SqliteX` from
     // the receiver, returns `Arc<SqliteX>`, and the let binding triggers
@@ -313,6 +316,7 @@ fn build_container(
         tags,
         metadata,
         search,
+        identity_cache,
         hasher,
         scanner,
         thumbnailer,
