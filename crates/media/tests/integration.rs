@@ -234,3 +234,30 @@ fn composite_dispatches_by_mime() {
     );
     assert!(unknown.codec.is_none());
 }
+
+#[test]
+fn image_extractor_directory_path_returns_default() {
+    // WHY: exercises the read_exif `MediaSource::file_path` Err arm
+    // (warn log path). Passing a directory path causes nom-exif to fail
+    // at File::open (EISDIR on Linux; kind may differ on macOS/Windows).
+    // The contract: extract() must NOT propagate the I/O error — it
+    // returns Ok(MediaMetadata) with EXIF fields = None and mime_type
+    // populated. Regression target: GH #110-style "real I/O bugs in
+    // logs" surfacing.
+    let td = tempdir().expect("tempdir");
+    // Pass the directory itself as the path — File::open on a dir errs.
+    let dir_path = td.path();
+
+    let extractor = ImageExtractor::new();
+    let meta = extractor
+        .extract(dummy_hash(), dir_path, "image/jpeg")
+        .expect("extract must not propagate the I/O error");
+
+    assert_eq!(meta.captured_at, None);
+    assert_eq!(meta.camera_make, None);
+    assert_eq!(meta.camera_model, None);
+    assert_eq!(meta.mime_type.as_deref(), Some("image/jpeg"));
+    // image::image_dimensions also fails on a dir → dims also None.
+    assert_eq!(meta.width, None);
+    assert_eq!(meta.height, None);
+}
