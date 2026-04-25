@@ -23,7 +23,12 @@ export const searchKeys = {
     [...searchKeys.all, "query", { q, limit }] as const,
 } as const;
 
-export function searchQueryOptions(query: string, limit = 50) {
+// WHY default 500 (was 50): paired with useFiles(1000) above; with limit=50
+// the intersection silently dropped most matches in libraries >50 results
+// (e.g. searching "mp4" in a 340-mp4 library returned 3 visible). 500 is
+// generous for a single search page; full-corpus pagination is a separate
+// effort tracked alongside virtualisation.
+export function searchQueryOptions(query: string, limit = 500) {
   return queryOptions({
     queryKey: searchKeys.query(query, limit),
     queryFn: () =>

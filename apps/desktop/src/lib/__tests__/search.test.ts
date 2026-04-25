@@ -3,24 +3,34 @@ import { buildFtsQuery, computeFacets, composeVisible, sortByRank } from "../sea
 import { file } from "./fixtures";
 
 describe("buildFtsQuery", () => {
-  it("quotes plain tokens with implicit AND", () => {
-    expect(buildFtsQuery("sunset photos")).toBe('"sunset" "photos"');
+  // WHY assertions updated 2026-04-25: plain queries now auto-prefix the
+  // last token. Phrase-passthrough and explicit `*` paths unchanged.
+  it("quotes earlier tokens + auto-prefixes the last", () => {
+    expect(buildFtsQuery("sunset photos")).toBe('"sunset" "photos"*');
   });
 
-  it("passes explicit phrase queries verbatim", () => {
+  it("auto-prefixes a single token", () => {
+    expect(buildFtsQuery("mp4")).toBe('"mp4"*');
+  });
+
+  it("auto-prefixes a 2-character query (covers the 'Cl' → Claude case)", () => {
+    expect(buildFtsQuery("Cl")).toBe('"Cl"*');
+  });
+
+  it("passes explicit phrase queries verbatim (whole-token mode)", () => {
     expect(buildFtsQuery('"blue ridge"')).toBe('"blue ridge"');
   });
 
-  it("wraps prefix queries with quoted-token + asterisk", () => {
+  it("wraps explicit prefix queries with quoted-token + asterisk", () => {
     expect(buildFtsQuery("sunse*")).toBe('"sunse"*');
   });
 
-  it("handles apostrophes inside quoted tokens", () => {
-    expect(buildFtsQuery("it's fine")).toBe('"it\'s" "fine"');
+  it("handles apostrophes inside quoted tokens (auto-prefixed)", () => {
+    expect(buildFtsQuery("it's fine")).toBe('"it\'s" "fine"*');
   });
 
-  it("handles slashes and dots inside quoted tokens", () => {
-    expect(buildFtsQuery("a/b.jpg")).toBe('"a/b.jpg"');
+  it("handles slashes and dots inside quoted tokens (auto-prefixed)", () => {
+    expect(buildFtsQuery("a/b.jpg")).toBe('"a/b.jpg"*');
   });
 
   it("returns empty string on whitespace-only input", () => {
@@ -28,20 +38,20 @@ describe("buildFtsQuery", () => {
     expect(buildFtsQuery("")).toBe("");
   });
 
-  it("strips parens and leading dashes before tokenising", () => {
-    // (foo OR bar) → parens stripped → tokens foo, OR, bar
-    expect(buildFtsQuery("(foo OR bar)")).toBe('"foo" "OR" "bar"');
+  it("strips parens and leading dashes before tokenising (auto-prefixed)", () => {
+    // (foo OR bar) → parens stripped → tokens foo, OR, bar; last gets *
+    expect(buildFtsQuery("(foo OR bar)")).toBe('"foo" "OR" "bar"*');
   });
 
   it("strips bare unpaired double-quote", () => {
     expect(buildFtsQuery('"')).toBe("");
   });
 
-  it("strips leading dash on a token (FTS5 negation hazard)", () => {
-    expect(buildFtsQuery("-foo")).toBe('"foo"');
+  it("strips leading dash on a token (FTS5 negation hazard, auto-prefixed)", () => {
+    expect(buildFtsQuery("-foo")).toBe('"foo"*');
   });
 
-  it("wraps multi-token prefix queries with earlier tokens quoted + last token asterisked", () => {
+  it("respects explicit prefix on multi-token queries", () => {
     expect(buildFtsQuery("foo bar*")).toBe('"foo" "bar"*');
   });
 });

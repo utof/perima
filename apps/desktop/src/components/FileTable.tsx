@@ -1,6 +1,55 @@
 import { useState } from "react";
-import type { FileWithTagsPayload } from "../bindings";
+import type { FileWithTagsPayload, Tag } from "../bindings";
 import TagChip from "./TagChip";
+import { useAttachTag, useDetachTag } from "../queries/tags";
+
+/**
+ * Per-row tag input + chip strip with detach buttons.
+ *
+ * WHY a sub-component (not inline in FileTable's row map): each row owns
+ * its own draft text state. Hoisting it into FileTable's render would
+ * collapse all rows into one shared input — every keystroke would re-render
+ * every row. A small per-row component keeps state local.
+ */
+function RowTagsCell({ hash, tags }: { hash: string; tags: Tag[] }) {
+  const [draft, setDraft] = useState("");
+  const attach = useAttachTag();
+  const detach = useDetachTag();
+
+  function submit() {
+    const name = draft.trim();
+    if (name === "") return;
+    attach.mutate({ hash, tagName: name });
+    setDraft("");
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {tags.map((t) => (
+        <TagChip
+          key={t.id}
+          tag={t}
+          onRemove={() => { detach.mutate({ hash, tagId: t.id }); }}
+        />
+      ))}
+      <input
+        type="text"
+        value={draft}
+        onChange={(e) => { setDraft(e.target.value); }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            submit();
+          }
+        }}
+        placeholder="+ tag"
+        aria-label={`Add tag to file ${hash.slice(0, 8)}`}
+        disabled={attach.isPending}
+        className="w-20 bg-gray-700 text-white text-xs rounded px-1.5 py-0.5 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
+      />
+    </div>
+  );
+}
 
 /** Props for {@link FileTable}. */
 interface FileTableProps {
@@ -114,16 +163,7 @@ export default function FileTable({ files, loading }: FileTableProps) {
                 </td>
                 <td className="px-3 py-2">{f.status}</td>
                 <td className="px-3 py-2">
-                  <div className="flex flex-wrap gap-1">
-                    {f.tags.slice(0, 3).map((t) => (
-                      <TagChip key={t.id} tag={t} />
-                    ))}
-                    {f.tags.length > 3 && (
-                      <span className="text-xs text-gray-400">
-                        +{f.tags.length - 3}
-                      </span>
-                    )}
-                  </div>
+                  <RowTagsCell hash={f.hash} tags={f.tags} />
                 </td>
               </tr>
             ))

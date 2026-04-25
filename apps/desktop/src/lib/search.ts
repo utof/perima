@@ -56,10 +56,27 @@ export function buildFtsQuery(raw: string): string {
     return prefix === "" ? suffix : `${prefix} ${suffix}`;
   }
 
-  // Plain tokens: strip unsafe, split, quote each.
+  // Plain tokens: strip unsafe, split, quote each, AND auto-suffix `*` to
+  // the last token so users get prefix-match by default.
+  //
+  // WHY auto-prefix on the last token (added 2026-04-25): FTS5's default
+  // is whole-token MATCH — typing "Cl" returned zero results even when
+  // many files contained "Claude" because there's no token literally
+  // equal to "cl". Native expectation in 2026 is "match as I type".
+  // Earlier tokens are kept as whole-token AND clauses (so "vacation
+  // sun" matches "vacation sunset" but also "vacation sundown" — the
+  // last-token-prefix rule, NOT every-token-prefix, balances recall
+  // against noise). Users who want exact whole-token can wrap in quotes
+  // (phrase passthrough); users who want explicit prefix can still type
+  // `foo*` (handled above).
   const sanitized = stripUnsafe(trimmed);
   const tokens = sanitized.split(/\s+/).filter((t) => t !== "");
-  return tokens.map((t) => `"${t}"`).join(" ");
+  if (tokens.length === 0) return "";
+  // WHY: filter+length-guard above means tokens is non-empty here.
+  const last = tokens.pop()!;
+  const prefix = tokens.map((t) => `"${t}"`).join(" ");
+  const suffix = `"${last}"*`;
+  return prefix === "" ? suffix : `${prefix} ${suffix}`;
 }
 
 /** Strip FTS5-unsafe characters before tokenisation. */

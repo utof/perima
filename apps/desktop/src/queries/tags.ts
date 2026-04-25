@@ -10,8 +10,9 @@
  * the thrown `CoreError` as `error`. Do NOT use `.unwrapOr(...)` which silently
  * swallows errors.
  */
-import { queryOptions, useQuery } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "../api";
+import { filesKeys } from "./files";
 
 export const tagsKeys = {
   all: ["tags"] as const,
@@ -36,4 +37,54 @@ export function tagsQueryOptions() {
 
 export function useTags() {
   return useQuery(tagsQueryOptions());
+}
+
+/**
+ * Mutation: attach a tag to a file by hash + tag name.
+ *
+ * On success, invalidates the files list and the tags list so the new tag
+ * (or new attachment) shows up everywhere it's rendered. Errors propagate
+ * as `CoreError` via the registered defaultError type.
+ *
+ * WHY useMutation (not raw api call): TanStack Query handles the
+ * pending/success/error UI state + the cache-invalidation atomically,
+ * keeping the `useDomainEvents` event-driven invalidation as a fallback
+ * (events fire after the writer commits; the optimistic invalidate
+ * here is just a UX nicety to refresh sooner than the round-trip).
+ */
+export function useAttachTag() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { hash: string; tagName: string }) =>
+      api.attachTag(vars.hash, vars.tagName).match(
+        (tag) => tag,
+        // eslint-disable-next-line @typescript-eslint/only-throw-error
+        (err) => { throw err; },
+      ),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: filesKeys.all });
+      void qc.invalidateQueries({ queryKey: tagsKeys.all });
+    },
+  });
+}
+
+/**
+ * Mutation: detach a tag from a file by hash + tag id.
+ *
+ * Symmetric to `useAttachTag`. Same invalidation strategy.
+ */
+export function useDetachTag() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { hash: string; tagId: string }) =>
+      api.detachTag(vars.hash, vars.tagId).match(
+        (v) => v,
+        // eslint-disable-next-line @typescript-eslint/only-throw-error
+        (err) => { throw err; },
+      ),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: filesKeys.all });
+      void qc.invalidateQueries({ queryKey: tagsKeys.all });
+    },
+  });
 }

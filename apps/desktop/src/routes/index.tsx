@@ -20,7 +20,15 @@ import TagSidebar from "../components/TagSidebar";
 import { composeVisible, computeFacets, sortByRank } from "../lib/search";
 
 export default function IndexRoute() {
-  const { data: files = [], isLoading: filesLoading } = useFiles(100);
+  // WHY 1000 (was 100): the v0.6.x display path uses an intersection
+  // pattern — visible files = useFiles(N) ∩ search hits. With N=100 a
+  // library larger than 100 files showed only the search hits that
+  // happened to be in the first-100 page (e.g. searching "mp4" in a
+  // 340-file library returned 3 of 339 actual matches). Bumping to
+  // 1000 covers the common case (<1k files) without rearchitecting.
+  // Real fix for 10k+ libraries: virtualisation + result-driven
+  // pagination; tracked separately.
+  const { data: files = [], isLoading: filesLoading } = useFiles(1000);
   const { data: tags = [] } = useTags();
   const viewMode = useUiStore((s) => s.viewMode);
   const selectedTagId = useUiStore((s) => s.selectedTagId); // WHY kept: still used by composeVisible below

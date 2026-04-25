@@ -72,22 +72,23 @@ describe("SearchBar", () => {
 
     await advance(300);
 
-    // buildFtsQuery("ab") → '"ab"' per the canonical sanitiser.
-    expect(useUiStore.getState().debouncedQuery).toBe('"ab"');
+    // buildFtsQuery("ab") → '"ab"*' per the auto-prefix sanitiser
+    // (added 2026-04-25: plain queries get last-token-prefix matching).
+    expect(useUiStore.getState().debouncedQuery).toBe('"ab"*');
   });
 
   it("sets debouncedQuery for a multi-word input after 300ms", async () => {
     renderWithProviders(<SearchBar />);
     fireEvent.change(getInput(), { target: { value: "sunset" } });
     await advance(300);
-    expect(useUiStore.getState().debouncedQuery).toBe('"sunset"');
+    expect(useUiStore.getState().debouncedQuery).toBe('"sunset"*');
   });
 
   it("clearing the input back below MIN_QUERY_LEN resets debouncedQuery to ''", async () => {
     renderWithProviders(<SearchBar />);
     fireEvent.change(getInput(), { target: { value: "sunset" } });
     await advance(300);
-    expect(useUiStore.getState().debouncedQuery).toBe('"sunset"');
+    expect(useUiStore.getState().debouncedQuery).toBe('"sunset"*');
 
     fireEvent.change(getInput(), { target: { value: "" } });
     expect(useUiStore.getState().searchQuery).toBe("");
@@ -102,7 +103,7 @@ describe("SearchBar", () => {
     const { rerender } = renderWithProviders(<SearchBar />);
     fireEvent.change(getInput(), { target: { value: "sunset" } });
     await advance(300);
-    expect(useUiStore.getState().debouncedQuery).toBe('"sunset"');
+    expect(useUiStore.getState().debouncedQuery).toBe('"sunset"*');
 
     // Spy on the underlying store setState — patching individual action
     // functions via vi.spyOn would change their identity and cause the

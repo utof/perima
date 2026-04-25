@@ -14,7 +14,11 @@ import { useUiStore } from "../stores/ui";
 import { MIN_QUERY_LEN } from "../queries/search";
 import { buildFtsQuery } from "../lib/search";
 
-const DEBOUNCE_MS = 300;
+// WHY 180 (was 300, lowered 2026-04-25 by 40%): user feedback that 300ms
+// felt sluggish for incremental typing. 180ms still coalesces fast typists
+// (avg keystroke gap ~150-200ms) so we don't issue an IPC per keystroke,
+// but feels "live" on slow typing or paste.
+const DEBOUNCE_MS = 180;
 
 export default function SearchBar() {
   const searchQuery = useUiStore((s) => s.searchQuery);

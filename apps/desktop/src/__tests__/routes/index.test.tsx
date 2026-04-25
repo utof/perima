@@ -69,8 +69,13 @@ describe("IndexRoute composition", () => {
     });
 
     // Both vacation + sunset rows visible in mode=all.
-    expect(screen.getByRole("button", { name: /vacation/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /sunset/i })).toBeInTheDocument();
+    // WHY anchored regex (added 2026-04-25): TagChip now also renders an X
+    // button with aria-label "Remove vacation" for inline detach, so plain
+    // /vacation/i matches multiple buttons. Anchor at start to scope to
+    // the sidebar facet button whose accessible name begins with the tag
+    // name itself.
+    expect(screen.getByRole("button", { name: /^vacation/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^sunset/i })).toBeInTheDocument();
   });
 
   it("case 2: tag filter only → narrowed; sidebar All count remains full set", async () => {
@@ -84,8 +89,9 @@ describe("IndexRoute composition", () => {
       expect(allBtn.textContent).toContain("4");
     });
 
-    // vacation count chip = 2 (files a + b).
-    const vacationBtn = screen.getByRole("button", { name: /vacation/i });
+    // vacation count chip = 2 (files a + b). Anchored to skip TagChip's
+    // "Remove vacation" detach buttons in the table cells.
+    const vacationBtn = screen.getByRole("button", { name: /^vacation/i });
     expect(vacationBtn.textContent).toContain("2");
   });
 
