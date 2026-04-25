@@ -74,13 +74,20 @@ jobs:
       # the very first crash blocks all future runs of this workflow
       # until the crash is fixed. Precedent: kani.yml + mutants.yml use
       # the same pattern.
+      #
+      # WHY --target x86_64-unknown-linux-gnu (added 2026-04-25): cargo-fuzz
+      # 0.13+ defaults to --target x86_64-unknown-linux-musl on Linux, but
+      # musl statically links libc which AddressSanitizer rejects
+      # ("sanitizer is incompatible with statically linked libc"). Pinning
+      # gnu uses the host triple already installed by dtolnay/rust-toolchain
+      # — no extra `rustup target add` step needed.
       - name: Run cargo fuzz target ${{ matrix.target }}
         continue-on-error: true
         env:
           MAX_TIME: ${{ github.event.inputs.max_total_time || '300' }}
         run: |
           cd fuzz
-          cargo fuzz run ${{ matrix.target }} -- -max_total_time=$MAX_TIME
+          cargo fuzz run ${{ matrix.target }} --target x86_64-unknown-linux-gnu -- -max_total_time=$MAX_TIME
 
       - name: Upload artifacts (if any crashes)
         if: always()

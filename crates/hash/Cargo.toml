@@ -7,6 +7,13 @@ license.workspace = true
 repository.workspace = true
 publish = false  # WHY: intra-workspace only; not published to crates.io
 
+# WHY bench = false on lib (added 2026-04-25): `cargo bench -p perima-hash`
+# without this flag also runs the lib's libtest harness on src/lib.rs, which
+# rejects criterion's `--sample-size` flag with "Unrecognized option". Only
+# the [[bench]] target below should receive bench-runner args.
+[lib]
+bench = false
+
 [dependencies]
 perima-core = { path = "../core" }
 thiserror.workspace = true
