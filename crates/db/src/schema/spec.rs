@@ -89,7 +89,7 @@ pub const LEGACY_TRIGGER_NAMES: &[&str] = &[
     "search_after_location_hash_change_retire",
 ];
 
-/// The 16 trigger entries the codegen renders.
+/// The 15 trigger entries the codegen renders.
 ///
 /// Order matters for fire-order on combined-transaction UPDATE statements
 /// (`SQLite` fires triggers in CREATE order). See spec §7.1 + V007 inline
