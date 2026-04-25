@@ -284,3 +284,27 @@ fn image_extractor_garbage_png_returns_no_dims() {
     assert_eq!(meta.height, None, "garbage PNG must have height = None");
     assert_eq!(meta.mime_type.as_deref(), Some("image/png"));
 }
+
+#[test]
+fn video_extractor_garbage_mp4_returns_default() {
+    // WHY: exercises VideoExtractor::extract `mp4parse::read_mp4` Err
+    // arm (debug log) per slice 2 spec §4 D-2 B5. 16 zero bytes lack
+    // any valid ISO box structure. Contract: extract returns Ok with
+    // an empty MediaMetadata (mime_type populated, every other field
+    // None).
+    use std::fs;
+    let td = tempdir().expect("tempdir");
+    let path = td.path().join("garbage.mp4");
+    fs::write(&path, [0u8; 16]).expect("write garbage");
+
+    let extractor = VideoExtractor::new();
+    let meta = extractor
+        .extract(dummy_hash(), &path, "video/mp4")
+        .expect("extract must not propagate mp4parse errors");
+
+    assert_eq!(meta.duration_ms, None);
+    assert_eq!(meta.width, None);
+    assert_eq!(meta.height, None);
+    assert_eq!(meta.codec, None);
+    assert_eq!(meta.mime_type.as_deref(), Some("video/mp4"));
+}
