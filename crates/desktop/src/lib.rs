@@ -149,6 +149,23 @@ pub fn run() -> Result<(), RunError> {
                 .path()
                 .app_data_dir()
                 .map_err(|e| format!("resolve app_data_dir: {e}"))?;
+
+            // WHY this assertion: Task 0 (#154) unifies CLI + desktop data-dir
+            // resolution. `perima_app::config::resolve_data_dir()` returns
+            // `<base.data_dir>/dev.perima.desktop/perima/` which must live
+            // under Tauri's `app_data_dir` (`<base.data_dir>/dev.perima.desktop/`).
+            // If a future Tauri upgrade changes how `app_data_dir` resolves,
+            // this assertion fires loudly in debug builds instead of silently
+            // re-introducing the dual-DB bug.
+            let resolver_path = perima_app::config::resolve_data_dir()
+                .map_err(|e| format!("resolve_data_dir: {e}"))?;
+            debug_assert!(
+                resolver_path.starts_with(&app_data_dir),
+                "resolver path {} must live under tauri app_data_dir {}",
+                resolver_path.display(),
+                app_data_dir.display()
+            );
+
             let cfg = config::resolve_with_app_data_dir(&app_data_dir)?;
 
             // WHY resolve db_path up-front: used for the watch writer

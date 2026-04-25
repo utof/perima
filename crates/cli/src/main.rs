@@ -138,6 +138,11 @@ enum Command {
         #[arg(long, default_value_t = 2)]
         include_rotated: usize,
     },
+
+    /// Move legacy CLI data (`~/.local/share/perima/`) to the canonical
+    /// desktop-shared path. Only needed if you used perima CLI before v0.7.0
+    /// (GH #154). Safe to run repeatedly — refuses to overwrite an existing DB.
+    MigrateDataDir(cmd::migrate_data_dir::MigrateDataDirArgs),
 }
 
 /// Entry point.
@@ -223,6 +228,8 @@ async fn main() -> ExitCode {
             path,
             include_rotated,
         } => dispatch_debug_report(path, include_rotated),
+
+        Command::MigrateDataDir(args) => dispatch_migrate_data_dir(&args),
     }
 }
 
@@ -234,6 +241,20 @@ async fn main() -> ExitCode {
 /// from inside an `async fn`.
 fn dispatch_debug_report(path: Option<PathBuf>, include_rotated: usize) -> ExitCode {
     match cmd::debug_report::run(path, include_rotated) {
+        Ok(()) => ExitCode::from(0),
+        Err(e) => {
+            eprintln!("perima: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Run the `migrate-data-dir` subcommand.
+///
+/// WHY sync (no `async`): migration is pure filesystem rename — no DB or
+/// async port involved.
+fn dispatch_migrate_data_dir(args: &cmd::migrate_data_dir::MigrateDataDirArgs) -> ExitCode {
+    match cmd::migrate_data_dir::run(args) {
         Ok(()) => ExitCode::from(0),
         Err(e) => {
             eprintln!("perima: {e}");

@@ -29,22 +29,42 @@ pub(crate) struct Config {
 }
 
 impl Config {
-    /// Resolve from the `directories` crate, then env overrides
-    /// (`PERIMA_DATA_DIR`, `PERIMA_CONFIG_DIR`), then CLI overrides.
+    /// Resolve from the shared [`perima_app::config::resolve_data_dir`] (which
+    /// matches Tauri's bundle-id path), then env overrides (`PERIMA_DATA_DIR`,
+    /// `PERIMA_CONFIG_DIR`), then CLI `--data-dir` override.
     /// Creates `<config_dir>/device_id.txt` on first run.
+    ///
+    /// WHY use `resolve_data_dir` from `perima-app`: both CLI and desktop must
+    /// read/write the same `SQLite` database. GH #154 — before this change, CLI
+    /// used `directories::ProjectDirs::from("dev","perima","perima")` →
+    /// `~/.local/share/perima/`, while desktop used the Tauri bundle-id path
+    /// `~/.local/share/dev.perima.desktop/perima/`. Tags added via one shell
+    /// were invisible to the other. The shared resolver locks both shells to
+    /// the Tauri bundle-id path so they converge on the same DB file.
+    ///
+    /// The `--data-dir` CLI flag and the `PERIMA_DATA_DIR` env var still take
+    /// precedence (for testing, CI, and custom-path installs).
     ///
     /// # Errors
     /// Returns `CoreError::Internal` if platform directories cannot
     /// be resolved, or `CoreError::Io` on filesystem failures.
     pub(crate) fn resolve(cli_data_dir: Option<PathBuf>) -> Result<Self, CoreError> {
+        // WHY config_dir still uses ProjectDirs: the config dir (device_id.txt)
+        // predates #154 and is machine-local only — it does not need to match
+        // the desktop path. The data_dir (the DB) is what must match.
         let dirs = directories::ProjectDirs::from("dev", "perima", "perima")
             .ok_or_else(|| CoreError::Internal("cannot resolve project dirs".into()))?;
 
         let config_dir = std::env::var_os("PERIMA_CONFIG_DIR")
             .map_or_else(|| dirs.config_dir().to_path_buf(), PathBuf::from);
+
+        // WHY `resolve_data_dir()` as default: aligns CLI with the desktop
+        // bundle-id path. `PERIMA_DATA_DIR` env override + `--data-dir` flag
+        // still take precedence for tests and custom installs.
+        let canonical_data_dir = perima_app::config::resolve_data_dir()?;
         let data_dir = cli_data_dir
             .or_else(|| std::env::var_os("PERIMA_DATA_DIR").map(PathBuf::from))
-            .unwrap_or_else(|| dirs.data_dir().to_path_buf());
+            .unwrap_or(canonical_data_dir);
 
         std::fs::create_dir_all(&config_dir)?;
         std::fs::create_dir_all(&data_dir)?;

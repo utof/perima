@@ -26,6 +26,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bus;
+pub mod config;
 pub mod container;
 pub mod events;
 pub mod metadata;

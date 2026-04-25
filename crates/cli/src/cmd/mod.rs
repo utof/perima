@@ -4,6 +4,7 @@ pub(crate) mod debug_report;
 pub(crate) mod format;
 pub(crate) mod ls;
 pub(crate) mod metadata;
+pub(crate) mod migrate_data_dir;
 pub(crate) mod scan;
 pub(crate) mod search;
 pub(crate) mod tag;
