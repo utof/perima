@@ -1,17 +1,23 @@
 **/*.md
 !CHANGELOG.md
-!CLAUDE.md
-# WHY exception for docs/superpowers + CLAUDE.md: cloud agents
-# (scheduled remote triggers) clone the repo fresh and need spec/plan
-# artifacts + binding rules to continue autonomous work across
-# sessions. Local WIP .md files elsewhere in the repo remain gitignored.
-!docs/superpowers/**/*.md
+# WHY exception for docs/routines + .claude: cloud agents (scheduled
+# remote triggers) clone the repo fresh and need binding rules to
+# continue autonomous work across sessions. Local WIP .md files
+# elsewhere in the repo remain gitignored.
+# TEMPORARY: CLAUDE.md and docs/superpowers/** re-added to gitignore
+# this session per user request to keep `git status` short and avoid
+# bloating prompt context. Restore the `!CLAUDE.md` and
+# `!docs/superpowers/**/*.md` exceptions when the user lifts the hold.
 !docs/routines/**/*.md
 !.claude/**/*.md
 # WHY: issue templates (.yml) and any future workflow docs live under
 # .github/; the blanket **/*.md rule would otherwise exclude markdown
 # files added there (e.g. pull_request_template.md).
 !.github/**
+# WHY: fuzz/README.md is a contributor-facing quick-start doc for the
+# cargo-fuzz harness; it needs to be tracked so new contributors can
+# find invocation + triage instructions without reading source files.
+!fuzz/README.md
 target/
 .DS_Store
 *.swp
