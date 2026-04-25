@@ -349,10 +349,16 @@ fn batch_handle_serializes_with_batch_id_and_total() {
 
 #[test]
 fn device_kind_serializes_as_external_tag_string() {
-    assert_eq!(serde_json::to_value(DeviceKind::Hdd).unwrap(), "Hdd");
-    assert_eq!(serde_json::to_value(DeviceKind::Ssd).unwrap(), "Ssd");
     assert_eq!(
-        serde_json::to_value(DeviceKind::Unknown).unwrap(),
+        serde_json::to_value(DeviceKind::Hdd).expect("serialize"),
+        "Hdd"
+    );
+    assert_eq!(
+        serde_json::to_value(DeviceKind::Ssd).expect("serialize"),
+        "Ssd"
+    );
+    assert_eq!(
+        serde_json::to_value(DeviceKind::Unknown).expect("serialize"),
         "Unknown"
     );
 }
@@ -360,11 +366,11 @@ fn device_kind_serializes_as_external_tag_string() {
 #[test]
 fn verified_state_serializes_as_external_tag_string() {
     assert_eq!(
-        serde_json::to_value(VerifiedState::Unverified).unwrap(),
+        serde_json::to_value(VerifiedState::Unverified).expect("serialize"),
         "Unverified"
     );
     assert_eq!(
-        serde_json::to_value(VerifiedState::VerifiedDuplicate).unwrap(),
+        serde_json::to_value(VerifiedState::VerifiedDuplicate).expect("serialize"),
         "VerifiedDuplicate"
     );
 }
@@ -377,7 +383,13 @@ fn collision_group_serializes_with_quick_hash_files_and_state() {
         verified_state: VerifiedState::Unverified,
     };
     let v = serde_json::to_value(&g).expect("serialize");
-    assert_eq!(v["quick_hash"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        v["quick_hash"]
+            .as_str()
+            .expect("quick_hash is string")
+            .len(),
+        64
+    );
     assert!(v["files"].is_array());
     assert_eq!(v["verified_state"], "Unverified");
 }
@@ -392,7 +404,10 @@ fn full_hash_outcome_computed_serializes_with_outcome_and_data() {
     let v = serde_json::to_value(&o).expect("serialize");
     assert_eq!(v["outcome"], "Computed");
     assert_eq!(v["data"]["file_uuid"], u.to_string());
-    assert_eq!(v["data"]["hash"].as_str().unwrap().len(), 64);
+    assert_eq!(
+        v["data"]["hash"].as_str().expect("hash is string").len(),
+        64
+    );
 }
 
 #[test]
