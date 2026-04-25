@@ -86,7 +86,7 @@ fn upsert_cache_impl(
 ) -> Result<(), CoreError> {
     let dev_str = key.device_id.0.to_string();
     let vol_str = key.volume_id.0.to_string();
-    let fs_file_id = u64_to_i64(key.fs_file_id, "fs_file_id")?;
+    let fs_file_id = key.fs_file_id;
     let size_bytes = u64_to_i64(key.size_bytes, "size_bytes")?;
     // WHY: mtime_ns is already i64 (nanoseconds since epoch, can be negative
     // for pre-epoch timestamps on some platforms).
@@ -165,7 +165,7 @@ fn upsert_cache_impl(
 fn soft_delete_cache_impl(conn: &mut Connection, key: &CacheKey) -> Result<(), CoreError> {
     let dev_str = key.device_id.0.to_string();
     let vol_str = key.volume_id.0.to_string();
-    let fs_file_id = u64_to_i64(key.fs_file_id, "fs_file_id")?;
+    let fs_file_id = key.fs_file_id;
     let size_bytes = u64_to_i64(key.size_bytes, "size_bytes")?;
     let mtime_ns = key.mtime_ns;
     let now = now_iso();

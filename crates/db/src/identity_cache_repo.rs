@@ -63,9 +63,6 @@ impl IdentityCacheRepository for SqliteIdentityCacheRepository {
         let conn = self.reads.get()?;
         let dev_str = key.device_id.0.to_string();
         let vol_str = key.volume_id.0.to_string();
-        let fs_file_id = i64::try_from(key.fs_file_id).map_err(|_| {
-            CoreError::Internal(format!("fs_file_id {} overflows i64", key.fs_file_id))
-        })?;
         let size_bytes = i64::try_from(key.size_bytes).map_err(|_| {
             CoreError::Internal(format!("size_bytes {} overflows i64", key.size_bytes))
         })?;
@@ -81,7 +78,7 @@ impl IdentityCacheRepository for SqliteIdentityCacheRepository {
                    AND mtime_ns = ?5
                    AND deleted_at IS NULL
                  LIMIT 1",
-                rusqlite::params![dev_str, vol_str, fs_file_id, size_bytes, key.mtime_ns],
+                rusqlite::params![dev_str, vol_str, key.fs_file_id, size_bytes, key.mtime_ns],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()

@@ -32,9 +32,11 @@ pub struct CacheKey {
     pub device_id: DeviceId,
     /// Volume the file lives on.
     pub volume_id: VolumeId,
-    /// Filesystem inode / file-id as returned by `std::fs::Metadata::ino()`
-    /// (Unix) or `nFileIndexLow | (nFileIndexHigh << 32)` (Windows).
-    pub fs_file_id: u64,
+    /// Filesystem inode / file-id, cast to `i64` for the `SQLite` `INTEGER`
+    /// column. Callers cast `u64` → `i64` directly (Unix `Metadata::ino()`
+    /// → `as i64` is bit-faithful; equality semantics preserved as long as
+    /// every read site uses the same cast).
+    pub fs_file_id: i64,
     /// Exact byte size at observation time.
     pub size_bytes: u64,
     /// Last-modified timestamp in nanoseconds since the Unix epoch.
