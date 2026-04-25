@@ -38,6 +38,7 @@ const KNOWN_KINDS: ReadonlySet<CoreError["kind"]> = new Set([
   "Io",
   "Unsupported",
   "Internal",
+  "FullHashUnavailable",
 ]);
 
 /**

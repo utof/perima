@@ -208,6 +208,33 @@ impl Default for DeviceId {
     }
 }
 
+/// Stable surrogate identifier for a file row in `files`.
+///
+/// UUIDv7-derived, immutable across the file's lifetime. Tags, metadata,
+/// and search index entries FK on this — NOT on [`BlakeHash`], since
+/// `full_hash` is computed lazily and `quick_hash` is a fingerprint
+/// (not an identity) per the fast-hashing design spec §4.1.1.
+// WHY specta(transparent): `uuid::Uuid` maps to `string` in specta's
+// built-in type map, so the TS binding should be `string`, not `{ "0": string }`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[cfg_attr(feature = "specta", specta(transparent))]
+pub struct FileUuid(pub uuid::Uuid);
+
+impl FileUuid {
+    /// Generate a fresh `UUIDv7` for a new file row.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(uuid::Uuid::now_v7())
+    }
+}
+
+impl Default for FileUuid {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Output of the scanner; pre-hash.
 #[derive(Clone, Debug)]
 pub struct DiscoveredFile {

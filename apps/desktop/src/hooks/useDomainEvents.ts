@@ -71,6 +71,11 @@ export function useDomainEvents(): void {
               case "SearchIndexRebuilt":
                 void queryClient.invalidateQueries({ queryKey: searchKeys.all });
                 break;
+              case "CollisionsChanged":
+                // WHY: CollisionsChanged invalidates the dedup/collision-group
+                // query surface (Task 13). No query key exists yet — placeholder
+                // to silence the exhaustive-never check until Task 13 lands.
+                break;
               default: {
                 const _exhaustive: never = event.data.reason;
                 throw new Error(
@@ -78,6 +83,15 @@ export function useDomainEvents(): void {
                 );
               }
             }
+            break;
+          case "VerifyProgress":
+            // WHY: VerifyProgress events are consumed by the dedup route
+            // (Task 13) and the file-detail sidebar (Task 14). No query key
+            // to invalidate here — progress is pushed via the event, not polled.
+            break;
+          case "VerifyComplete":
+            // WHY: VerifyComplete triggers a final collision-group refresh.
+            // No query key exists yet — placeholder until Task 13 lands.
             break;
           default: {
             const _exhaustive: never = event;

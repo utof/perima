@@ -2,7 +2,10 @@
 
 use serde::Serialize;
 
-use crate::{CoreError, MediaPath, VolumeId};
+use crate::{
+    CoreError, MediaPath, VolumeId,
+    dedup::{BatchId, FullHashOutcome},
+};
 
 /// A filesystem event detected by the watcher.
 ///
@@ -82,6 +85,27 @@ pub enum AppEvent {
         /// Which index category was invalidated.
         reason: InvalidationReason,
     },
+
+    /// Emitted by the full-hash worker after each file completes.
+    /// Frontend uses `batch_id` to correlate with the `BatchHandle`
+    /// returned by `compute_full_hash_batch`.
+    VerifyProgress {
+        /// The batch this event belongs to.
+        batch_id: BatchId,
+        /// Number of files completed so far (including this one).
+        files_done: u32,
+        /// Total files in the batch.
+        files_total: u32,
+        /// Outcome for the file just processed.
+        latest_outcome: FullHashOutcome,
+    },
+
+    /// Emitted by the full-hash worker when all files in a batch have
+    /// been processed (successfully or not).
+    VerifyComplete {
+        /// The batch that has finished.
+        batch_id: BatchId,
+    },
 }
 
 /// Categorical reason an index was invalidated.
@@ -99,6 +123,8 @@ pub enum InvalidationReason {
     MetadataChanged,
     /// FTS5 rebuild.
     SearchIndexRebuilt,
+    /// Collision groups changed (quick-hash or full-hash dedup result updated).
+    CollisionsChanged,
 }
 
 /// Consumer of application events.

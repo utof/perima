@@ -58,6 +58,17 @@ impl EventHandler for LogEventHandler {
             AppEvent::IndexInvalidated { reason } => {
                 tracing::info!(?reason, "index invalidated");
             }
+            AppEvent::VerifyProgress {
+                batch_id,
+                files_done,
+                files_total,
+                ..
+            } => {
+                tracing::info!(?batch_id, files_done, files_total, "verify progress");
+            }
+            AppEvent::VerifyComplete { batch_id } => {
+                tracing::info!(?batch_id, "verify complete");
+            }
         }
     }
 }

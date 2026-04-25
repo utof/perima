@@ -4,6 +4,11 @@
 // (Task 12) gates future regeneration. Constructed analytically from
 // the post-Batch-D Rust types via specta translation rules in spec §4.2
 // + §3 row K. Field names are Rust snake_case (no rename_all applied).
+//
+// Task 4 additions (fast-hashing): FileUuid, BatchId, BatchHandle, DeviceKind,
+// CollisionGroup, VerifiedState, FullHashOutcome, FullHashUnavailableReason,
+// CoreError::FullHashUnavailable, AppEvent::VerifyProgress/VerifyComplete,
+// InvalidationReason::CollisionsChanged.
 
 // ── Primitive newtypes ────────────────────────────────────────────────
 
@@ -37,6 +42,20 @@ export type VolumeId = string;
  */
 export type DeviceId = string;
 
+/**
+ * Stable surrogate identifier for a file row in `files`.
+ * Rust: `FileUuid(pub uuid::Uuid)` with `#[specta(transparent)]`.
+ * Immutable across the file's lifetime; used as FK target instead of
+ * `BlakeHash` (since `full_hash` is lazy and `quick_hash` is a fingerprint).
+ */
+export type FileUuid = string;
+
+/**
+ * Stable identifier for a `compute_full_hash_batch` operation.
+ * Rust: `BatchId(pub uuid::Uuid)` with `#[specta(transparent)]`.
+ */
+export type BatchId = string;
+
 // ── Enums ────────────────────────────────────────────────────────────
 
 /**
@@ -58,7 +77,17 @@ export type AppEvent =
         duration_ms: number;
       };
     }
-  | { kind: "IndexInvalidated"; data: { reason: InvalidationReason } };
+  | { kind: "IndexInvalidated"; data: { reason: InvalidationReason } }
+  | {
+      kind: "VerifyProgress";
+      data: {
+        batch_id: BatchId;
+        files_done: number;
+        files_total: number;
+        latest_outcome: FullHashOutcome;
+      };
+    }
+  | { kind: "VerifyComplete"; data: { batch_id: BatchId } };
 
 /**
  * Categorical reason an index was invalidated. Inner field of
@@ -77,7 +106,8 @@ export type InvalidationReason =
   | "TagsChanged"
   | "FilesChanged"
   | "MetadataChanged"
-  | "SearchIndexRebuilt";
+  | "SearchIndexRebuilt"
+  | "CollisionsChanged";
 
 /**
  * Status of a file location row.
@@ -107,7 +137,8 @@ export type CoreError =
   | { kind: "InvalidTag"; data: string }
   | { kind: "Io"; data: { kind: string; message: string } }
   | { kind: "Unsupported"; data: string }
-  | { kind: "Internal"; data: string };
+  | { kind: "Internal"; data: string }
+  | { kind: "FullHashUnavailable"; data: { reason: FullHashUnavailableReason } };
 
 // ── Structs ──────────────────────────────────────────────────────────
 
@@ -228,4 +259,58 @@ export type FileWithMetadataPayload = {
  */
 export type FileWithTagsPayload = FileWithMetadataPayload & {
   tags: Tag[];
+};
+
+// ── Dedup types (Task 4) ─────────────────────────────────────────────
+
+/**
+ * Why a `full_hash` could not be produced.
+ * Rust: `FullHashUnavailableReason` with `#[serde(tag = "kind")]`.
+ */
+export type FullHashUnavailableReason =
+  | { kind: "NotMounted"; volume_id: string }
+  | { kind: "NotComputed" }
+  | { kind: "IoError"; message: string };
+
+/**
+ * Per-file outcome inside `AppEvent::VerifyProgress`.
+ * Rust: `FullHashOutcome` with `#[serde(tag = "outcome", content = "data")]`.
+ */
+export type FullHashOutcome =
+  | { outcome: "Computed"; data: { file_uuid: FileUuid; hash: BlakeHash } }
+  | { outcome: "Failed"; data: { file_uuid: FileUuid; error: CoreError } };
+
+/**
+ * Returned from `compute_full_hash_batch`.
+ * Rust: `BatchHandle` struct.
+ */
+export type BatchHandle = {
+  batch_id: BatchId;
+  total: number;
+};
+
+/**
+ * What kind of physical storage backs a volume.
+ * Rust: `DeviceKind` plain enum (no serde tag).
+ */
+export type DeviceKind = "Hdd" | "Ssd" | "Unknown";
+
+/**
+ * State of a candidate duplicate group's verification.
+ * Rust: `VerifiedState` plain enum (no serde tag).
+ */
+export type VerifiedState =
+  | "Unverified"
+  | "VerifiedDuplicate"
+  | "VerifiedDistinct"
+  | "Mixed";
+
+/**
+ * A group of files sharing the same `quick_hash` — candidate duplicates.
+ * Rust: `CollisionGroup` struct in `crates/core/src/dedup.rs`.
+ */
+export type CollisionGroup = {
+  quick_hash: BlakeHash;
+  files: FileLocationRecord[];
+  verified_state: VerifiedState;
 };
