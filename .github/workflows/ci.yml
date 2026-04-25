@@ -67,6 +67,18 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/cargo-bins/cargo-binstall/releases/latest/download/cargo-binstall-x86_64-pc-windows-msvc.zip" -OutFile binstall.zip
           Expand-Archive binstall.zip -DestinationPath "$env:USERPROFILE\.cargo\bin" -Force
           cargo binstall --no-confirm --locked just cargo-deny typos-cli cargo-nextest
+          # WHY explicit GITHUB_PATH update (added 2026-04-25): when
+          # Swatinem rust-cache partial-restores `~/.cargo/bin` containing
+          # a previously-installed just.exe, cargo-binstall logs "already
+          # installed" and SKIPS — including the side-effect PATH inject
+          # that fresh installs perform. Meanwhile rustup-init's
+          # `echo $CARGO_HOME\bin >> $GITHUB_PATH` is gated behind
+          # `command -v rustup`, which always succeeds on windows-latest
+          # (rustup is pre-installed). Net effect: bash steps that run
+          # `just ci` later can't see just.exe on PATH even though it's on
+          # disk. Forcing the GITHUB_PATH update here is unconditional and
+          # idempotent. Reproduced on ci.yml run 24929261378 (0889fbb).
+          "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
       - uses: actions/setup-node@v4
         with:
