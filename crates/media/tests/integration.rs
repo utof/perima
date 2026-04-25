@@ -414,3 +414,30 @@ fn image_extractor_jpeg_padded_ascii_is_trimmed() {
         meta.camera_model,
     );
 }
+
+#[test]
+fn image_extractor_jpeg_make_model_only_no_datetime() {
+    // WHY: exercises the outer `.and_then(EntryValue::as_time_components)`
+    // collapse-to-None branch in read_exif (spec §4 D-2 B9). The fixture
+    // has EXIF Make+Model populated but NO DateTimeOriginal entry —
+    // distinct from `image_extractor_jpeg_without_exif_returns_default`
+    // (which fails at has_exif() == false) and B2 corrupt-TIFF (which
+    // fails at parser.parse()). Real-world example: scanned/edited
+    // images that retain camera identification but lose capture timestamps.
+    let td = tempdir().expect("tempdir");
+    let path = td.path().join("make_model_only.jpg");
+    common::make_jpeg_with_make_model_only("Canon", "EOS 5D Mark IV", &path);
+
+    let extractor = ImageExtractor::new();
+    let meta = extractor
+        .extract(dummy_hash(), &path, "image/jpeg")
+        .expect("extract jpeg");
+
+    assert_eq!(meta.camera_make.as_deref(), Some("Canon"));
+    assert_eq!(meta.camera_model.as_deref(), Some("EOS 5D Mark IV"));
+    assert_eq!(
+        meta.captured_at, None,
+        "no DateTimeOriginal must collapse captured_at to None even when EXIF parses cleanly",
+    );
+    assert_eq!(meta.mime_type.as_deref(), Some("image/jpeg"));
+}

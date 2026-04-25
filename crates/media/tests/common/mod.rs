@@ -680,3 +680,126 @@ pub fn make_jpeg_with_corrupt_tiff(path: &Path) -> PathBuf {
     w.flush().expect("flush jpeg");
     path.to_path_buf()
 }
+
+/// Build a minimal JPEG with EXIF IFD0 containing ONLY Make + Model
+/// (no `ExifIFDPointer`, no `ExifSubIFD`). Used to exercise `read_exif`'s
+/// outer `.and_then(EntryValue::as_time_components)` collapsing to
+/// `None` when `DateTimeOriginal` is absent (spec §4 D-2 B9).
+///
+/// WHY this is distinct from the existing "no EXIF" test: that test
+/// fails at `has_exif() == false` (no APP1 segment at all). THIS test
+/// has `has_exif() == true` and `parse()` succeeds, but the parsed
+/// `EntryValue` for `DateTimeOriginal` is absent — so `exif.get(...)`
+/// returns `None` and the outer `.and_then` collapses `captured_at` to
+/// `None` while Make/Model populate normally.
+pub fn make_jpeg_with_make_model_only(make: &str, model: &str, path: &Path) -> PathBuf {
+    let tiff_bytes = build_tiff_make_model_only(make, model);
+    let app1_payload_len = 2 + 6 + tiff_bytes.len();
+    let app1_len = u16::try_from(app1_payload_len).expect("APP1 too large");
+
+    let file = File::create(path).expect("create jpeg");
+    let mut w = BufWriter::new(file);
+    w.write_all(&[0xFF, 0xD8]).expect("SOI");
+    w.write_all(&[0xFF, 0xE0, 0x00, 0x10])
+        .expect("APP0 marker+len");
+    w.write_all(b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00")
+        .expect("JFIF payload");
+    w.write_all(&[0xFF, 0xE1]).expect("APP1 marker");
+    w.write_all(&app1_len.to_be_bytes()).expect("APP1 length");
+    w.write_all(b"Exif\0\0").expect("Exif identifier");
+    w.write_all(&tiff_bytes).expect("TIFF body");
+    w.write_all(&[0xFF, 0xD9]).expect("EOI");
+    w.flush().expect("flush");
+    path.to_path_buf()
+}
+
+/// IFD0 with 2 entries (Make, Model), no `ExifIFDPointer`, no `ExifSubIFD`.
+/// String area immediately follows IFD0, then a NUL padding block.
+///
+/// Layout (offsets relative to start of TIFF block):
+/// ```text
+///  0x00  TIFF header (8 bytes): "II" + 0x002A + IFD0_offset=8
+///  0x08  IFD0 (30 bytes): count=2, [Make, Model], next=0
+///  0x26  String area: Make\0, Model\0
+///  ...   Padding: NUL bytes to push total JPEG > 128 bytes (see WHY)
+/// ```
+///
+/// WHY padding: `nom-exif`'s `MediaParser::parse` calls `fill_buf` on the
+/// underlying `File` reader AFTER copying the `MediaSource` pre-read buffer
+/// (128 bytes = `HEADER_PARSE_BUF_SIZE`) into its internal buffer. If the
+/// file is ≤ 128 bytes the pre-read fully exhausts it, leaving the reader at
+/// EOF; the subsequent `fill_buf` call returns `n = 0` → `UnexpectedEof` →
+/// parse error → `read_exif` returns `(None, None, None)` — not because TIFF
+/// is broken but because the file is too small for `MediaParser`'s
+/// two-phase read protocol.
+///
+/// The TIFF parser ignores bytes after the IFD chain terminates (next = 0)
+/// and after the string data area, so the padding is structurally inert.
+fn build_tiff_make_model_only(make: &str, model: &str) -> Vec<u8> {
+    const TAG_MAKE: u16 = 0x010F;
+    const TAG_MODEL: u16 = 0x0110;
+    const TYPE_ASCII: u16 = 2;
+
+    // IFD0 layout: 2 (count) + 2*12 (entries) + 4 (next pointer) = 30 bytes.
+    // String area starts at TIFF_HEADER (8) + 30 = 38.
+    const IFD0_OFFSET: u32 = 8;
+    const IFD0_ENTRY_COUNT: u16 = 2;
+    const STRING_AREA: u32 = IFD0_OFFSET + 2 + (IFD0_ENTRY_COUNT as u32 * 12) + 4; // 38
+
+    // The assembled JPEG is:
+    //   SOI(2) + APP0(18) + APP1(2+2+6+TIFF) + EOI(2)
+    // = 32 + TIFF bytes. To exceed MediaParser's 128-byte HEADER_PARSE_BUF_SIZE
+    // threshold, TIFF must be > 96 bytes. We append 100 NUL pad bytes so the
+    // TIFF is structurally valid but always > 96 bytes regardless of Make/Model
+    // string lengths.
+    const TIFF_PAD_LEN: usize = 100;
+
+    let make_bytes: Vec<u8> = {
+        let mut v = make.as_bytes().to_vec();
+        v.push(0);
+        v
+    };
+    let model_bytes: Vec<u8> = {
+        let mut v = model.as_bytes().to_vec();
+        v.push(0);
+        v
+    };
+
+    let make_len = u32::try_from(make_bytes.len()).expect("make too long");
+    let model_len = u32::try_from(model_bytes.len()).expect("model too long");
+
+    let make_offset = STRING_AREA;
+    let model_offset = make_offset + make_len;
+
+    let mut buf = Vec::new();
+
+    // TIFF header.
+    buf.extend_from_slice(b"II"); // little-endian byte order
+    buf.extend_from_slice(&42_u16.to_le_bytes()); // TIFF magic
+    buf.extend_from_slice(&IFD0_OFFSET.to_le_bytes());
+
+    // IFD0 (entries sorted ascending by tag).
+    buf.extend_from_slice(&IFD0_ENTRY_COUNT.to_le_bytes());
+    // Make (0x010F)
+    buf.extend_from_slice(&TAG_MAKE.to_le_bytes());
+    buf.extend_from_slice(&TYPE_ASCII.to_le_bytes());
+    buf.extend_from_slice(&make_len.to_le_bytes());
+    buf.extend_from_slice(&make_offset.to_le_bytes());
+    // Model (0x0110)
+    buf.extend_from_slice(&TAG_MODEL.to_le_bytes());
+    buf.extend_from_slice(&TYPE_ASCII.to_le_bytes());
+    buf.extend_from_slice(&model_len.to_le_bytes());
+    buf.extend_from_slice(&model_offset.to_le_bytes());
+    // No ExifIFDPointer entry; next-IFD pointer = 0.
+    buf.extend_from_slice(&0_u32.to_le_bytes());
+
+    // String area.
+    buf.extend_from_slice(&make_bytes);
+    buf.extend_from_slice(&model_bytes);
+
+    // Padding: inert NUL bytes; structurally ignored by TIFF parsers.
+    // See WHY in the doc comment above.
+    buf.extend(std::iter::repeat_n(0u8, TIFF_PAD_LEN));
+
+    buf
+}
