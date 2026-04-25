@@ -498,6 +498,139 @@ pub fn make_mp4_audio_first_then_video(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Build a minimal JPEG with EXIF Make + Model + `DateTimeOriginal` where
+/// Make/Model are passed as raw bytes (caller may include trailing
+/// padding via NUL `'\0'` or space `' '`). Used to exercise `read_exif`'s
+/// `trim_end_matches(['\0', ' '])` branch (spec §4 D-2 B3).
+///
+/// WHY raw bytes (not `&str`): real cameras emit Make/Model with
+/// trailing NUL or space padding (e.g. Nikon `"NIKON CORPORATION   \0"`).
+/// `nom-exif`'s `as_str()` returns the bytes as-is including padding;
+/// our `read_exif` trims via `trim_end_matches`. To exercise the trim
+/// deterministically we need the byte-level ability to control the
+/// trailing pad pattern.
+pub fn make_jpeg_with_padded_ascii(
+    make_padded: &[u8],
+    model_padded: &[u8],
+    datetime_original: &str,
+    path: &Path,
+) -> PathBuf {
+    let tiff_bytes = build_tiff_exif_padded(make_padded, model_padded, datetime_original);
+    let app1_payload_len = 2 + 6 + tiff_bytes.len();
+    let app1_len = u16::try_from(app1_payload_len).expect("APP1 too large");
+
+    let file = File::create(path).expect("create jpeg");
+    let mut w = BufWriter::new(file);
+    w.write_all(&[0xFF, 0xD8]).expect("SOI");
+    w.write_all(&[0xFF, 0xE0, 0x00, 0x10])
+        .expect("APP0 marker+len");
+    w.write_all(b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00")
+        .expect("JFIF payload");
+    w.write_all(&[0xFF, 0xE1]).expect("APP1 marker");
+    w.write_all(&app1_len.to_be_bytes()).expect("APP1 length");
+    w.write_all(b"Exif\0\0").expect("Exif identifier");
+    w.write_all(&tiff_bytes).expect("TIFF body");
+    w.write_all(&[0xFF, 0xD9]).expect("EOI");
+    w.flush().expect("flush");
+    path.to_path_buf()
+}
+
+/// Variant of `build_tiff_exif` that takes raw byte sequences for Make
+/// and Model (caller controls NUL/space padding). `DateTimeOriginal`
+/// remains a `&str` (no padding scenario tested for it).
+///
+/// EXIF spec: ASCII type's count includes the trailing NUL terminator.
+/// This function ALWAYS appends one NUL after the caller's bytes.
+fn build_tiff_exif_padded(
+    make_bytes_in: &[u8],
+    model_bytes_in: &[u8],
+    datetime_original: &str,
+) -> Vec<u8> {
+    const TAG_MAKE: u16 = 0x010F;
+    const TAG_MODEL: u16 = 0x0110;
+    const TAG_EXIF_IFD_POINTER: u16 = 0x8769;
+    const TAG_DATETIME_ORIGINAL: u16 = 0x9003;
+    const TYPE_ASCII: u16 = 2;
+    const TYPE_LONG: u16 = 4;
+
+    // Offset layout identical to build_tiff_exif (IFD0 3 entries, ExifSubIFD 1 entry).
+    const IFD0_OFFSET: u32 = 8;
+    const IFD0_ENTRY_COUNT: u16 = 3;
+    const EXIF_SUBIFD_OFFSET: u32 = IFD0_OFFSET + 2 + (IFD0_ENTRY_COUNT as u32 * 12) + 4; // 50
+    const EXIF_SUBIFD_ENTRY_COUNT: u16 = 1;
+    const STRING_AREA: u32 = EXIF_SUBIFD_OFFSET + 2 + (EXIF_SUBIFD_ENTRY_COUNT as u32 * 12) + 4; // 68
+
+    // Caller's bytes may already include padding; we ALWAYS append a final NUL
+    // so the TIFF reader knows the string boundary.
+    let make_bytes: Vec<u8> = {
+        let mut v = make_bytes_in.to_vec();
+        v.push(0);
+        v
+    };
+    let model_bytes: Vec<u8> = {
+        let mut v = model_bytes_in.to_vec();
+        v.push(0);
+        v
+    };
+    let dt_bytes: Vec<u8> = {
+        let mut v = datetime_original.as_bytes().to_vec();
+        v.push(0);
+        v
+    };
+
+    let make_len = u32::try_from(make_bytes.len()).expect("make too long");
+    let model_len = u32::try_from(model_bytes.len()).expect("model too long");
+    let dt_len = u32::try_from(dt_bytes.len()).expect("datetime too long");
+
+    let make_offset = STRING_AREA;
+    let model_offset = make_offset + make_len;
+    let dt_offset = model_offset + model_len;
+
+    let mut buf = Vec::new();
+
+    // TIFF header.
+    buf.extend_from_slice(b"II");
+    buf.extend_from_slice(&42_u16.to_le_bytes());
+    buf.extend_from_slice(&IFD0_OFFSET.to_le_bytes());
+
+    // IFD0 (entries sorted ascending by tag).
+    buf.extend_from_slice(&IFD0_ENTRY_COUNT.to_le_bytes());
+    // Make (0x010F)
+    buf.extend_from_slice(&TAG_MAKE.to_le_bytes());
+    buf.extend_from_slice(&TYPE_ASCII.to_le_bytes());
+    buf.extend_from_slice(&make_len.to_le_bytes());
+    buf.extend_from_slice(&make_offset.to_le_bytes());
+    // Model (0x0110)
+    buf.extend_from_slice(&TAG_MODEL.to_le_bytes());
+    buf.extend_from_slice(&TYPE_ASCII.to_le_bytes());
+    buf.extend_from_slice(&model_len.to_le_bytes());
+    buf.extend_from_slice(&model_offset.to_le_bytes());
+    // ExifIFDPointer (0x8769) — inline LONG offset to ExifSubIFD.
+    buf.extend_from_slice(&TAG_EXIF_IFD_POINTER.to_le_bytes());
+    buf.extend_from_slice(&TYPE_LONG.to_le_bytes());
+    buf.extend_from_slice(&1_u32.to_le_bytes());
+    buf.extend_from_slice(&EXIF_SUBIFD_OFFSET.to_le_bytes());
+    // IFD0 next-IFD pointer.
+    buf.extend_from_slice(&0_u32.to_le_bytes());
+
+    // ExifSubIFD.
+    buf.extend_from_slice(&EXIF_SUBIFD_ENTRY_COUNT.to_le_bytes());
+    // DateTimeOriginal (0x9003)
+    buf.extend_from_slice(&TAG_DATETIME_ORIGINAL.to_le_bytes());
+    buf.extend_from_slice(&TYPE_ASCII.to_le_bytes());
+    buf.extend_from_slice(&dt_len.to_le_bytes());
+    buf.extend_from_slice(&dt_offset.to_le_bytes());
+    // ExifSubIFD next-IFD pointer.
+    buf.extend_from_slice(&0_u32.to_le_bytes());
+
+    // String area.
+    buf.extend_from_slice(&make_bytes);
+    buf.extend_from_slice(&model_bytes);
+    buf.extend_from_slice(&dt_bytes);
+
+    buf
+}
+
 /// Build a minimal JPEG containing SOI + APP0(JFIF) + APP1(EXIF) + EOI
 /// where the TIFF magic bytes inside APP1 are corrupted. Used to
 /// exercise `read_exif`'s `parser.parse(ms)` Err arm (spec §4 D-2 B2).

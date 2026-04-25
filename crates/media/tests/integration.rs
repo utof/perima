@@ -376,3 +376,41 @@ fn image_extractor_jpeg_corrupt_tiff_returns_default() {
     // acceptable; the test point is the EXIF parse arm.
     assert_eq!(meta.mime_type.as_deref(), Some("image/jpeg"));
 }
+
+#[test]
+fn image_extractor_jpeg_padded_ascii_is_trimmed() {
+    // WHY: exercises read_exif's `trim_end_matches(['\0', ' '])` branch
+    // (spec §4 D-2 B3). Real-world Nikon-style padding pattern: trailing
+    // spaces + NUL on the Make field. extractor.rs comment line 134
+    // documents "NIKON CORPORATION   \0" as the trigger pattern; the
+    // test mirrors that.
+    let td = tempdir().expect("tempdir");
+    let path = td.path().join("padded.jpg");
+    // "NIKON CORPORATION" + 3 spaces (no trailing NUL in the bytes we pass
+    // — build_tiff_exif_padded appends ONE NUL terminator, which
+    // trim_end_matches will also strip).
+    common::make_jpeg_with_padded_ascii(
+        b"NIKON CORPORATION   ",
+        b"D850 ",
+        "2024:06:01 12:34:56",
+        &path,
+    );
+
+    let extractor = ImageExtractor::new();
+    let meta = extractor
+        .extract(dummy_hash(), &path, "image/jpeg")
+        .expect("extract jpeg");
+
+    assert_eq!(
+        meta.camera_make.as_deref(),
+        Some("NIKON CORPORATION"),
+        "trailing spaces + NUL must be trimmed; got {:?}",
+        meta.camera_make,
+    );
+    assert_eq!(
+        meta.camera_model.as_deref(),
+        Some("D850"),
+        "trailing space + NUL must be trimmed; got {:?}",
+        meta.camera_model,
+    );
+}
