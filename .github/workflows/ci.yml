@@ -66,19 +66,17 @@ jobs:
         run: |
           Invoke-WebRequest -Uri "https://github.com/cargo-bins/cargo-binstall/releases/latest/download/cargo-binstall-x86_64-pc-windows-msvc.zip" -OutFile binstall.zip
           Expand-Archive binstall.zip -DestinationPath "$env:USERPROFILE\.cargo\bin" -Force
-          cargo binstall --no-confirm --locked just cargo-deny typos-cli cargo-nextest
-          # WHY explicit GITHUB_PATH update (added 2026-04-25): when
-          # Swatinem rust-cache partial-restores `~/.cargo/bin` containing
-          # a previously-installed just.exe, cargo-binstall logs "already
-          # installed" and SKIPS — including the side-effect PATH inject
-          # that fresh installs perform. Meanwhile rustup-init's
-          # `echo $CARGO_HOME\bin >> $GITHUB_PATH` is gated behind
-          # `command -v rustup`, which always succeeds on windows-latest
-          # (rustup is pre-installed). Net effect: bash steps that run
-          # `just ci` later can't see just.exe on PATH even though it's on
-          # disk. Forcing the GITHUB_PATH update here is unconditional and
-          # idempotent. Reproduced on ci.yml run 24929261378 (0889fbb).
-          "$env:USERPROFILE\.cargo\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          # WHY --force (added 2026-04-25): without it, when Swatinem
+          # rust-cache partial-restores `~/.cargo/bin` containing a
+          # previously-installed just.exe (or its binstall manifest),
+          # cargo-binstall logs "already installed" and SKIPS the install
+          # — INCLUDING the bash-PATH side effect that fresh installs
+          # perform. Subsequent bash steps then fail with
+          # `just: command not found` even though the binary is on disk.
+          # --force re-runs the install path unconditionally. Cost:
+          # ~5s extra per Windows job. Reproduced ci.yml run 24929261378
+          # + 24929533151 (commits 0889fbb, 846c596).
+          cargo binstall --no-confirm --locked --force just cargo-deny typos-cli cargo-nextest
 
       - uses: actions/setup-node@v4
         with:
