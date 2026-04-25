@@ -1,4 +1,4 @@
-import type { CoreError } from "../bindings";
+import type { CoreError, FullHashUnavailableReason } from "../bindings";
 
 /**
  * Returns a human-readable string from a {@link CoreError} data payload.
@@ -10,6 +10,9 @@ import type { CoreError } from "../bindings";
  * (JSON.stringify throws on cyclic inputs — guarded by try/catch).
  */
 export function coreErrorMessage(e: CoreError): string {
+  if (e.kind === "FullHashUnavailable") {
+    return fullHashUnavailableMessage(e.data.reason);
+  }
   if (typeof e.data === "string") {
     return e.data;
   }
@@ -19,5 +22,16 @@ export function coreErrorMessage(e: CoreError): string {
     return JSON.stringify(e.data);
   } catch {
     return "[unserializable error data]";
+  }
+}
+
+function fullHashUnavailableMessage(reason: FullHashUnavailableReason): string {
+  switch (reason.kind) {
+    case "NotMounted":
+      return `Full hash unavailable: volume not mounted (${reason.volume_id}).`;
+    case "NotComputed":
+      return "Full hash has not been computed for this file yet.";
+    case "IoError":
+      return `Full hash unavailable: I/O error (${reason.message}).`;
   }
 }
