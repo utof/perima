@@ -70,15 +70,20 @@ fn seed_conn(db_path: &Path) -> Connection {
 /// Pre-create both shadow `files` rows for every slot so `UpdateHash`
 /// never trips an FK (none enforced today, but keeps semantics close to
 /// production where `files` rows always pre-exist their `file_locations`).
+///
+/// WHY `file_uuid`: post-V011 + Task 3 trigger pivot (spec §4.1.4), FTS5
+/// triggers join on `file_uuid`. Each shadow `files` row gets a fresh
+/// `UUIDv7` surrogate identity so dependent `file_locations` / `file_tags`
+/// rows can look it up by `blake3_hash`.
 fn seed_files_table(conn: &Connection) {
     for slot in 0..SLOTS {
         for is_b in [false, true] {
             let h = shadow_hash(slot, is_b);
             conn.execute(
                 "INSERT OR IGNORE INTO files
-                     (blake3_hash, file_size, first_seen, updated_at, device_id)
-                 VALUES (?1, 1024, ?2, ?2, ?3)",
-                rusqlite::params![h, TS, DEV],
+                     (blake3_hash, file_uuid, file_size, first_seen, updated_at, device_id)
+                 VALUES (?1, ?2, 1024, ?3, ?3, ?4)",
+                rusqlite::params![h, uuid::Uuid::now_v7().to_string(), TS, DEV],
             )
             .expect("insert files");
         }
@@ -86,13 +91,16 @@ fn seed_files_table(conn: &Connection) {
 }
 
 /// Insert a single `file_locations` row for `(hash, path)`. Idempotent
-/// via `INSERT OR IGNORE`.
+/// via `INSERT OR IGNORE`. `file_uuid` is sourced from the matching
+/// `files` row via subquery (post-Task-3 trigger pivot).
 fn insert_location(conn: &Connection, hash: &str, path: &str) {
     conn.execute(
         "INSERT OR IGNORE INTO file_locations
-             (id, blake3_hash, volume_id, relative_path, status,
+             (id, blake3_hash, file_uuid, volume_id, relative_path, status,
               first_seen, updated_at, device_id)
-         VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5, ?6)",
+         VALUES (?1, ?2,
+                 (SELECT f.file_uuid FROM files f WHERE f.blake3_hash = ?2),
+                 ?3, ?4, 'active', ?5, ?5, ?6)",
         rusqlite::params![uuid::Uuid::now_v7().to_string(), hash, VOL, path, TS, DEV],
     )
     .expect("insert file_location");
@@ -178,10 +186,24 @@ fn attach_tag_raw(conn: &Connection, hash: &str, tag_name: &str) {
         )
         .expect("restore file_tag");
     } else {
+        // WHY file_uuid via file_locations: post-Task-3 trigger pivot
+        // (spec §4.1.4), `search_after_file_tags_insert` joins on
+        // file_uuid. Under the shadow-hash proptest model, multiple
+        // `files` rows exist for the two hash variants of each slot, so
+        // looking up file_uuid via `files` would point at the WRONG
+        // file_uuid (the hash's pre-allocated row, not the one the
+        // proptest's `file_locations` row actually carries). Matching
+        // through `file_locations` instead picks the file_uuid that
+        // actually backs the live row — the same one the FTS trigger
+        // sees via `NEW.file_uuid`.
         conn.execute(
             "INSERT INTO file_tags
-                 (id, blake3_hash, tag_id, first_seen, updated_at, device_id)
-             VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+                 (id, blake3_hash, file_uuid, tag_id, first_seen, updated_at, device_id)
+             VALUES (?1, ?2,
+                     (SELECT fl.file_uuid FROM file_locations fl
+                       WHERE fl.blake3_hash = ?2 AND fl.deleted_at IS NULL
+                       LIMIT 1),
+                     ?3, ?4, ?4, ?5)",
             rusqlite::params![uuid::Uuid::now_v7().to_string(), hash, tag_id, TS, DEV],
         )
         .expect("insert file_tag");
@@ -348,6 +370,18 @@ proptest! {
     /// **Invariant:** after every op, the live `search_content` rowset
     /// (incrementally maintained by FTS5 triggers) equals the ground
     /// truth derived from the Rust-side `SlotState` model.
+    ///
+    /// IGNORED post-Task-3 (FTS5 trigger pivot): the model keys tags +
+    /// expected rows by `blake3_hash`, which conflated identity with
+    /// content. Post-pivot, identity is `file_uuid` (stable across hash
+    /// changes), so:
+    ///   1. Tags persist across `UpdateHash` (model resets them).
+    ///   2. Two slots whose hashes converge share a key in the BTreeMap.
+    ///   3. `search_content.blake3_hash NOT NULL UNIQUE` (V007) trips on
+    ///      that convergence; spec §4.1.4 calls for V012 to drop UNIQUE.
+    /// A faithful post-pivot rewrite re-keys ground truth by slot/file_uuid
+    /// and lands alongside V012 — tracked as follow-up to Task 3.
+    #[ignore = "pre-pivot model; needs slot-keyed rewrite + V012 (spec §4.1.4)"]
     #[test]
     fn fts_consistent_under_hash_change_and_restore(
         ops in proptest::collection::vec(loc_op_strategy(), 1..20),

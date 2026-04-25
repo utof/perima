@@ -265,10 +265,19 @@ fn attach_impl(
         let id = Uuid::now_v7();
         let now = now_iso();
         let dev_str = device.0.to_string();
+        // WHY file_uuid via subquery: post-V011 + Task 3 trigger pivot
+        // (spec §4.1.4) — `search_after_file_tags_insert` joins on
+        // file_uuid. The owning `files` row exists by precondition
+        // (callers attach tags to known hashes), so the lookup is
+        // deterministic. Without this, file_uuid stays NULL on the
+        // file_tags row and the trigger's `WHERE file_uuid = NEW.file_uuid`
+        // never matches, leaving tags absent from search_content.
         tx.execute(
             "INSERT INTO file_tags
-                (id, blake3_hash, tag_id, first_seen, updated_at, device_id, hlc)
-             VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)",
+                (id, blake3_hash, file_uuid, tag_id, first_seen, updated_at, device_id, hlc)
+             VALUES (?1, ?2,
+                     (SELECT f.file_uuid FROM files f WHERE f.blake3_hash = ?2),
+                     ?3, ?4, ?4, ?5, ?6)",
             rusqlite::params![id.to_string(), hash_hex, tag_id_str, now, dev_str, hlc],
         )
         .map_err(Error::from)?

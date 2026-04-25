@@ -260,11 +260,18 @@ fn upsert_file_impl(
 
     let outcome = match existing {
         None => {
+            // WHY file_uuid here: post-V011 + Task 3 trigger pivot,
+            // FTS5 triggers join on file_uuid (spec §4.1.4). Every new
+            // `files` row needs a fresh UUIDv7 surrogate identity so
+            // dependent tables (file_locations, file_metadata, file_tags,
+            // search_content) can join back via subquery lookup. Stable
+            // across blake3_hash changes (lazy full_hash workflow).
+            let file_uuid = perima_core::ids::new_id().to_string();
             tx.execute(
                 "INSERT INTO files
-                 (blake3_hash, file_size, first_seen, updated_at, device_id, hlc)
-                 VALUES (?1, ?2, ?3, ?3, ?4, ?5)",
-                rusqlite::params![hash_hex, size_i64, now, dev_str, hlc],
+                 (blake3_hash, file_uuid, file_size, first_seen, updated_at, device_id, hlc)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)",
+                rusqlite::params![hash_hex, file_uuid, size_i64, now, dev_str, hlc],
             )
             .map_err(Error::from)?;
             UpsertOutcome::Inserted
@@ -339,11 +346,20 @@ fn upsert_location_impl(
     let outcome = match existing {
         None => {
             let id = perima_core::ids::new_id().to_string();
+            // WHY file_uuid via subquery: post-V011 + Task 3 trigger pivot,
+            // FTS5 triggers join on file_uuid (spec §4.1.4). The owning
+            // `files` row was upserted earlier in the same scan command,
+            // so its file_uuid is available via blake3_hash lookup. NULL
+            // result here would mean the caller violated the
+            // upsert-file-before-upsert-location contract — defensive
+            // COALESCE retains historical behaviour without crashing.
             tx.execute(
                 "INSERT INTO file_locations
-                 (id, blake3_hash, volume_id, relative_path, status,
+                 (id, blake3_hash, file_uuid, volume_id, relative_path, status,
                   first_seen, updated_at, device_id, hlc)
-                 VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5, ?6, ?7)",
+                 VALUES (?1, ?2,
+                         (SELECT f.file_uuid FROM files f WHERE f.blake3_hash = ?2),
+                         ?3, ?4, 'active', ?5, ?5, ?6, ?7)",
                 rusqlite::params![id, hash_hex, vol_str, path_str, now, dev_str, hlc],
             )
             .map_err(Error::from)?;

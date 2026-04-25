@@ -126,19 +126,26 @@ pub fn device() -> DeviceId {
 // ---------------------------------------------------------------------------
 
 /// Insert a `files` row + a `file_locations` row into the DB.
+///
+/// WHY `file_uuid` is set on both rows: post-Task-3 (FTS5 trigger pivot,
+/// spec §4.1.4), the join key for FTS triggers is `file_uuid`, not
+/// `blake3_hash`. Tests that drive the FTS pipeline through raw INSERTs
+/// must populate `file_uuid` or every trigger sees `NULL = NULL`
+/// (which is never true) and `search_content` stays empty.
 pub fn insert_file(conn: &Connection, hash: &str, volume: &str, path: &str) {
     conn.execute(
         "INSERT OR IGNORE INTO files
-             (blake3_hash, file_size, first_seen, updated_at, device_id)
-         VALUES (?1, 1024, ?2, ?2, ?3)",
-        rusqlite::params![hash, TS, DEV],
+             (blake3_hash, file_uuid, file_size, first_seen, updated_at, device_id)
+         VALUES (?1, ?2, 1024, ?3, ?3, ?4)",
+        rusqlite::params![hash, uuid::Uuid::now_v7().to_string(), TS, DEV],
     )
     .expect("insert file");
     conn.execute(
         "INSERT OR IGNORE INTO file_locations
-             (id, blake3_hash, volume_id, relative_path, status,
+             (id, blake3_hash, file_uuid, volume_id, relative_path, status,
               first_seen, updated_at, device_id)
-         VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5, ?6)",
+         VALUES (?1, ?2, (SELECT f.file_uuid FROM files f WHERE f.blake3_hash = ?2),
+                 ?3, ?4, 'active', ?5, ?5, ?6)",
         rusqlite::params![
             uuid::Uuid::now_v7().to_string(),
             hash,
@@ -152,12 +159,16 @@ pub fn insert_file(conn: &Connection, hash: &str, volume: &str, path: &str) {
 }
 
 /// Insert a minimal `file_metadata` row directly.
+///
+/// `file_uuid` is looked up from `files` via the existing `blake3_hash`
+/// join (post-Task-3 trigger pivot — see [`insert_file`] WHY block).
 pub fn insert_metadata(conn: &Connection, hash: &str, mime: &str, camera: &str, captured: &str) {
     conn.execute(
         "INSERT OR REPLACE INTO file_metadata
-             (blake3_hash, mime_type, camera_model, captured_at,
+             (blake3_hash, file_uuid, mime_type, camera_model, captured_at,
               extracted_at, updated_at, device_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+         VALUES (?1, (SELECT f.file_uuid FROM files f WHERE f.blake3_hash = ?1),
+                 ?2, ?3, ?4, ?5, ?5, ?6)",
         rusqlite::params![hash, mime, camera, captured, TS, DEV],
     )
     .expect("insert metadata");
@@ -167,19 +178,23 @@ pub fn insert_metadata(conn: &Connection, hash: &str, mime: &str, camera: &str, 
 /// existing `files` hash. Unlike [`insert_file`] this does NOT INSERT into
 /// `files` — caller has already seeded that row via `insert_file` for the
 /// representative location.
+///
+/// `file_uuid` is looked up from `files` via `blake3_hash` (post-Task-3
+/// trigger pivot — see [`insert_file`] WHY block).
 pub fn insert_file_at_volume(conn: &Connection, hash: &str, path: &str, volume: &str) {
     conn.execute(
         "INSERT OR IGNORE INTO files
-             (blake3_hash, file_size, first_seen, updated_at, device_id)
-         VALUES (?1, 1024, ?2, ?2, ?3)",
-        rusqlite::params![hash, TS, DEV],
+             (blake3_hash, file_uuid, file_size, first_seen, updated_at, device_id)
+         VALUES (?1, ?2, 1024, ?3, ?3, ?4)",
+        rusqlite::params![hash, uuid::Uuid::now_v7().to_string(), TS, DEV],
     )
     .expect("insert files (secondary location)");
     conn.execute(
         "INSERT OR IGNORE INTO file_locations
-             (id, blake3_hash, volume_id, relative_path, status,
+             (id, blake3_hash, file_uuid, volume_id, relative_path, status,
               first_seen, updated_at, device_id)
-         VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5, ?6)",
+         VALUES (?1, ?2, (SELECT f.file_uuid FROM files f WHERE f.blake3_hash = ?2),
+                 ?3, ?4, 'active', ?5, ?5, ?6)",
         rusqlite::params![
             uuid::Uuid::now_v7().to_string(),
             hash,
@@ -225,6 +240,9 @@ pub fn update_path_at_volume(
 
 /// Attach a tag by name to a hash using raw SQL (bypasses `tag_repo` for
 /// metadata-less-file tests where only one connection is available).
+///
+/// `file_uuid` on the `file_tags` row is looked up from `files` via
+/// `blake3_hash` (post-Task-3 trigger pivot — see [`insert_file`] WHY block).
 pub fn attach_tag_raw(conn: &Connection, hash: &str, tag_name: &str) {
     conn.execute(
         "INSERT OR IGNORE INTO tags (id, name, first_seen, updated_at, device_id)
@@ -241,8 +259,9 @@ pub fn attach_tag_raw(conn: &Connection, hash: &str, tag_name: &str) {
         .expect("get tag id");
     conn.execute(
         "INSERT OR IGNORE INTO file_tags
-             (id, blake3_hash, tag_id, first_seen, updated_at, device_id)
-         VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+             (id, blake3_hash, file_uuid, tag_id, first_seen, updated_at, device_id)
+         VALUES (?1, ?2, (SELECT f.file_uuid FROM files f WHERE f.blake3_hash = ?2),
+                 ?3, ?4, ?4, ?5)",
         rusqlite::params![uuid::Uuid::now_v7().to_string(), hash, tag_id, TS, DEV],
     )
     .expect("insert file_tag");
@@ -325,14 +344,18 @@ pub fn restore_tag_raw(conn: &Connection, tag_name: &str) {
 
 /// Insert or replace a metadata row for `hash` with a deterministic camera
 /// token derived from `variant`.
+///
+/// `file_uuid` looked up from `files` via `blake3_hash` (post-Task-3
+/// trigger pivot — see [`insert_file`] WHY block).
 pub fn set_metadata_variant(conn: &Connection, hash: &str, variant: u8) {
     let cam = format!("cam_{variant}");
     let mime = format!("image/type{variant}");
     conn.execute(
         "INSERT INTO file_metadata
-             (blake3_hash, mime_type, camera_model, captured_at,
+             (blake3_hash, file_uuid, mime_type, camera_model, captured_at,
               extracted_at, updated_at, device_id)
-         VALUES (?1, ?2, ?3, '', ?4, ?4, ?5)
+         VALUES (?1, (SELECT f.file_uuid FROM files f WHERE f.blake3_hash = ?1),
+                 ?2, ?3, '', ?4, ?4, ?5)
          ON CONFLICT(blake3_hash) DO UPDATE SET
              mime_type = excluded.mime_type,
              camera_model = excluded.camera_model,

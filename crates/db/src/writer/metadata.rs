@@ -209,13 +209,21 @@ fn upsert_metadata_impl(
             // this upsert deliberately never touches thumbnail
             // columns (Task 2 decoupling). See utof/perima#15
             // HIGH #3.
+            // WHY file_uuid via subquery: post-V011 + Task 3 trigger pivot
+            // (spec §4.1.4) — FTS5 triggers join on file_uuid; metadata
+            // INSERT must populate it from the owning `files` row's
+            // file_uuid (looked up via blake3_hash) so the
+            // `search_after_metadata_insert` trigger seeds search_content
+            // with the matching key.
             tx.execute(
                 "INSERT INTO file_metadata
-                 (blake3_hash, width, height, duration_ms, captured_at,
+                 (blake3_hash, file_uuid, width, height, duration_ms, captured_at,
                   camera_make, camera_model, codec, bitrate_bps, mime_type,
                   thumbnail_status,
                   extracted_at, updated_at, device_id, hlc)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                 VALUES (?1,
+                         (SELECT f.file_uuid FROM files f WHERE f.blake3_hash = ?1),
+                         ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                          'pending',
                          ?11, ?11, ?12, ?13)",
                 rusqlite::params![

@@ -29,9 +29,10 @@ pub enum BodyKind {
     SearchContentAfterDelete,
     /// `search_after_file_locations_insert` — seed `search_content` from joined live state.
     FileLocationsInsert,
-    /// `search_after_location_hash_change_retire` — DELETE OLD `search_content` row if no sibling.
-    LocationHashChangeRetire,
-    /// `search_after_location_hash_change_seed` — INSERT-OR-IGNORE + UPDATE NEW row from live state.
+    /// `search_after_location_hash_change_seed` — INSERT-OR-IGNORE + UPDATE row from live state.
+    /// Post-Task-3 pivot: replaces the V008 retire+seed pair as a single trigger
+    /// (`file_uuid` is stable across hash changes, so the OLD `search_content`
+    /// row is the same row this trigger refreshes; no separate retire needed).
     LocationHashChangeSeed,
     /// `search_after_location_rename` — V007 trigger 2b. Consumes NEW.* directly
     /// (WHEN-guarded to representative). DO NOT replace with `representative_path()` macro.
@@ -78,6 +79,14 @@ pub struct FtsAggregation {
 /// requires adding the removed name here so existing DBs converge.
 pub const LEGACY_TRIGGER_NAMES: &[&str] = &[
     "search_after_location_hash_change", // V007; V008 split into _retire + _seed
+    // Post-Task-3 (FTS5 trigger pivot to file_uuid, spec §4.1.4): the
+    // retire trigger is vestigial. Pre-pivot it removed the OLD blake3_hash's
+    // search_content row when no sibling location referenced it. Post-pivot,
+    // file_uuid is stable across hash changes, so the search_content row
+    // keyed by file_uuid stays valid; the seed alone idempotently refreshes
+    // blake3_hash + path on the same row. Existing dev DBs need this name
+    // DROPped so the install body's "DROP every legacy" loop catches it.
+    "search_after_location_hash_change_retire",
 ];
 
 /// The 16 trigger entries the codegen renders.
@@ -116,13 +125,9 @@ pub const FTS_AGGREGATIONS: &[FtsAggregation] = &[
         when: Some("NEW.deleted_at IS NULL"),
         body: BodyKind::FileLocationsInsert,
     },
-    FtsAggregation {
-        name: "search_after_location_hash_change_retire",
-        source_table: "file_locations",
-        event: TriggerEvent::UpdateOf("blake3_hash"),
-        when: Some("OLD.blake3_hash != NEW.blake3_hash"),
-        body: BodyKind::LocationHashChangeRetire,
-    },
+    // Hash-change retire is GONE post-Task-3 pivot — see LEGACY_TRIGGER_NAMES
+    // for the rationale. Seed alone handles hash changes via UPSERT-shaped
+    // refresh on the file_uuid-keyed search_content row.
     FtsAggregation {
         name: "search_after_location_hash_change_seed",
         source_table: "file_locations",
@@ -138,7 +143,7 @@ pub const FTS_AGGREGATIONS: &[FtsAggregation] = &[
             "OLD.relative_path != NEW.relative_path \
              AND NEW.deleted_at IS NULL \
              AND NEW.id = (SELECT id FROM file_locations \
-                           WHERE blake3_hash = NEW.blake3_hash AND deleted_at IS NULL \
+                           WHERE file_uuid = NEW.file_uuid AND deleted_at IS NULL \
                            ORDER BY first_seen ASC, id ASC LIMIT 1)",
         ),
         body: BodyKind::RenameRepresentative,
@@ -216,11 +221,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fts_aggregations_has_sixteen_entries() {
+    fn fts_aggregations_has_fifteen_entries() {
+        // Post-Task-3 pivot (spec §4.1.4): retire trigger is gone (file_uuid
+        // is stable across hash changes, so the OLD-hash search_content row
+        // doesn't need retiring). 16 → 15.
         assert_eq!(
             FTS_AGGREGATIONS.len(),
-            16,
-            "expected 16 trigger entries — see spec §7.1"
+            15,
+            "expected 15 trigger entries post-Task-3 — see spec §4.1.4"
         );
     }
 
