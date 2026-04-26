@@ -1,13 +1,14 @@
 /**
  * Global UI state — Zustand 5, slice pattern.
  *
- * 4 slices:
+ * 5 slices:
  *   - ViewSlice         — viewMode, selectedTagId
  *   - SearchSlice       — searchQuery (raw input), debouncedQuery (drives useSearch)
  *   - ScanSlice         — status, lastReport (StatusBar reads these)
  *   - NotificationsSlice — id-keyed toast queue
+ *   - SelectionSlice    — selectedFileUuid (drives FileSidebar)
  *
- * WHY single store (not 4 separate stores): components read across
+ * WHY single store (not 5 separate stores): components read across
  * concerns (e.g. StatusBar reads scan + notifications). One store +
  * `useShallow` for multi-property reads keeps the API uniform.
  *
@@ -18,7 +19,7 @@
  */
 import { create, type StateCreator } from "zustand";
 import { coreErrorMessage } from "../lib/coreError";
-import type { BatchId, CoreError, FullHashOutcome, ScanReport } from "../bindings";
+import type { BatchId, CoreError, FileUuid, FullHashOutcome, ScanReport } from "../bindings";
 
 type ViewMode = "table" | "grid";
 
@@ -79,7 +80,19 @@ interface VerifyBatchSlice {
   clearVerifyBatch: () => void;
 }
 
-export type UiStore = ViewSlice & SearchSlice & ScanSlice & NotificationsSlice & VerifyBatchSlice;
+/**
+ * File selection state — drives the `FileSidebar` panel.
+ *
+ * WHY nullable (not string | undefined): null means "no file selected"
+ * and is the Zustand-idiomatic sentinel for optional singular selection.
+ * Toggle-to-deselect: clicking the same row sets it back to null.
+ */
+interface SelectionSlice {
+  selectedFileUuid: FileUuid | null;
+  setSelectedFileUuid: (uuid: FileUuid | null) => void;
+}
+
+export type UiStore = ViewSlice & SearchSlice & ScanSlice & NotificationsSlice & VerifyBatchSlice & SelectionSlice;
 
 const createViewSlice: StateCreator<UiStore, [], [], ViewSlice> = (set) => ({
   viewMode: "table",
@@ -138,10 +151,16 @@ const createVerifyBatchSlice: StateCreator<UiStore, [], [], VerifyBatchSlice> = 
   },
 });
 
+const createSelectionSlice: StateCreator<UiStore, [], [], SelectionSlice> = (set) => ({
+  selectedFileUuid: null,
+  setSelectedFileUuid: (uuid) => { set({ selectedFileUuid: uuid }); },
+});
+
 export const useUiStore = create<UiStore>()((...a) => ({
   ...createViewSlice(...a),
   ...createSearchSlice(...a),
   ...createScanSlice(...a),
   ...createNotificationsSlice(...a),
   ...createVerifyBatchSlice(...a),
+  ...createSelectionSlice(...a),
 }));

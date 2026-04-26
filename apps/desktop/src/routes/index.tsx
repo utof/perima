@@ -16,6 +16,7 @@ import { useTags } from "../queries/tags";
 import { useSearch } from "../queries/search";
 import FileGrid from "../components/FileGrid";
 import FileTable from "../components/FileTable";
+import FileSidebar from "../components/FileSidebar";
 import TagSidebar from "../components/TagSidebar";
 import { composeVisible, computeFacets, sortByRank } from "../lib/search";
 
@@ -36,6 +37,8 @@ export default function IndexRoute() {
   // only the post-300ms-debounce sanitised query drives `useSearch`. The
   // raw `searchQuery` field exists for the input value binding only.
   const debouncedQuery = useUiStore((s) => s.debouncedQuery);
+  const selectedFileUuid = useUiStore((s) => s.selectedFileUuid);
+  const setSelectedFileUuid = useUiStore((s) => s.setSelectedFileUuid);
   const { data: searchHits } = useSearch(debouncedQuery);
 
   // WHY undefined-check: useSearch returns `data: SearchHit[] | undefined` —
@@ -66,6 +69,14 @@ export default function IndexRoute() {
   const visibleFiles = searchActive ? sortByRank(baseVisible, rankMap) : baseVisible;
   const facetCounts = computeFacets(visibleFiles);
 
+  // Derive the selected file object from the UUID so FileSidebar gets a
+  // fully-typed FileWithTagsPayload without a second IPC round-trip.
+  // WHY find over a separate query: visibleFiles is already in memory;
+  // avoid a second IPC call for a single-row lookup at this scale.
+  const selectedFile = selectedFileUuid !== null
+    ? visibleFiles.find((f) => f.file_uuid === selectedFileUuid) ?? null
+    : null;
+
   return (
     <div className="flex-1 flex overflow-hidden">
       {tags.length > 0 && (
@@ -81,6 +92,12 @@ export default function IndexRoute() {
           ? <FileTable files={visibleFiles} loading={filesLoading} />
           : <FileGrid files={visibleFiles} loading={filesLoading} />}
       </main>
+      {selectedFile !== null && (
+        <FileSidebar
+          file={selectedFile}
+          onClose={() => { setSelectedFileUuid(null); }}
+        />
+      )}
     </div>
   );
 }

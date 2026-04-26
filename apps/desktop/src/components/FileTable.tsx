@@ -7,6 +7,7 @@ import {
   useDetachTag,
   useDetachTagByUuid,
 } from "../queries/tags";
+import { useUiStore } from "../stores/ui";
 
 /**
  * Per-row tag input + chip strip with detach buttons.
@@ -112,10 +113,14 @@ function humanSize(bytes: number): string {
  * Columns: HASH (8-char prefix), SIZE, VOLUME (8-char UUID prefix), PATH,
  * STATUS, TAGS (up to 3 chips + overflow badge).
  * Clicking a column header toggles ascending/descending sort on that column.
+ * Clicking a row selects it (sets `selectedFileUuid` in the UI store);
+ * clicking the same row again deselects (sets to null).
  */
 export default function FileTable({ files, loading }: FileTableProps) {
   const [sortBy, setSortBy] = useState<SortColumn>("relative_path");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const selectedFileUuid = useUiStore((s) => s.selectedFileUuid);
+  const setSelectedFileUuid = useUiStore((s) => s.setSelectedFileUuid);
 
   function handleSort(col: SortColumn) {
     if (sortBy === col) {
@@ -193,9 +198,22 @@ export default function FileTable({ files, loading }: FileTableProps) {
               // nullable for pending files, so a `f.hash`-derived key would
               // collide across pending rows and force React to re-mount when
               // `full_hash` materialises later.
+              // WHY onClick toggles: clicking an already-selected row deselects
+              // (returns sidebar to hidden state). Matching the row to the
+              // selected UUID uses string equality; no deep comparison needed.
               <tr
                 key={f.file_uuid}
-                className="border-t border-gray-700 odd:bg-gray-900 even:bg-gray-800 hover:bg-gray-700"
+                onClick={() => {
+                  setSelectedFileUuid(
+                    selectedFileUuid === f.file_uuid ? null : f.file_uuid,
+                  );
+                }}
+                className={`border-t border-gray-700 cursor-pointer ${
+                  selectedFileUuid === f.file_uuid
+                    ? "bg-blue-900"
+                    : "odd:bg-gray-900 even:bg-gray-800 hover:bg-gray-700"
+                }`}
+                aria-selected={selectedFileUuid === f.file_uuid}
               >
                 <td className="px-3 py-2 font-mono text-xs">
                   {f.hash ? f.hash.slice(0, 8) : "pending"}
