@@ -973,13 +973,22 @@ pub async fn attach_tag_by_uuid(
     state: tauri::State<'_, AppState>,
 ) -> Result<Tag, CoreError> {
     let parsed_uuid = parse_file_uuid_str(&file_uuid)?;
-    let (hash, _path, _size) = state
+    let (hash_opt, _path, _size) = state
         .container
         .files_repo
         .lookup_by_file_uuid(parsed_uuid)?
         .ok_or_else(|| {
             CoreError::NotFound(format!("no files row for file_uuid={}", parsed_uuid.0))
         })?;
+    // WHY require Some(hash): tag attach keys on blake3_hash — pending
+    // files (blake3_hash IS NULL in V011) cannot yet be tagged via this
+    // path. Surface a typed error pointing the user at `perima hash` first.
+    let hash = hash_opt.ok_or_else(|| {
+        CoreError::Unsupported(format!(
+            "file has no full_hash yet (file_uuid={}): run `perima hash` first",
+            parsed_uuid.0
+        ))
+    })?;
     state
         .container
         .tag
@@ -1010,13 +1019,22 @@ pub async fn detach_tag_by_uuid(
 ) -> Result<(), CoreError> {
     let parsed_uuid = parse_file_uuid_str(&file_uuid)?;
     let parsed_id = parse_tag_id(&tag_id)?;
-    let (hash, _path, _size) = state
+    let (hash_opt, _path, _size) = state
         .container
         .files_repo
         .lookup_by_file_uuid(parsed_uuid)?
         .ok_or_else(|| {
             CoreError::NotFound(format!("no files row for file_uuid={}", parsed_uuid.0))
         })?;
+    // WHY require Some(hash): tag detach keys on blake3_hash — pending
+    // files (blake3_hash IS NULL in V011) cannot yet have tags detached via
+    // this path (they have no tags since attach also requires a hash).
+    let hash = hash_opt.ok_or_else(|| {
+        CoreError::Unsupported(format!(
+            "file has no full_hash yet (file_uuid={}): run `perima hash` first",
+            parsed_uuid.0
+        ))
+    })?;
 
     let tags = state.tag_repo.list_tags()?;
     let tag_name = tags

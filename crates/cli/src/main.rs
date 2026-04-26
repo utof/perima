@@ -110,6 +110,19 @@ enum Command {
     /// Tag management: add, remove, and list tags.
     Tag(cmd::tag::TagArgs),
 
+    /// Compute the full BLAKE3 hash for one or more indexed files.
+    ///
+    /// Use `perima hash <path>` for a single file, `--all` to hash every
+    /// indexed file, or `--pending` to hash only files whose full hash has
+    /// not yet been computed.
+    Hash(cmd::hash::HashArgs),
+
+    /// Inspect and resolve quick-hash duplicate candidates.
+    ///
+    /// Use `--check` to list groups, `--verify` to compute full hashes on
+    /// candidates, or `mark-distinct <uuid>...` to memorise false positives.
+    Dedup(cmd::dedup::DedupArgs),
+
     /// Full-text search over indexed file metadata and tags.
     Search(cmd::search::SearchArgs),
 
@@ -218,6 +231,10 @@ async fn main() -> ExitCode {
         } => dispatch_ls(volume, limit, json, with_metadata, tag, &config).await,
 
         Command::Tag(args) => dispatch_tag(&args, &config).await,
+
+        Command::Hash(args) => dispatch_hash(&args, &config).await,
+
+        Command::Dedup(args) => dispatch_dedup(&args, &config).await,
 
         Command::Search(args) => dispatch_search(&args, &config).await,
 
@@ -655,6 +672,48 @@ async fn dispatch_tag(args: &cmd::tag::TagArgs, config: &Config) -> ExitCode {
         }
     };
     match cmd::tag::run(&container, &config.data_dir, config.device_id, args).await {
+        Ok(()) => ExitCode::from(0),
+        Err(e) => {
+            eprintln!("perima: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Run the `hash` subcommand.
+async fn dispatch_hash(args: &cmd::hash::HashArgs, config: &Config) -> ExitCode {
+    let db_path = config.data_dir.join("perima.db");
+    let container = match build_container(&db_path, vec![]) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("perima: database: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match cmd::hash::run(&container, &config.data_dir, config.device_id, args).await {
+        Ok(()) => ExitCode::from(0),
+        Err(perima_core::CoreError::InvalidPath(msg)) => {
+            eprintln!("perima: {msg}");
+            ExitCode::from(2)
+        }
+        Err(e) => {
+            eprintln!("perima: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Run the `dedup` subcommand.
+async fn dispatch_dedup(args: &cmd::dedup::DedupArgs, config: &Config) -> ExitCode {
+    let db_path = config.data_dir.join("perima.db");
+    let container = match build_container(&db_path, vec![]) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("perima: database: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match cmd::dedup::run(&container, &config.data_dir, config.device_id, args).await {
         Ok(()) => ExitCode::from(0),
         Err(e) => {
             eprintln!("perima: {e}");

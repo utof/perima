@@ -1,7 +1,9 @@
 //! CLI subcommand modules.
 
 pub(crate) mod debug_report;
+pub(crate) mod dedup;
 pub(crate) mod format;
+pub(crate) mod hash;
 pub(crate) mod ls;
 pub(crate) mod metadata;
 pub(crate) mod migrate_data_dir;

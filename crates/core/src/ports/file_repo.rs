@@ -112,6 +112,11 @@ pub trait FileRepository: Send + Sync {
     /// row exists for `file_uuid` or if no active mounted location is available
     /// (which the caller treats as `CoreError::FullHashUnavailable`).
     ///
+    /// The `blake3_hash` in the tuple is `None` for rows whose `full_hash`
+    /// has not yet been computed (V011 nullable `files.blake3_hash`). The
+    /// compute path only needs the on-disk path + size; callers that need a
+    /// real hash must check for `Some` (e.g., tag-attach by uuid).
+    ///
     /// # Default implementation
     ///
     /// Returns `Ok(None)` so non-SQLite adapters compile without surface change.
@@ -122,7 +127,7 @@ pub trait FileRepository: Send + Sync {
     fn lookup_by_file_uuid(
         &self,
         file_uuid: FileUuid,
-    ) -> Result<Option<(BlakeHash, PathBuf, u64)>, CoreError> {
+    ) -> Result<Option<(Option<BlakeHash>, PathBuf, u64)>, CoreError> {
         let _ = file_uuid;
         Ok(None)
     }
@@ -178,5 +183,23 @@ pub trait FileRepository: Send + Sync {
     ) -> Result<(), CoreError> {
         let _ = (file_uuids, device);
         Ok(())
+    }
+
+    /// Return file UUIDs for every row whose `full_hash` (`blake3_hash`) is
+    /// `NULL` AND that has an active mounted location on this device.
+    ///
+    /// Used by `perima hash --pending` to identify files that have been scanned
+    /// (and have a `quick_hash`) but whose canonical full hash has not yet been
+    /// computed.
+    ///
+    /// # Default implementation
+    ///
+    /// Returns an empty `Vec` so non-SQLite adapters compile.
+    ///
+    /// # Errors
+    /// Adapter-level errors become `CoreError::Internal`.
+    fn list_files_pending_full_hash(&self, limit: usize) -> Result<Vec<FileUuid>, CoreError> {
+        let _ = limit;
+        Ok(Vec::new())
     }
 }
