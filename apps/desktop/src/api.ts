@@ -12,9 +12,13 @@ import { listen } from "@tauri-apps/api/event";
 import { ResultAsync } from "neverthrow";
 import type {
   AppEvent,
+  BatchHandle,
+  BatchId,
+  BlakeHash,
   CollisionGroup,
   CoreError,
   FileLocationRecord,
+  FileUuid,
   FileWithMetadataPayload,
   FileWithTagsPayload,
   ScanReport,
@@ -268,4 +272,62 @@ export function searchRebuild(): ResultAsync<void, CoreError> {
  */
 export function listQuickHashCollisions(): ResultAsync<CollisionGroup[], CoreError> {
   return fromInvoke("list_quick_hash_collisions", {});
+}
+
+/**
+ * Compute the canonical `full_hash` (BLAKE3) for a single file by `file_uuid`.
+ *
+ * Synchronous on the IPC surface — the writer waits until the hash is
+ * persisted before returning. Used by the file-detail sidebar's
+ * "Compute canonical hash" button (Task 14).
+ *
+ * @param fileUuid - Stable surrogate identifier for the target file.
+ */
+export function computeFullHash(
+  fileUuid: FileUuid,
+): ResultAsync<BlakeHash, CoreError> {
+  return fromInvoke("compute_full_hash", { fileUuid });
+}
+
+/**
+ * Spawn a background batch that computes `full_hash` for every UUID in
+ * `fileUuids`. Returns a handle immediately; per-file results stream via
+ * {@link subscribeToAppEvents} as `AppEvent::VerifyProgress`, terminating
+ * with `AppEvent::VerifyComplete`.
+ *
+ * WHY batched IPC (not N single-file calls): one writer-side fan-out
+ * keeps the progress events monotonic and shares one batch identity for
+ * the cancel button.
+ *
+ * @param fileUuids - Stable surrogate identifiers for the batch members.
+ */
+export function computeFullHashBatch(
+  fileUuids: FileUuid[],
+): ResultAsync<BatchHandle, CoreError> {
+  return fromInvoke("compute_full_hash_batch", { fileUuids });
+}
+
+/**
+ * Cancel an in-flight `compute_full_hash_batch` by `batch_id`.
+ *
+ * Returns `CoreError::NotFound` when the batch is already finished or
+ * never started — callers should treat that case as success.
+ *
+ * @param batchId - Identifier returned from {@link computeFullHashBatch}.
+ */
+export function cancelVerifyBatch(batchId: BatchId): ResultAsync<void, CoreError> {
+  return fromInvoke("cancel_verify_batch", { batchId });
+}
+
+/**
+ * Memorise that the supplied `file_uuids` were verified to have distinct
+ * `full_hash` values despite sharing a `quick_hash`. Excluded from
+ * subsequent {@link listQuickHashCollisions} results.
+ *
+ * @param fileUuids - Members of the candidate group, all-or-nothing.
+ */
+export function markVerifiedDistinct(
+  fileUuids: FileUuid[],
+): ResultAsync<void, CoreError> {
+  return fromInvoke("mark_verified_distinct", { fileUuids });
 }
