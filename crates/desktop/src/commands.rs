@@ -942,21 +942,26 @@ pub fn detach_tag_inner<T: TagRepository + ?Sized>(
 
 /// Attach a tag to a file by `file_uuid` instead of `blake3_hash`.
 ///
-/// WHY (Task 11, spec §4.8): pending files (no `full_hash` computed yet)
-/// have no `blake3_hash` to attach a tag with. `file_uuid` is the stable
-/// surrogate present on every `files` row from V011 on, so this is the
-/// uuid-keyed analogue of [`attach_tag`]. Internally resolves
+/// WHY (Task 11, spec §4.8): `file_uuid` is the stable surrogate present
+/// on every `files` row from V011 on. This is the uuid-keyed analogue of
+/// [`attach_tag`] — the frontend can drive tagging by the stable surrogate
+/// instead of the (eventually nullable) content hash. Internally resolves
 /// `file_uuid` → `blake3_hash` via [`perima_core::FileRepository::lookup_by_file_uuid`]
-/// and reuses the existing tag-attach SQL path. Falls back to
-/// `CoreError::FullHashUnavailable` if the row exists but has no full hash
-/// yet — clients should compute the full hash first or accept that the
-/// tag attach is impossible until v0.7+'s `file_tags.file_uuid` PK pivot.
+/// and reuses the existing tag-attach SQL path.
+///
+/// **Pending-file caveat:** in v0.6.x every files row carries a
+/// `blake3_hash` value (post-Task-7 the placeholder is the row's
+/// `quick_hash` until the on-demand `compute_full_hash` promotes it).
+/// Tag attach therefore succeeds for both real-hash and placeholder-hash
+/// rows. Once a future migration relaxes `files.blake3_hash` to nullable
+/// (tracked at #161), this command will need to surface
+/// [`CoreError::FullHashUnavailable`] for the genuinely-NULL case; today
+/// that path is unreachable.
 ///
 /// # Errors
-/// - [`CoreError::Internal`] if `file_uuid` cannot be parsed.
+/// - [`CoreError::Internal`] if `file_uuid` cannot be parsed, or any
+///   adapter-level failure inside [`perima_core::FileRepository::lookup_by_file_uuid`].
 /// - [`CoreError::NotFound`] if no `files` row exists for `file_uuid`.
-/// - [`CoreError::FullHashUnavailable`] if the row exists but has no
-///   `full_hash` yet (tag attach by content hash is not yet possible).
 /// - Other variants from the underlying [`TagCommand::Attach`] path.
 // WHY allow: Tauri owns the `State`, `String` params.
 #[allow(clippy::needless_pass_by_value)]
