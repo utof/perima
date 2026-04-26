@@ -15,6 +15,7 @@ function makeFile(overrides: Partial<FileWithTagsPayload>): FileWithTagsPayload 
     // multiple files must override or the keys collide.
     file_uuid: "00000000-0000-0000-0000-000000000000",
     hash: "0".repeat(64),
+    quick_hash: null,
     size: 1024,
     volume_id: "00000000-0000-0000-0000-000000000000",
     relative_path: "photos/example.jpg",

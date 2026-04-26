@@ -1,8 +1,8 @@
 /**
  * File-detail sidebar — minimal stub (refs #153).
  *
- * Shows the file UUID, full hash (if computed), and a "Compute canonical
- * hash" button when the hash is still pending (null).
+ * Shows the file UUID, quick hash, full hash (if promoted), and a "Compute
+ * canonical hash" button when the file is still in placeholder state.
  *
  * WHY minimal stub: GH #153 (full file-detail sidebar with metadata,
  * preview, tags) is open. We land only the hash-related fields + the
@@ -10,12 +10,15 @@
  * immediately. Remaining #153 fields (EXIF metadata, tags, preview) land
  * in a follow-up once #153 closes.
  *
- * WHY "hash === null" is the placeholder condition: `FileWithMetadataPayload`
- * exposes only `hash` (the full BLAKE3 value). Post-Task-7 every new row has
- * `hash = quick_hash` initially; once `compute_full_hash` promotes the
- * real hash the field is non-null. We show Compute whenever `hash` is null.
- * (The plan's `hash === quick_hash` variant assumes `quick_hash` is in the
- * payload — it is not, so `hash === null` is the correct single condition.)
+ * WHY "hash === null || hash === quick_hash" is the placeholder condition:
+ * pre-V012 `blake3_hash` is NOT NULL (placeholder convention) — the scan
+ * path stores `quick_hash` there until `compute_full_hash` promotes the
+ * real hash. So `hash === null` never fires in production today. Exposing
+ * `quick_hash` from the payload lets us detect the placeholder state via
+ * value equality: when `hash === quick_hash` the full canonical hash has
+ * not been computed yet. Post-V012 (when blake3_hash becomes nullable)
+ * the `hash === null` arm becomes the primary signal; both arms are kept
+ * for forward-compat.
  *
  * WHY click-to-copy via navigator.clipboard: spec §4.6.3 calls this out as
  * a small UX win. We keep it to a one-line click handler; no third-party
@@ -41,8 +44,11 @@ export interface FileSidebarProps {
 export default function FileSidebar({ file, onClose }: FileSidebarProps) {
   const compute = useComputeFullHash();
 
-  // WHY hash === null: see module docstring. Full-hash absent = pending.
-  const isPending = file.hash === null;
+  // WHY two conditions: see module docstring.
+  // hash === null → post-V012 nullable convention (forward-compat).
+  // hash === quick_hash → pre-V012 placeholder convention (current production).
+  const isPlaceholder =
+    file.hash === null || (file.quick_hash !== null && file.hash === file.quick_hash);
 
   function handleCompute() {
     compute.mutate({ fileUuid: file.file_uuid });
@@ -84,12 +90,27 @@ export default function FileSidebar({ file, onClose }: FileSidebarProps) {
         </code>
       </section>
 
-      {/* Hash */}
+      {/* Quick hash */}
+      {file.quick_hash !== null && (
+        <section>
+          <p className="text-xs text-gray-400 uppercase tracking-wider mb-1">
+            Quick hash
+          </p>
+          <code
+            className="font-mono text-xs text-gray-500 break-all"
+            data-testid="quick-hash"
+          >
+            {file.quick_hash}
+          </code>
+        </section>
+      )}
+
+      {/* Full hash */}
       <section>
         <p className="text-xs text-gray-400 uppercase tracking-wider mb-1">
           Full hash
         </p>
-        {file.hash !== null ? (
+        {!isPlaceholder && file.hash !== null ? (
           // WHY click-to-copy on the <code> element: spec §4.6.3 UX win,
           // ≤10 LOC so we land it inline rather than deferring.
           <code
@@ -107,8 +128,8 @@ export default function FileSidebar({ file, onClose }: FileSidebarProps) {
         )}
       </section>
 
-      {/* Compute button — visible only when hash is pending */}
-      {isPending && (
+      {/* Compute button — visible only when hash is placeholder */}
+      {isPlaceholder && (
         <button
           onClick={handleCompute}
           disabled={compute.isPending}

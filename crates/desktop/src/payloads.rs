@@ -42,6 +42,15 @@ pub struct FileWithMetadataPayload {
     /// BLAKE3-256 content hash as lowercase hex; `None` until `full_hash`
     /// computes for this file.
     pub hash: Option<String>,
+    /// Quick-hash value as lowercase hex, or `None` if the backfill worker
+    /// has not yet run for this row.
+    ///
+    /// WHY exposed here: pre-V012 `blake3_hash` is `NOT NULL` — the scan
+    /// path stores `quick_hash` there as a placeholder until
+    /// `compute_full_hash` promotes the real hash. So `hash == null` never
+    /// fires for any file today. The frontend detects placeholder rows via
+    /// `hash === quick_hash` (same value = placeholder, different = promoted).
+    pub quick_hash: Option<String>,
     /// File size in bytes.
     pub size: u64,
     /// Volume UUID.
@@ -100,8 +109,10 @@ pub struct FileWithTagsPayload {
     pub tags: Vec<Tag>,
 }
 
-impl From<(FileLocationRecord, Option<MediaMetadata>)> for FileWithMetadataPayload {
-    fn from((loc, meta): (FileLocationRecord, Option<MediaMetadata>)) -> Self {
+impl From<(FileLocationRecord, Option<MediaMetadata>, Option<String>)> for FileWithMetadataPayload {
+    fn from(
+        (loc, meta, quick_hash): (FileLocationRecord, Option<MediaMetadata>, Option<String>),
+    ) -> Self {
         // WHY unzip via `meta.map(...)`: the nine optional metadata
         // fields each need independent `None` defaults when the
         // metadata row is absent. Chained `.map(|m| m.field.clone())`
@@ -141,6 +152,7 @@ impl From<(FileLocationRecord, Option<MediaMetadata>)> for FileWithMetadataPaylo
         Self {
             file_uuid: loc.file_uuid,
             hash: loc.hash.map(|h| h.to_hex()),
+            quick_hash,
             size: loc.size.0,
             volume_id: loc.volume_id.0.to_string(),
             relative_path: loc.relative_path.as_str().to_owned(),

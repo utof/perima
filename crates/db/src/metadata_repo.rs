@@ -230,7 +230,7 @@ impl MetadataRepository for SqliteMetadataRepository {
         &self,
         limit: usize,
         volume: Option<VolumeId>,
-    ) -> Result<Vec<(FileLocationRecord, Option<MediaMetadata>)>, CoreError> {
+    ) -> Result<Vec<perima_core::FileWithMetadataRow>, CoreError> {
         let conn = self.reads.get()?;
         let vol_filter = volume.map(|v| v.0.to_string());
 
@@ -247,13 +247,19 @@ impl MetadataRepository for SqliteMetadataRepository {
         // even when a concrete volume_id is supplied (SQLite's planner cannot
         // factor NULL out of the disjunction). Branching at Rust level keeps
         // both shapes index-eligible.
+        // WHY f.quick_hash as col 19: the frontend needs it to detect
+        // placeholder rows (hash === quick_hash means full_hash not yet
+        // computed). Pre-V012 blake3_hash is NOT NULL (placeholder convention),
+        // so `location.hash === null` never fires; equality comparison is the
+        // only reliable signal.
         let sql: &str = if vol_filter.is_some() {
             "SELECT f.file_uuid, f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
                     fl.status, fl.first_seen,
                     fm.updated_at,
                     fm.width, fm.height, fm.duration_ms, fm.captured_at,
                     fm.camera_make, fm.camera_model, fm.codec, fm.bitrate_bps,
-                    fm.mime_type, fm.thumbnail_path, fm.thumbnail_status
+                    fm.mime_type, fm.thumbnail_path, fm.thumbnail_status,
+                    f.quick_hash
              FROM file_locations fl
              JOIN files f ON f.blake3_hash = fl.blake3_hash
              LEFT JOIN file_metadata fm
@@ -268,7 +274,8 @@ impl MetadataRepository for SqliteMetadataRepository {
                     fm.updated_at,
                     fm.width, fm.height, fm.duration_ms, fm.captured_at,
                     fm.camera_make, fm.camera_model, fm.codec, fm.bitrate_bps,
-                    fm.mime_type, fm.thumbnail_path, fm.thumbnail_status
+                    fm.mime_type, fm.thumbnail_path, fm.thumbnail_status,
+                    f.quick_hash
              FROM file_locations fl
              JOIN files f ON f.blake3_hash = fl.blake3_hash
              LEFT JOIN file_metadata fm
@@ -308,6 +315,7 @@ impl MetadataRepository for SqliteMetadataRepository {
                 let mime_type: Option<String> = row.get(16)?;
                 let thumbnail_path: Option<String> = row.get(17)?;
                 let thumbnail_status: Option<String> = row.get(18)?;
+                let quick_hash: Option<String> = row.get(19)?;
                 Ok((
                     file_uuid_str,
                     hash_hex,
@@ -328,6 +336,7 @@ impl MetadataRepository for SqliteMetadataRepository {
                     mime_type,
                     thumbnail_path,
                     thumbnail_status,
+                    quick_hash,
                 ))
             })
             .map_err(Error::from)?;
@@ -354,6 +363,7 @@ impl MetadataRepository for SqliteMetadataRepository {
                 mime_type,
                 thumbnail_path,
                 thumbnail_status,
+                quick_hash,
             ) = row.map_err(Error::from)?;
             let file_uuid = crate::file_repo::parse_file_uuid(&file_uuid_str)?;
             let hash = crate::file_repo::parse_optional_hash(hash_hex_opt.as_deref())?;
@@ -404,7 +414,7 @@ impl MetadataRepository for SqliteMetadataRepository {
                 })
             };
 
-            out.push((location, metadata));
+            out.push((location, metadata, quick_hash));
         }
         Ok(out)
     }
@@ -668,7 +678,7 @@ mod tests {
 
         // Assert: one row, metadata is None.
         assert_eq!(rows.len(), 1, "expected exactly one (file_loc, meta) pair");
-        let (loc, meta) = &rows[0];
+        let (loc, meta, _quick_hash) = &rows[0];
         assert_eq!(loc.hash, Some(f.hash));
         assert_eq!(loc.relative_path.as_str(), "no_meta.txt");
         assert!(
@@ -705,7 +715,7 @@ mod tests {
 
         // Assert
         assert_eq!(rows.len(), 1);
-        let (loc, got_meta) = &rows[0];
+        let (loc, got_meta, _quick_hash) = &rows[0];
         assert_eq!(loc.hash, Some(f.hash));
         let got = got_meta
             .as_ref()

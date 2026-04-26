@@ -18,6 +18,7 @@ export function file(hash: string, tagIds: string[]): FileWithTagsPayload {
   return {
     file_uuid: `uuid-${hash}`,
     hash,
+    quick_hash: null,
     size: 0,
     volume_id: "vol",
     relative_path: `${hash}.jpg`,

@@ -12,7 +12,7 @@ pub mod volume_repo;
 pub use file_repo::{BackfillFileRow, FileRepository};
 pub use hash::HashService;
 pub use identity_cache::{CacheEntry, CacheKey, IdentityCacheRepository};
-pub use metadata_repo::MetadataRepository;
+pub use metadata_repo::{FileWithMetadataRow, MetadataRepository};
 pub use scanner::{FileStat, Scanner};
 pub use search_repo::SearchRepository;
 pub use tag_repo::TagRepository;

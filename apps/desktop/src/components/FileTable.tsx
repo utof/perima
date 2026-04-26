@@ -216,7 +216,13 @@ export default function FileTable({ files, loading }: FileTableProps) {
                 aria-selected={selectedFileUuid === f.file_uuid}
               >
                 <td className="px-3 py-2 font-mono text-xs">
-                  {f.hash ? f.hash.slice(0, 8) : "pending"}
+                  {/* WHY isPlaceholder check: pre-V012 blake3_hash is NOT NULL —
+                    * quick_hash is stored there until compute_full_hash promotes
+                    * the real hash. f.hash === null never fires today; equality
+                    * with quick_hash is the reliable placeholder signal. */}
+                  {f.hash === null || (f.quick_hash !== null && f.hash === f.quick_hash)
+                    ? "pending"
+                    : f.hash.slice(0, 8)}
                 </td>
                 <td className="px-3 py-2">{humanSize(f.size)}</td>
                 <td className="px-3 py-2 font-mono text-xs">

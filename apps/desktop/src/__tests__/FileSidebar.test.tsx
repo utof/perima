@@ -3,11 +3,12 @@
  *
  * Branches under test:
  *   - Renders file UUID prefix (first 8 chars).
- *   - Renders "pending" label when hash is null.
+ *   - Renders "pending" label when hash is null (post-V012 convention).
  *   - Shows "Compute canonical hash" button when hash is null.
+ *   - Shows Compute button when hash === quick_hash (pre-V012 placeholder).
+ *   - Hides Compute button when hash differs from quick_hash (promoted).
  *   - Clicking Compute triggers the mutation with the correct file_uuid.
- *   - Hides Compute button when hash is present (non-null).
- *   - Renders the full hash value when non-null.
+ *   - Renders the full hash value when hash is promoted (non-placeholder).
  *   - Close button calls onClose.
  *
  * WHY mock `../queries/dedup`: the mutation hook calls `api.computeFullHash`
@@ -43,6 +44,7 @@ function makeFile(overrides?: Partial<FileWithTagsPayload>): FileWithTagsPayload
   return {
     file_uuid: "12345678-0000-0000-0000-000000000001",
     hash: null,
+    quick_hash: null,
     size: 4_096,
     volume_id: "vol-0000-0000-0000",
     relative_path: "photos/img_1.jpg",
@@ -104,7 +106,7 @@ describe("FileSidebar", () => {
 
   it("hides Compute button and shows hash when full_hash is present", () => {
     const hash = "a".repeat(64);
-    const file = makeFile({ hash });
+    const file = makeFile({ hash, quick_hash: null });
     renderWithProviders(
       <FileSidebar file={file} onClose={vi.fn()} />,
     );
@@ -112,6 +114,32 @@ describe("FileSidebar", () => {
     expect(screen.queryByTestId("hash-pending")).toBeNull();
     const hashEl = screen.getByTestId("full-hash");
     expect(hashEl.textContent).toBe(hash);
+  });
+
+  it("shows Compute button when hash equals quick_hash (pre-V012 placeholder)", () => {
+    // WHY: pre-V012 blake3_hash is NOT NULL; scan stores quick_hash there.
+    // The placeholder is detected via hash === quick_hash, not hash === null.
+    const placeholder = "b".repeat(64);
+    const file = makeFile({ hash: placeholder, quick_hash: placeholder });
+    renderWithProviders(
+      <FileSidebar file={file} onClose={vi.fn()} />,
+    );
+    expect(screen.getByTestId("hash-pending")).toBeInTheDocument();
+    expect(screen.getByTestId("compute-hash-btn")).toBeInTheDocument();
+  });
+
+  it("hides Compute button when hash differs from quick_hash (full hash promoted)", () => {
+    // WHY: once compute_full_hash runs, blake3_hash !== quick_hash.
+    const fullHash = "a".repeat(64);
+    const quickHash = "b".repeat(64);
+    const file = makeFile({ hash: fullHash, quick_hash: quickHash });
+    renderWithProviders(
+      <FileSidebar file={file} onClose={vi.fn()} />,
+    );
+    expect(screen.queryByTestId("compute-hash-btn")).toBeNull();
+    expect(screen.queryByTestId("hash-pending")).toBeNull();
+    const hashEl = screen.getByTestId("full-hash");
+    expect(hashEl.textContent).toBe(fullHash);
   });
 
   it("calls onClose when the close button is clicked", () => {

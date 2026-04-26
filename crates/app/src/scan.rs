@@ -898,7 +898,7 @@ mod tests {
     use std::io::Write;
     use std::sync::Mutex;
 
-    use perima_core::{AppEvent, FileLocationRecord, MediaMetadata};
+    use perima_core::{AppEvent, MediaMetadata};
     use perima_db::{
         ReadPool, SqliteFileRepository, SqliteIdentityCacheRepository, SqliteMetadataRepository,
         SqliteVolumeRepository, SqliteWriter, SqliteWriterHandle,
@@ -943,7 +943,7 @@ mod tests {
             &self,
             _limit: usize,
             _volume: Option<VolumeId>,
-        ) -> Result<Vec<(FileLocationRecord, Option<MediaMetadata>)>, CoreError> {
+        ) -> Result<Vec<perima_core::FileWithMetadataRow>, CoreError> {
             Ok(vec![])
         }
         fn update_thumbnail(

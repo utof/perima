@@ -536,7 +536,7 @@ pub async fn list_files_with_metadata(
     // `list_files` for maintainability.
     let filtered: Vec<FileWithMetadataPayload> = rows
         .into_iter()
-        .filter(|(loc, _)| volume_id.is_none_or(|v| loc.volume_id == v))
+        .filter(|(loc, _, _)| volume_id.is_none_or(|v| loc.volume_id == v))
         .map(FileWithMetadataPayload::from)
         .collect();
     Ok(filtered)
@@ -1074,7 +1074,7 @@ pub async fn list_files_with_tags(
     Ok(files
         .into_iter()
         .map(|fwt| FileWithTagsPayload {
-            file: FileWithMetadataPayload::from((fwt.location, fwt.metadata)),
+            file: FileWithMetadataPayload::from((fwt.location, fwt.metadata, fwt.quick_hash)),
             tags: fwt.tags,
         })
         .collect())
@@ -1107,15 +1107,16 @@ where
     // files (no full_hash yet) cannot match the tag-by-hash lookup; their tags
     // surface as the empty Vec below. To attach tags to pending files use the
     // `attach_tag_by_uuid` IPC command.
-    let hashes: Vec<perima_core::BlakeHash> = rows.iter().filter_map(|(loc, _)| loc.hash).collect();
+    let hashes: Vec<perima_core::BlakeHash> =
+        rows.iter().filter_map(|(loc, _, _)| loc.hash).collect();
     let tag_map = tag_repo.tags_for_hashes(&hashes)?;
     Ok(rows
         .into_iter()
-        .map(|(loc, meta)| {
+        .map(|(loc, meta, quick_hash)| {
             let tags = loc
                 .hash
                 .map_or_else(Vec::new, |h| tag_map.get(&h).cloned().unwrap_or_default());
-            let file = FileWithMetadataPayload::from((loc, meta));
+            let file = FileWithMetadataPayload::from((loc, meta, quick_hash));
             FileWithTagsPayload { file, tags }
         })
         .collect())

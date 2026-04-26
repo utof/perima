@@ -58,6 +58,11 @@ pub struct FileWithTags {
     pub metadata: Option<MediaMetadata>,
     /// Active tags for this content hash.
     pub tags: Vec<Tag>,
+    /// Quick-hash value as a lowercase hex string, or `None` if the backfill
+    /// worker has not yet run for this row. Used by the frontend to detect
+    /// placeholder rows (`hash == quick_hash`). See
+    /// [`MetadataRepository::list_with_metadata`] for the contract.
+    pub quick_hash: Option<String>,
 }
 
 /// Filter parameters for [`TagCommand::ListFilesWithTags`].
@@ -275,11 +280,12 @@ impl TagUseCase {
                 // contribute zero tag-lookup keys and surface with empty
                 // tags below. The desktop attach_tag_by_uuid command lets
                 // pending files acquire tags by `file_uuid` regardless.
-                let hashes: Vec<BlakeHash> = rows.iter().filter_map(|(loc, _)| loc.hash).collect();
+                let hashes: Vec<BlakeHash> =
+                    rows.iter().filter_map(|(loc, _, _)| loc.hash).collect();
                 let tag_map = self.tags.tags_for_hashes(&hashes)?;
                 let files = rows
                     .into_iter()
-                    .map(|(loc, meta)| {
+                    .map(|(loc, meta, quick_hash)| {
                         let tags = loc.hash.map_or_else(Vec::new, |h| {
                             tag_map.get(&h).cloned().unwrap_or_default()
                         });
@@ -287,6 +293,7 @@ impl TagUseCase {
                             location: loc,
                             metadata: meta,
                             tags,
+                            quick_hash,
                         }
                     })
                     .collect();

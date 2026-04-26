@@ -98,12 +98,17 @@ pub enum MetadataOutput {
     Files(Vec<FileLocationRecord>),
 
     /// Response to [`MetadataCommand::ListFilesWithMetadata`] — each record
-    /// paired with its optional metadata.
+    /// paired with its optional metadata and the raw `quick_hash` hex string.
     ///
     /// `None` metadata means extraction is pending or failed; callers
     /// MUST NOT treat `None` as "file has no metadata" for display
     /// purposes — "pending" is the correct label.
-    FilesWithMetadata(Vec<(FileLocationRecord, Option<MediaMetadata>)>),
+    ///
+    /// The third element is `files.quick_hash` as a lowercase hex string, or
+    /// `None` if the backfill worker has not yet run. See
+    /// [`MetadataRepository::list_with_metadata`] for the placeholder
+    /// detection contract.
+    FilesWithMetadata(Vec<(FileLocationRecord, Option<MediaMetadata>, Option<String>)>),
 }
 
 /// Orchestrator: file-location listing and metadata join.
@@ -417,11 +422,11 @@ mod tests {
         // Find each row by path.
         let with_meta = rows
             .iter()
-            .find(|(r, _)| r.relative_path.as_str() == "media/has_meta.jpg")
+            .find(|(r, _, _)| r.relative_path.as_str() == "media/has_meta.jpg")
             .expect("file with metadata should appear");
         let without_meta = rows
             .iter()
-            .find(|(r, _)| r.relative_path.as_str() == "media/no_meta.jpg")
+            .find(|(r, _, _)| r.relative_path.as_str() == "media/no_meta.jpg")
             .expect("file without metadata should appear");
 
         assert!(

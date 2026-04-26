@@ -253,10 +253,17 @@ export type ScanReport = {
  *
  * Task 11 (spec §4.8): `file_uuid` is the stable surrogate (always
  * present from V011 on); `hash` is nullable for pending files.
+ *
+ * Task 14 must-fix: `quick_hash` is exposed so the frontend can detect
+ * placeholder rows via `hash === quick_hash`. Pre-V012 `blake3_hash` is
+ * NOT NULL, so `hash === null` never fires; equality comparison is the
+ * only reliable signal.
  */
 export type FileWithMetadataPayload = {
   file_uuid: FileUuid;
   hash: string | null;
+  /** Quick-hash value as lowercase hex, or null if backfill not yet run. */
+  quick_hash: string | null;
   size: number;
   volume_id: string;
   relative_path: string;

@@ -140,12 +140,15 @@ fn apply_volume_filter(
 }
 
 fn apply_metadata_volume_filter(
-    rows: Vec<(FileLocationRecord, Option<MediaMetadata>)>,
+    rows: Vec<(FileLocationRecord, Option<MediaMetadata>, Option<String>)>,
     volume: Option<VolumeId>,
-) -> Vec<(FileLocationRecord, Option<MediaMetadata>)> {
+) -> Vec<(FileLocationRecord, Option<MediaMetadata>, Option<String>)> {
     match volume {
         None => rows,
-        Some(v) => rows.into_iter().filter(|(r, _)| r.volume_id == v).collect(),
+        Some(v) => rows
+            .into_iter()
+            .filter(|(r, _, _)| r.volume_id == v)
+            .collect(),
     }
 }
 
@@ -166,14 +169,14 @@ fn apply_tag_filter(
 }
 
 fn apply_metadata_tag_filter(
-    rows: Vec<(FileLocationRecord, Option<MediaMetadata>)>,
+    rows: Vec<(FileLocationRecord, Option<MediaMetadata>, Option<String>)>,
     filter: Option<&HashSet<BlakeHash>>,
-) -> Vec<(FileLocationRecord, Option<MediaMetadata>)> {
+) -> Vec<(FileLocationRecord, Option<MediaMetadata>, Option<String>)> {
     match filter {
         None => rows,
         Some(set) => rows
             .into_iter()
-            .filter(|(r, _)| r.hash.is_some_and(|h| set.contains(&h)))
+            .filter(|(r, _, _)| r.hash.is_some_and(|h| set.contains(&h)))
             .collect(),
     }
 }
@@ -208,7 +211,7 @@ fn print_table(records: &[FileLocationRecord]) -> Result<(), CoreError> {
 
 /// Render `ls --with-metadata` as a human-readable table.
 fn print_table_with_metadata(
-    rows: &[(FileLocationRecord, Option<MediaMetadata>)],
+    rows: &[(FileLocationRecord, Option<MediaMetadata>, Option<String>)],
 ) -> Result<(), CoreError> {
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
@@ -218,7 +221,7 @@ fn print_table_with_metadata(
         "HASH", "SIZE", "VOLUME", "CAPTURED_AT", "DIMS", "CAMERA",
     )
     .map_err(CoreError::from)?;
-    for (r, meta) in rows {
+    for (r, meta, _quick_hash) in rows {
         let hash_hex = r.hash.map(|h| h.to_hex());
         let hash_short = hash_hex.as_deref().map_or("pending ", |h| &h[..8]);
         let vol_str = r.volume_id.0.to_string();
