@@ -49,9 +49,27 @@ perima-db = { path = ".", features = ["test-utils"] }
 # FTS5 search-latency benchmark on a seeded SQLite DB. Observability-
 # only per spec D-4.
 criterion = "0.5"
+# WHY perima-app + perima-fs + perima-hash in dev-deps: the rescan bench
+# (Task 16) builds a ScanUseCase directly, which requires the same
+# adapter + service types the CLI/Desktop shells wire at startup. Kept
+# in dev-deps (not dependencies) so production builds of perima-db
+# never pull in the app orchestration layer.
+perima-app   = { workspace = true }
+perima-fs    = { path = "../fs" }
+perima-hash  = { path = "../hash" }
+perima-media = { workspace = true }
+# WHY tokio + tokio-util: ScanUseCase::execute is async; the rescan bench
+# drives it via `Runtime::block_on` (one runtime per binary — this bench
+# IS the binary, so no secondary-runtime violation).
+tokio.workspace     = true
+tokio-util.workspace = true
 
 [[bench]]
 name = "fts"
+harness = false  # WHY: criterion installs its own harness; libtest off.
+
+[[bench]]
+name = "rescan"
 harness = false  # WHY: criterion installs its own harness; libtest off.
 
 [lints]
