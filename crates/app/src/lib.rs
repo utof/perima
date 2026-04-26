@@ -25,6 +25,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod backfill;
 pub mod bus;
 pub mod config;
 pub mod container;
@@ -36,6 +37,7 @@ pub mod tag;
 pub mod telemetry;
 pub mod volume;
 
+pub use backfill::{BackfillRate, BackfillReport, BackfillRow, QuickHashBackfillWorker};
 pub use bus::Bus;
 pub use container::{AppContainer, AppDeps};
 pub use events::EventHandler;

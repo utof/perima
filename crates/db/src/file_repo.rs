@@ -12,8 +12,8 @@
 
 use flume::Sender;
 use perima_core::{
-    BlakeHash, CoreError, DeviceId, FileLocationRecord, FileRepository, FileSize, HashedFile,
-    LocationStatus, MediaPath, UpsertOutcome, VolumeId,
+    BackfillFileRow, BlakeHash, CoreError, DeviceId, FileLocationRecord, FileRepository, FileSize,
+    HashedFile, LocationStatus, MediaPath, UpsertOutcome, VolumeId,
 };
 use rusqlite::Connection;
 
@@ -265,6 +265,99 @@ impl FileRepository for SqliteFileRepository {
         let conn = self.reads.get()?;
         list_file_locations_sql(&conn, limit, volume)
     }
+
+    fn list_files_needing_backfill(&self, limit: u32) -> Result<Vec<BackfillFileRow>, CoreError> {
+        // WHY pool-only: this is a pure SELECT — no write needed.
+        // WHY LEFT JOIN volume_mounts: we want to return the absolute
+        // path for the backfill worker so it can read the bytes without
+        // opening a second DB connection. `volume_mounts` stores the
+        // mount_path on the local machine. Rows without an active mount
+        // will have NULL mount_path → active_path = None, which the
+        // worker treats as "skip (no active location)". Spec §4.1.5.
+        let conn = self.reads.get()?;
+        list_files_needing_backfill_sql(&conn, limit)
+    }
+}
+
+/// SELECT body for [`SqliteFileRepository::list_files_needing_backfill`].
+///
+/// Joins `files` → `file_locations` → `volume_mounts` to build absolute
+/// paths for the backfill worker. Only non-deleted file rows with
+/// `quick_hash IS NULL` are returned. The LEFT JOIN on `volume_mounts`
+/// means rows on unmounted volumes produce `mount_path = NULL`; those
+/// rows surface with `active_path = None` so the worker can skip them.
+///
+/// WHY one-row-per-file (GROUP BY): `file_locations` may have multiple
+/// active rows for the same hash (e.g. duplicates on the same volume).
+/// We want exactly one `BackfillFileRow` per `files` row — GROUP BY
+/// plus MIN aggregates ensure that. This avoids a lateral join (not
+/// supported in older `SQLite`) while remaining indexable.
+fn list_files_needing_backfill_sql(
+    conn: &Connection,
+    limit: u32,
+) -> Result<Vec<BackfillFileRow>, perima_core::CoreError> {
+    let sql = "
+        SELECT f.blake3_hash, f.file_size,
+               MIN(vm.mount_path) AS mount_path,
+               MIN(fl.relative_path) AS rel_path
+        FROM files f
+        LEFT JOIN file_locations fl
+          ON fl.blake3_hash = f.blake3_hash
+         AND fl.deleted_at IS NULL
+         AND fl.status = 'active'
+        LEFT JOIN volume_mounts vm
+          ON vm.volume_id = fl.volume_id
+         AND vm.deleted_at IS NULL
+        WHERE f.quick_hash IS NULL
+          AND f.deleted_at IS NULL
+        GROUP BY f.blake3_hash
+        ORDER BY f.blake3_hash
+        LIMIT ?1
+    ";
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(Error::from)
+        .map_err(perima_core::CoreError::from)?;
+    let rows = stmt
+        .query_map(rusqlite::params![limit], |row| {
+            let hash_hex: String = row.get(0)?;
+            let size_i64: i64 = row.get(1)?;
+            let mount_path: Option<String> = row.get(2)?;
+            let rel_path: Option<String> = row.get(3)?;
+            Ok((hash_hex, size_i64, mount_path, rel_path))
+        })
+        .map_err(Error::from)
+        .map_err(perima_core::CoreError::from)?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (hash_hex, size_i64, mount_path, rel_path) = row
+            .map_err(Error::from)
+            .map_err(perima_core::CoreError::from)?;
+        let hash = BlakeHash::parse_hex(&hash_hex)?;
+        // WHY unwrap_or(0): a negative size in the DB indicates corruption;
+        // 0 causes `quick_hash_prefix_suffix` to hash an empty prefix which
+        // is benign — the writer's COALESCE guard preserves any race-winning
+        // real value.
+        let size_bytes = u64::try_from(size_i64).unwrap_or(0);
+
+        // Build the absolute path only if both mount_path and rel_path exist.
+        let active_path = match (mount_path, rel_path) {
+            (Some(mp), Some(rp)) => {
+                let mut p = std::path::PathBuf::from(mp);
+                p.push(rp);
+                Some(p)
+            }
+            _ => None,
+        };
+
+        out.push(BackfillFileRow {
+            hash,
+            size_bytes,
+            active_path,
+        });
+    }
+    Ok(out)
 }
 
 /// Shared SELECT body for `list_file_locations`.

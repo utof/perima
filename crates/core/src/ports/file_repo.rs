@@ -1,9 +1,29 @@
 //! File + location repository port (implementations land in phase 1b).
 
+use std::path::PathBuf;
+
 use crate::{
     BlakeHash, CoreError, DeviceId, FileLocationRecord, HashedFile, MediaPath, UpsertOutcome,
     VolumeId,
 };
+
+/// One row returned by [`FileRepository::list_files_needing_backfill`].
+///
+/// Contains enough information for the backfill worker to compute and
+/// store `quick_hash` without any additional DB reads per row.
+#[derive(Debug, Clone)]
+pub struct BackfillFileRow {
+    /// BLAKE3 full-content hash — used as the `files` PK for the write path.
+    pub hash: BlakeHash,
+    /// File size in bytes — passed to `quick_hash_prefix_suffix` to select
+    /// the prefix-‖-suffix vs whole-file hashing strategy (spec §4.4).
+    pub size_bytes: u64,
+    /// Absolute path of an active `file_locations` entry on the current device.
+    ///
+    /// `None` when no active location exists (file on an unmounted volume or
+    /// all locations soft-deleted). The backfill worker skips these rows.
+    pub active_path: Option<PathBuf>,
+}
 
 /// Persistence boundary for `files` + `file_locations`.
 pub trait FileRepository: Send + Sync {
@@ -61,4 +81,27 @@ pub trait FileRepository: Send + Sync {
         limit: usize,
         volume: Option<VolumeId>,
     ) -> Result<Vec<FileLocationRecord>, CoreError>;
+
+    /// Return up to `limit` file rows whose `quick_hash` column is `NULL`,
+    /// joined with the most-recent active `file_locations` entry to provide
+    /// an on-disk path.
+    ///
+    /// Used by the quick-hash backfill worker (`perima_app::QuickHashBackfillWorker`)
+    /// at startup to seed its work iterator (spec §4.1.5).
+    ///
+    /// # Default implementation
+    ///
+    /// Returns an empty `Vec` — adapters that do not persist `quick_hash`
+    /// (test stubs, future in-memory adapters) need no backfill. The
+    /// `perima_db::SqliteFileRepository` overrides this with the real
+    /// `SELECT … WHERE quick_hash IS NULL` query.
+    ///
+    /// # Errors
+    /// Adapter-level errors become `CoreError::Internal`.
+    fn list_files_needing_backfill(&self, limit: u32) -> Result<Vec<BackfillFileRow>, CoreError> {
+        let _ = limit;
+        // WHY: default no-op; adapters without a `quick_hash` column never
+        // have NULL rows to backfill. The SQLite adapter overrides.
+        Ok(Vec::new())
+    }
 }

@@ -157,6 +157,13 @@ pub struct AppContainer {
     /// this single adapter handle. Same pattern as `volumes`, `tags`,
     /// `metadata_repo` above.
     pub files_repo: Arc<dyn FileRepository>,
+    /// Direct handle to the content-hash service port.
+    ///
+    /// WHY exposed (Task 8 backfill): the backfill worker needs the same
+    /// `Arc<dyn HashService>` that `ScanUseCase` holds internally so it
+    /// can compute `quick_hash_prefix_suffix` without re-constructing a
+    /// `Blake3Service`. The field is a refcount clone — zero allocation.
+    pub hasher: Arc<dyn HashService>,
 }
 
 impl std::fmt::Debug for AppContainer {
@@ -260,6 +267,10 @@ impl AppContainer {
         // `FileRepository::list_file_locations`. Not exposed by any
         // UseCase. Arc::clone is refcount-only.
         let files_repo = Arc::clone(&deps.files);
+        // WHY same treatment for hasher: the backfill worker (Task 8)
+        // needs `quick_hash_prefix_suffix` without re-constructing
+        // a Blake3Service. Arc::clone is refcount-only.
+        let hasher = Arc::clone(&deps.hasher);
 
         Arc::new(Self {
             scan,
@@ -272,6 +283,7 @@ impl AppContainer {
             tags,
             metadata_repo,
             files_repo,
+            hasher,
         })
     }
 }

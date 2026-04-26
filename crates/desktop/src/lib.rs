@@ -23,7 +23,10 @@ pub mod state;
 use std::path::Path;
 use std::sync::Arc;
 
-use perima_app::{AppContainer, AppDeps, EventHandler, LogEventHandler};
+use perima_app::{
+    AppContainer, AppDeps, BackfillRate, EventHandler, LogEventHandler, QuickHashBackfillWorker,
+    backfill::{BACKFILL_QUERY_LIMIT, choose_backfill_rate},
+};
 use perima_core::{
     EventBus, FileRepository, HashService, IdentityCacheRepository, MetadataRepository, Scanner,
     SearchRepository, TagRepository, VolumeRepository,
@@ -230,6 +233,19 @@ pub fn run() -> Result<(), RunError> {
             drop(watch_writer);
             app.manage(writer_handle);
 
+            // Spawn the quick_hash backfill worker in the background (spec §4.1.5).
+            // WHY here (after build_container): the container's `files_repo` and
+            // `hasher` are the correct shared adapters; spawning before
+            // `manage(app_state)` keeps the wire-up co-located with the setup
+            // sequence and does not require a separate Tauri state entry.
+            // WHY CancellationToken::new(): the desktop process is long-running;
+            // the backfill task runs to completion naturally (no external cancel
+            // needed). The token is kept for API symmetry with the CLI path.
+            {
+                let backfill_cancel = tokio_util::sync::CancellationToken::new();
+                spawn_backfill_desktop(&container, cfg.device_id, backfill_cancel);
+            }
+
             let app_state = state::AppState::new(
                 cfg.data_dir,
                 cfg.device_id,
@@ -245,6 +261,71 @@ pub fn run() -> Result<(), RunError> {
         })
         .run(tauri::generate_context!())?;
     Ok(())
+}
+
+/// Spawn the `quick_hash` backfill worker for the desktop process.
+///
+/// Mirrors `crates/cli/src/main.rs::spawn_backfill`. Queries null rows,
+/// chooses an appropriate rate (spec §4.1.5), and `tokio::spawn`s the worker.
+/// The `JoinHandle` is dropped — the Tauri-managed runtime keeps the task alive
+/// until it drains or the process exits.
+///
+/// WHY a separate function (not inlined in `setup`): the `setup` closure is
+/// already long; extracting keeps it readable and the WHY-blocks co-located.
+fn spawn_backfill_desktop(
+    container: &AppContainer,
+    device_id: perima_core::DeviceId,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let rows = match container
+        .files_repo
+        .list_files_needing_backfill(BACKFILL_QUERY_LIMIT)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "backfill: could not query null quick_hash rows");
+            return;
+        }
+    };
+
+    if rows.is_empty() {
+        return;
+    }
+
+    let null_count = rows.len() as u64;
+    let rate = choose_backfill_rate(null_count);
+    tracing::info!(null_count, rate = ?rate, "spawning quick_hash backfill worker");
+
+    // Convert BackfillFileRow → BackfillRow, skipping rows with no active path.
+    let backfill_rows: Vec<_> = rows
+        .into_iter()
+        .filter_map(|r| {
+            r.active_path.map(|path| perima_app::BackfillRow {
+                hash: r.hash,
+                size_bytes: r.size_bytes,
+                path,
+            })
+        })
+        .collect();
+
+    let null_count_after_filter = backfill_rows.len() as u64;
+    let rate: BackfillRate = if null_count_after_filter == null_count {
+        rate
+    } else {
+        choose_backfill_rate(null_count_after_filter)
+    };
+
+    let _handle = QuickHashBackfillWorker::spawn(
+        Box::new(backfill_rows.into_iter()),
+        Arc::clone(&container.hasher),
+        Arc::clone(&container.files_repo),
+        device_id,
+        rate,
+        Arc::clone(&container.events),
+        cancel,
+    );
+    // WHY handle dropped: Tauri-managed runtime keeps the task alive;
+    // the process exit naturally cleans up the spawned future.
 }
 
 /// Build the [`AppContainer`] that backs every migrated Tauri handler.

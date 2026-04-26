@@ -9,7 +9,7 @@ pub mod search_repo;
 pub mod tag_repo;
 pub mod volume_repo;
 
-pub use file_repo::FileRepository;
+pub use file_repo::{BackfillFileRow, FileRepository};
 pub use hash::HashService;
 pub use identity_cache::{CacheEntry, CacheKey, IdentityCacheRepository};
 pub use metadata_repo::MetadataRepository;

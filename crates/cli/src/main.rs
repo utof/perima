@@ -21,7 +21,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use perima_app::{AppContainer, AppDeps, EventHandler};
+use perima_app::{
+    AppContainer, AppDeps, BackfillRate, EventHandler, QuickHashBackfillWorker,
+    backfill::{BACKFILL_QUERY_LIMIT, choose_backfill_rate},
+};
 use perima_core::{
     FileRepository, HashService, IdentityCacheRepository, MetadataRepository, Scanner,
     SearchRepository, TagRepository, VolumeRepository,
@@ -491,7 +494,85 @@ async fn dispatch_scan(
         ) as perima_app::OnPersist)
     };
 
+    // Spawn the quick_hash backfill worker in the background (spec §4.1.5).
+    // WHY here (not in main): this is the primary command that reads the DB
+    // regularly; spawning here ensures the backfill runs alongside the scan
+    // without blocking the user's foreground operation.
+    spawn_backfill(&container, config.device_id, cancel.token());
+
     map_scan_result(cmd::scan::run(&container, config.device_id, cancel, on_persist, &args).await)
+}
+
+/// Spawn the `quick_hash` backfill worker in the background.
+///
+/// Queries the database for `files.quick_hash IS NULL` rows via
+/// [`FileRepository::list_files_needing_backfill`], selects an appropriate
+/// rate (spec §4.1.5: more than 10k rows → 50/s, otherwise unlimited), and
+/// `tokio::spawn`s the worker. The `JoinHandle` is intentionally dropped —
+/// the task runs to completion independently.
+///
+/// WHY `device_id` arg: `upsert_file_with_quick_hash` needs the device id for
+/// the `updated_at + device_id` per-row CRDT columns (CLAUDE.md schema rules).
+fn spawn_backfill(
+    container: &AppContainer,
+    device_id: perima_core::DeviceId,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let rows = match container
+        .files_repo
+        .list_files_needing_backfill(BACKFILL_QUERY_LIMIT)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "backfill: could not query null quick_hash rows");
+            return;
+        }
+    };
+
+    if rows.is_empty() {
+        return; // Nothing to backfill — common path on healthy installs.
+    }
+
+    let null_count = rows.len() as u64;
+    let rate = choose_backfill_rate(null_count);
+    tracing::info!(
+        null_count,
+        rate = ?rate,
+        "spawning quick_hash backfill worker"
+    );
+
+    // Convert BackfillFileRow (core type) to BackfillRow (app type).
+    let backfill_rows: Vec<_> = rows
+        .into_iter()
+        .filter_map(|r| {
+            r.active_path.map(|path| perima_app::BackfillRow {
+                hash: r.hash,
+                size_bytes: r.size_bytes,
+                path,
+            })
+        })
+        .collect();
+
+    let null_count_after_filter = backfill_rows.len() as u64;
+    let rate: BackfillRate = if null_count_after_filter == null_count {
+        rate
+    } else {
+        // Some rows had no active path; re-evaluate rate with actual count.
+        choose_backfill_rate(null_count_after_filter)
+    };
+
+    let _handle = QuickHashBackfillWorker::spawn(
+        Box::new(backfill_rows.into_iter()),
+        Arc::clone(&container.hasher),
+        Arc::clone(&container.files_repo),
+        device_id,
+        rate,
+        Arc::clone(&container.events),
+        cancel,
+    );
+    // WHY handle dropped: task runs independently; process exits naturally
+    // when the CLI command completes, which cancels the token automatically
+    // (caller holds the Cancellation which wraps the token).
 }
 
 /// Convert a scan result to a process `ExitCode`.

@@ -287,6 +287,20 @@ fn upsert_file_impl(
         Some((existing_size, ref existing_dev))
             if existing_size == size_i64 && *existing_dev == dev_str =>
         {
+            // WHY quick_hash fill-in even on Unchanged: the backfill
+            // worker (Task 8) calls `upsert_file_with_quick_hash` on
+            // rows whose size and device haven't changed; without this
+            // targeted UPDATE the `Unchanged` arm would skip the write
+            // and leave `quick_hash` NULL forever. We only write when
+            // `quick_hex` is `Some` AND the stored value is already NULL
+            // (COALESCE semantics preserved: non-NULL stored value wins).
+            if let Some(ref qh_hex) = quick_hex {
+                tx.execute(
+                    "UPDATE files SET quick_hash = ?1 WHERE blake3_hash = ?2 AND quick_hash IS NULL",
+                    rusqlite::params![qh_hex, hash_hex],
+                )
+                .map_err(Error::from)?;
+            }
             // WHY no hlc write on Unchanged: same logical event did
             // not fire — preserving the prior hlc matches the tag /
             // metadata upsert semantics (spec §3.7).
