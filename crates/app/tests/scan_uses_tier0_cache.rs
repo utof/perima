@@ -222,6 +222,31 @@ async fn cache_hit_skips_all_hash_calls() {
         counting.full_dispatched_calls.load(Ordering::SeqCst),
     );
 
+    // Spec §4.1.1 + Task 7 fix (commit d7161f0): cache-HIT path must also
+    // populate `files.quick_hash` (using the cached entry's quick_hash),
+    // not just `file_identity_cache.quick_hash`. Without this assertion a
+    // regression dropping the hit-side `Some(entry.quick_hash)` to `None`
+    // would silently slip past — the writer-level tests don't exercise
+    // the scan-loop wiring. Mirror of the analogous assertion in
+    // `cache_miss_calls_quick_hash_prefix_suffix`.
+    let conn = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE quick_hash IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "cache-HIT path must populate files.quick_hash for the row it inserts"
+    );
+    drop(conn);
+
     // WHY explicit drop order: writer outlives repo handles; tempdirs last.
     drop(writer);
     drop(db_tmp);

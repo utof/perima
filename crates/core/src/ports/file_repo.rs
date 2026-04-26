@@ -19,7 +19,7 @@ pub trait FileRepository: Send + Sync {
     ///
     /// `quick_hash` is the cheap BLAKE3 prefix+suffix fingerprint computed
     /// during scan (spec §4.1.1). Adapters that persist this field (the
-    /// SQLite adapter in `perima_db`) override this method; all others fall
+    /// `SQLite` adapter in `perima_db`) override this method; all others fall
     /// back to the base [`Self::upsert_file`] call via the default
     /// implementation.
     ///
