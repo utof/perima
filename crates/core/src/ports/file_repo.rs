@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use crate::{
-    BlakeHash, CoreError, DeviceId, FileLocationRecord, HashedFile, MediaPath, UpsertOutcome,
-    VolumeId,
+    BlakeHash, CollisionGroup, CoreError, DeviceId, FileLocationRecord, FileUuid, HashedFile,
+    MediaPath, UpsertOutcome, VolumeId,
 };
 
 /// One row returned by [`FileRepository::list_files_needing_backfill`].
@@ -103,5 +103,80 @@ pub trait FileRepository: Send + Sync {
         // WHY: default no-op; adapters without a `quick_hash` column never
         // have NULL rows to backfill. The SQLite adapter overrides.
         Ok(Vec::new())
+    }
+
+    /// Look up a `(blake3_hash, absolute_path, size_bytes)` tuple by `file_uuid`.
+    ///
+    /// Used by `ComputeFullHashUseCase::execute_single` (spec §4.7.2) to fetch
+    /// the on-disk path + size for a `full_hash` compute. Returns `None` if no
+    /// row exists for `file_uuid` or if no active mounted location is available
+    /// (which the caller treats as `CoreError::FullHashUnavailable`).
+    ///
+    /// # Default implementation
+    ///
+    /// Returns `Ok(None)` so non-SQLite adapters compile without surface change.
+    /// `perima_db::SqliteFileRepository` overrides with a real query.
+    ///
+    /// # Errors
+    /// Adapter-level errors become `CoreError::Internal`.
+    fn lookup_by_file_uuid(
+        &self,
+        file_uuid: FileUuid,
+    ) -> Result<Option<(BlakeHash, PathBuf, u64)>, CoreError> {
+        let _ = file_uuid;
+        Ok(None)
+    }
+
+    /// Promote a freshly computed `full_hash` onto the `files` row keyed
+    /// by `file_uuid`. Updates `files.blake3_hash` AND a placeholder
+    /// `full_hash` column (today the schema has only `blake3_hash` — the
+    /// V0NN column split is tracked as #161).
+    ///
+    /// # Default implementation
+    ///
+    /// Returns `Ok(())` (no-op) so non-SQLite adapters compile.
+    ///
+    /// # Errors
+    /// Adapter-level errors become `CoreError::Internal`.
+    fn update_full_hash(&self, file_uuid: FileUuid, hash: BlakeHash) -> Result<(), CoreError> {
+        let _ = (file_uuid, hash);
+        Ok(())
+    }
+
+    /// Return all groups of files whose `quick_hash` matches one or more
+    /// other rows AND that have not been marked `verified_distinct`.
+    ///
+    /// Used by `DedupUseCase::list_collisions` (spec §4.6) — surfaces
+    /// candidate duplicates for the frontend dedup UX.
+    ///
+    /// # Default implementation
+    ///
+    /// Returns an empty `Vec` so non-SQLite adapters compile.
+    ///
+    /// # Errors
+    /// Adapter-level errors become `CoreError::Internal`.
+    fn list_quick_hash_collisions(&self) -> Result<Vec<CollisionGroup>, CoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Mark every `file_uuid` in `file_uuids` as `verified_distinct = 1`.
+    ///
+    /// Used by `DedupUseCase::mark_verified_distinct` after a manual or
+    /// automatic verification proves a quick-hash collision is a false
+    /// positive (full hashes differ).
+    ///
+    /// # Default implementation
+    ///
+    /// Returns `Ok(())` (no-op) so non-SQLite adapters compile.
+    ///
+    /// # Errors
+    /// Adapter-level errors become `CoreError::Internal`.
+    fn mark_verified_distinct(
+        &self,
+        file_uuids: Vec<FileUuid>,
+        device: DeviceId,
+    ) -> Result<(), CoreError> {
+        let _ = (file_uuids, device);
+        Ok(())
     }
 }

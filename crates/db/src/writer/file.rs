@@ -57,8 +57,8 @@
 use std::sync::Arc;
 
 use perima_core::{
-    AppEvent, BlakeHash, CoreError, DeviceId, EventBus, HashedFile, Hlc, InvalidationReason,
-    LocationStatus, MediaPath, UpsertOutcome, VolumeId,
+    AppEvent, BlakeHash, CoreError, DeviceId, EventBus, FileUuid, HashedFile, Hlc,
+    InvalidationReason, LocationStatus, MediaPath, UpsertOutcome, VolumeId,
 };
 use rusqlite::{Connection, OptionalExtension};
 
@@ -83,6 +83,12 @@ use crate::errors::Error;
 // fields, hlc, bus, reply) or buys cleanliness via reference-passing
 // `reply` in a way that obscures the consume-on-send semantics.
 #[allow(clippy::cognitive_complexity)]
+// WHY allow too_many_lines: same "single match over N variants" rationale as
+// cognitive_complexity above. Splitting the variants into helpers either
+// inflates parameter counts past `too_many_arguments` or sacrifices the
+// consume-on-send reply-channel semantics. The arms grow strictly with the
+// number of `FileWriteCmd` variants (now 7 post-Task-9).
+#[allow(clippy::too_many_lines)]
 pub(super) fn handle(conn: &mut Connection, cmd: FileWriteCmd, bus: &Arc<dyn EventBus>) {
     // WHY one HLC per command (not per row): the "one HLC per
     // user-visible logical event" invariant from spec §3.7. A single
@@ -173,6 +179,33 @@ pub(super) fn handle(conn: &mut Connection, cmd: FileWriteCmd, bus: &Arc<dyn Eve
                 tracing::debug!("file migrate_sentinel_row reply channel closed before send");
             }
         }
+        FileWriteCmd::PromoteFullHash {
+            file_uuid,
+            full_hash,
+            device,
+            reply,
+        } => {
+            let out = promote_full_hash_impl(conn, file_uuid, &full_hash, device, hlc);
+            if matches!(&out, Ok(rows) if *rows > 0) {
+                emit_collisions_changed(bus, "promote_full_hash");
+            }
+            if reply.send(out).is_err() {
+                tracing::debug!("file promote_full_hash reply channel closed before send");
+            }
+        }
+        FileWriteCmd::MarkVerifiedDistinct {
+            file_uuids,
+            device,
+            reply,
+        } => {
+            let out = mark_verified_distinct_impl(conn, &file_uuids, device, hlc);
+            if matches!(&out, Ok(rows) if *rows > 0) {
+                emit_collisions_changed(bus, "mark_verified_distinct");
+            }
+            if reply.send(out).is_err() {
+                tracing::debug!("file mark_verified_distinct reply channel closed before send");
+            }
+        }
     }
 }
 
@@ -186,6 +219,21 @@ fn emit_files_changed(bus: &Arc<dyn EventBus>, who: &'static str) {
         reason: InvalidationReason::FilesChanged,
     }) {
         tracing::warn!(?e, who, "post-commit emit failed: FilesChanged");
+    }
+}
+
+/// Emit `IndexInvalidated::CollisionsChanged` and log on emit failure.
+///
+/// WHY a separate emitter: dedup writes (`PromoteFullHash`,
+/// `MarkVerifiedDistinct`) change the *answer* `list_quick_hash_collisions`
+/// returns, not the underlying file grid. The frontend's `useDomainEvents`
+/// hook routes `CollisionsChanged` to the dedup query keys without
+/// invalidating the entire file list.
+fn emit_collisions_changed(bus: &Arc<dyn EventBus>, who: &'static str) {
+    if let Err(e) = bus.emit(&AppEvent::IndexInvalidated {
+        reason: InvalidationReason::CollisionsChanged,
+    }) {
+        tracing::warn!(?e, who, "post-commit emit failed: CollisionsChanged");
     }
 }
 
@@ -578,4 +626,113 @@ fn migrate_sentinel_row_impl(
 
     // WHY: schema guarantees at most 1 sentinel row per path, so n is 0 or 1.
     u64::try_from(n).map_err(|_| CoreError::Internal(format!("rows_changed {n} is negative")))
+}
+
+/// Writer-side body for [`FileWriteCmd::PromoteFullHash`].
+///
+/// Updates `files.blake3_hash` AND a placeholder `full_hash` mirror column,
+/// keyed on `file_uuid`. Today the schema has only `blake3_hash` (the
+/// content-addressed PK) — V011 added the lazy-full-hash workflow without
+/// adding a separate column. The placeholder convention from #161 means we
+/// rewrite `blake3_hash` with the freshly computed value (the existing row's
+/// PK was the cheap quick fingerprint OR a previously computed full hash;
+/// promoting overwrites it). Bumps `files.hlc` per spec §3.7.
+///
+/// WHY two columns mentioned even though only one exists: the spec calls out
+/// the future column split (#161). Until then the writer treats both as the
+/// same on-disk byte slot.
+///
+/// Returns the number of rows updated (0 if the `file_uuid` no longer exists,
+/// 1 on success).
+fn promote_full_hash_impl(
+    conn: &mut Connection,
+    file_uuid: FileUuid,
+    full_hash: &BlakeHash,
+    device: DeviceId,
+    hlc: i64,
+) -> Result<u64, CoreError> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(Error::from)?;
+
+    let uuid_str = file_uuid.0.to_string();
+    let hash_hex = full_hash.to_hex();
+    let now = now_iso();
+    let dev_str = device.0.to_string();
+
+    // WHY UPDATE blake3_hash: in v0.6.x's lazy workflow the `files.blake3_hash`
+    // column transiently holds a quick_hash placeholder until the user (or a
+    // batch verify) demands the real full content hash. Once computed, this
+    // command rewrites the column. A future schema slice (#161) splits the
+    // two — at that point the SQL grows a `full_hash = ?` clause; the
+    // signature here does not change.
+    let n = tx
+        .execute(
+            "UPDATE files
+             SET blake3_hash = ?1, updated_at = ?2, device_id = ?3, hlc = ?4
+             WHERE file_uuid = ?5 AND deleted_at IS NULL",
+            rusqlite::params![hash_hex, now, dev_str, hlc, uuid_str],
+        )
+        .map_err(Error::from)?;
+
+    tx.commit().map_err(Error::from)?;
+
+    u64::try_from(n).map_err(|_| CoreError::Internal(format!("rows_changed {n} is negative")))
+}
+
+/// Writer-side body for [`FileWriteCmd::MarkVerifiedDistinct`].
+///
+/// Sets `files.verified_distinct = 1` for every row in `file_uuids`.
+/// One transaction so the UI flip is atomic. Bumps `files.hlc` per spec §3.7.
+///
+/// Returns the total number of rows updated.
+fn mark_verified_distinct_impl(
+    conn: &mut Connection,
+    file_uuids: &[FileUuid],
+    device: DeviceId,
+    hlc: i64,
+) -> Result<u64, CoreError> {
+    if file_uuids.is_empty() {
+        return Ok(0);
+    }
+
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(Error::from)?;
+
+    let now = now_iso();
+    let dev_str = device.0.to_string();
+    let mut total: i64 = 0;
+
+    {
+        // WHY a prepared statement reused per uuid: SQLite plans the UPDATE once
+        // and feeds the per-row uuid via bind. Faster than building a single
+        // statement with `IN (?, ?, ...)` (which would require reformatting the
+        // SQL string per call) and equivalent in transaction semantics.
+        let mut stmt = tx
+            .prepare(
+                "UPDATE files
+                 SET verified_distinct = 1, updated_at = ?1, device_id = ?2, hlc = ?3
+                 WHERE file_uuid = ?4 AND deleted_at IS NULL",
+            )
+            .map_err(Error::from)?;
+
+        for uuid in file_uuids {
+            let uuid_str = uuid.0.to_string();
+            let n = stmt
+                .execute(rusqlite::params![now, dev_str, hlc, uuid_str])
+                .map_err(Error::from)?;
+            // WHY i64 try_from: rusqlite::Statement::execute returns usize; on
+            // 32-bit platforms a usize fits in i64, on 64-bit it might not in
+            // theory but n is row count (0 or 1 here) so the cast is exact.
+            let n_i64 = i64::try_from(n)
+                .map_err(|_| CoreError::Internal(format!("rows_changed {n} too large")))?;
+            total += n_i64;
+        }
+    }
+
+    tx.commit().map_err(Error::from)?;
+
+    u64::try_from(total)
+        .map_err(|_| CoreError::Internal(format!("rows_changed {total} is negative")))
 }

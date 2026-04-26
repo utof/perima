@@ -110,6 +110,11 @@ pub fn run() -> Result<(), RunError> {
         commands::list_files_with_tags,
         commands::search,
         commands::search_rebuild,
+        commands::compute_full_hash,
+        commands::compute_full_hash_batch,
+        commands::cancel_verify_batch,
+        commands::list_quick_hash_collisions,
+        commands::mark_verified_distinct,
     ]);
 
     // Export TypeScript bindings when the `specta-export` feature is

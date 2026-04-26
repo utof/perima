@@ -322,6 +322,40 @@ pub enum FileWriteCmd {
         /// Reply channel carrying `rows_changed` (`0` or `1`).
         reply: ReplyTx<u64>,
     },
+    /// Promote a freshly-computed `full_hash` onto a `files` row keyed by `file_uuid`.
+    ///
+    /// WHY: in v0.6.x's lazy-full-hash workflow (spec §4.1), `full_hash` is
+    /// computed on demand by [`crate::cmd::FileWriteCmd::PromoteFullHash`]'s
+    /// caller (the `ComputeFullHashUseCase`). This variant updates BOTH
+    /// `files.blake3_hash` AND a placeholder `full_hash` mirror column; today
+    /// the schema does not yet split the two (#161 placeholder convention),
+    /// so the writer just rewrites `blake3_hash` with the freshly computed
+    /// value. Bumps `files.hlc` per spec §3.7.
+    PromoteFullHash {
+        /// Surrogate file id (FK on `files.file_uuid`).
+        file_uuid: perima_core::FileUuid,
+        /// Newly computed full BLAKE3-256 hash.
+        full_hash: BlakeHash,
+        /// Device that initiated the promotion.
+        device: DeviceId,
+        /// Reply channel carrying `rows_changed` (`0` if the `file_uuid` no
+        /// longer exists, `1` on success).
+        reply: ReplyTx<u64>,
+    },
+    /// Set `files.verified_distinct = 1` on every row in `file_uuids`.
+    ///
+    /// WHY: groups of files that share `quick_hash` but whose `full_hash`
+    /// proves them distinct should not surface again as collision candidates
+    /// (spec §4.6). One transaction so the UI flip is all-or-nothing.
+    /// Bumps `files.hlc` per spec §3.7.
+    MarkVerifiedDistinct {
+        /// Surrogate file ids (FKs on `files.file_uuid`).
+        file_uuids: Vec<perima_core::FileUuid>,
+        /// Device that initiated the mark.
+        device: DeviceId,
+        /// Reply channel carrying total `rows_changed`.
+        reply: ReplyTx<u64>,
+    },
 }
 
 /// Search-repo write commands. Populated by Task 6.

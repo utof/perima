@@ -30,9 +30,9 @@ use perima_app::{
     SearchCommand, SearchOutput, TagCommand, TagFilter, TagOutput, VolumeCommand, VolumeOutput,
 };
 use perima_core::{
-    AppEvent, CoreError, DeviceId, EventBus, FileEvent, FileLocationRecord, LocationStatus,
-    MetadataExtractor, MetadataRepository, SearchRepository, Tag, TagRepository, VolumeId,
-    VolumeRecord,
+    AppEvent, BatchHandle, BatchId, BlakeHash, CollisionGroup, CoreError, DeviceId, EventBus,
+    FileEvent, FileLocationRecord, FileUuid, LocationStatus, MetadataExtractor, MetadataRepository,
+    SearchRepository, Tag, TagRepository, VolumeId, VolumeRecord,
 };
 use perima_db::{ReadPool, SqliteFileRepository, SqliteVolumeRepository, SqliteWriter};
 use perima_fs::{DebouncedWatcher, WalkdirScanner};
@@ -1351,4 +1351,122 @@ pub async fn search_rebuild(state: tauri::State<'_, AppState>) -> Result<(), Cor
         .execute(SearchCommand::Rebuild)
         .await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Dedup commands (Task 9)
+// ---------------------------------------------------------------------------
+
+/// Compute and persist the full BLAKE3 hash for a single file (by `file_uuid`).
+///
+/// Reads the active mounted location for the file, computes the full hash via
+/// the `HashService` dispatch matrix, and promotes it onto the `files` row.
+///
+/// # Errors
+/// - [`CoreError::FullHashUnavailable`] when no mounted location exists for
+///   the given `file_uuid` or when the hash compute fails with an I/O error.
+/// - Other [`CoreError`] variants from the underlying repository.
+// WHY allow: Tauri owns `State` and value params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn compute_full_hash(
+    file_uuid: FileUuid,
+    state: tauri::State<'_, AppState>,
+) -> Result<BlakeHash, CoreError> {
+    state
+        .container
+        .compute_full_hash
+        .execute_single(file_uuid)
+        .await
+}
+
+/// Spawn a background batch that computes `full_hash` for every uuid in
+/// `file_uuids`, returning a [`BatchHandle`] immediately.
+///
+/// Per-file progress events are emitted on the `app-event` channel as
+/// [`AppEvent::VerifyProgress`]; the batch emits [`AppEvent::VerifyComplete`]
+/// when the last file finishes (or cancellation fires).
+///
+/// # Errors
+/// Currently infallible — per-file failures are routed through events
+/// rather than aborting the batch.
+// WHY allow: Tauri owns `State` and value params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn compute_full_hash_batch(
+    file_uuids: Vec<FileUuid>,
+    state: tauri::State<'_, AppState>,
+) -> Result<BatchHandle, CoreError> {
+    state
+        .container
+        .compute_full_hash
+        .execute_batch(file_uuids)
+        .await
+}
+
+/// Cancel an in-flight `compute_full_hash_batch` by `batch_id`.
+///
+/// # Errors
+/// Returns [`CoreError::NotFound`] when no batch is currently running with
+/// that id (already finished, never started, or already cancelled).
+// WHY allow: Tauri owns `State` and value params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn cancel_verify_batch(
+    batch_id: BatchId,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CoreError> {
+    state
+        .container
+        .compute_full_hash
+        .cancel_batch(batch_id)
+        .await
+}
+
+/// List every group of files whose `quick_hash` matches one or more other
+/// rows AND that have not been marked `verified_distinct`.
+///
+/// Cheap query — groups by `quick_hash` and joins to active `file_locations`
+/// rows. Empty result means there are no candidate duplicates today.
+///
+/// # Errors
+/// Returns a [`CoreError`] on database failures.
+// WHY allow: Tauri owns `State`.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn list_quick_hash_collisions(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<CollisionGroup>, CoreError> {
+    // WHY blocking call wrapped in async fn: `DedupUseCase::list_collisions`
+    // is sync (the underlying SELECT is fast). The Tauri command surface is
+    // async-by-convention; we keep the signature uniform with the rest of
+    // the dedup commands.
+    state.container.dedup.list_collisions()
+}
+
+/// Mark the given `file_uuids` as `verified_distinct = 1`.
+///
+/// Memorises that these files share a `quick_hash` but were verified to
+/// have distinct `full_hash` values. They will be excluded from subsequent
+/// [`list_quick_hash_collisions`] results. Single transaction —
+/// all-or-nothing.
+///
+/// # Errors
+/// Returns a [`CoreError`] on database failures.
+// WHY allow: Tauri owns `State` and value params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn mark_verified_distinct(
+    file_uuids: Vec<FileUuid>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CoreError> {
+    state
+        .container
+        .dedup
+        .mark_verified_distinct(file_uuids, state.device_id)
 }

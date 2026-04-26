@@ -28,8 +28,8 @@ use perima_core::{
 use perima_media::ThumbnailGenerator;
 
 use crate::{
-    Bus, MetadataUseCase, ScanUseCase, SearchUseCase, TagUseCase, VolumeUseCase,
-    events::EventHandler,
+    Bus, ComputeFullHashUseCase, DedupUseCase, MetadataUseCase, ScanUseCase, SearchUseCase,
+    TagUseCase, VolumeUseCase, events::EventHandler,
 };
 
 // ---------------------------------------------------------------------------
@@ -105,6 +105,10 @@ pub struct AppContainer {
     pub volume: Arc<VolumeUseCase>,
     /// [`MetadataUseCase`] — list files + attached metadata.
     pub metadata: Arc<MetadataUseCase>,
+    /// [`ComputeFullHashUseCase`] — on-demand full-hash compute (single + batch).
+    pub compute_full_hash: Arc<ComputeFullHashUseCase>,
+    /// [`DedupUseCase`] — quick-hash collision listing + verified-distinct flips.
+    pub dedup: Arc<DedupUseCase>,
     /// Shared event bus — same `Arc` used inside every `UseCase`.
     pub events: Arc<dyn EventBus>,
     /// Direct handle to the volume repository port.
@@ -247,6 +251,15 @@ impl AppContainer {
             Arc::clone(&deps.metadata),
             Arc::clone(&events),
         ));
+        let compute_full_hash = Arc::new(ComputeFullHashUseCase::new(
+            Arc::clone(&deps.hasher),
+            Arc::clone(&deps.files),
+            Arc::clone(&events),
+        ));
+        let dedup = Arc::new(DedupUseCase::new(
+            Arc::clone(&deps.files),
+            Arc::clone(&events),
+        ));
 
         // WHY clone: the same `Arc<dyn VolumeRepository>` lives inside
         // `VolumeUseCase` (above) AND on the container field so shell
@@ -278,6 +291,8 @@ impl AppContainer {
             tag,
             volume,
             metadata,
+            compute_full_hash,
+            dedup,
             events,
             volumes,
             tags,
@@ -415,7 +430,8 @@ mod tests {
         // The container's `events` field is the single shared `Bus`;
         // each UseCase receives an `Arc::clone` of it. After construction,
         // the strong count on `container.events` reflects the shared
-        // ownership: 1 (container) + 5 (one per UseCase) = 6.
+        // ownership: 1 (container) + 7 (one per UseCase: scan, search, tag,
+        // volume, metadata, compute_full_hash, dedup) = 8.
         let (_db_tmp, deps, _writer) = deps_harness();
 
         // Pass a recording handler so we can observe fan-out from the
@@ -428,7 +444,7 @@ mod tests {
 
         let events_strong = Arc::strong_count(&container.events);
         assert_eq!(
-            events_strong, 6,
+            events_strong, 8,
             "container.events should be Arc-cloned once per UseCase plus the container field"
         );
 
