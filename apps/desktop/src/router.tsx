@@ -19,6 +19,7 @@ import {
 } from "@tanstack/react-router";
 import App from "./App";
 import IndexRoute from "./routes/index";
+import DedupRoute from "./routes/dedup";
 
 const rootRoute = createRootRoute({
   component: () => <App><Outlet /></App>,
@@ -30,7 +31,16 @@ const indexRoute = createRoute({
   component: IndexRoute,
 });
 
-const routeTree = rootRoute.addChildren([indexRoute]);
+// WHY placeholder: the /dedup route body lands in Task 13. The stub here
+// registers the path so `<Link to="/dedup">` in CollisionPill type-checks
+// (TanStack Router validates `to` props against the registered route tree).
+const dedupRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/dedup",
+  component: DedupRoute,
+});
+
+const routeTree = rootRoute.addChildren([indexRoute, dedupRoute]);
 
 export const router = createRouter({
   routeTree,

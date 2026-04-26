@@ -12,6 +12,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ResultAsync } from "neverthrow";
 import type {
   AppEvent,
+  CollisionGroup,
   CoreError,
   FileLocationRecord,
   FileWithMetadataPayload,
@@ -254,4 +255,17 @@ export function search(
 /** Wipe and rebuild the FTS5 search index from the current DB state. */
 export function searchRebuild(): ResultAsync<void, CoreError> {
   return fromInvoke("search_rebuild", {});
+}
+
+/**
+ * List all candidate duplicate groups (files sharing the same `quick_hash`).
+ *
+ * WHY dedupKeys.collisions(): the cache is invalidated on
+ * `IndexInvalidated::CollisionsChanged` and `VerifyComplete` events —
+ * both emitted by the backend after the quick-hash or verify write path.
+ * Groups with `verified_state === "VerifiedDistinct"` are included so the
+ * UI can show resolved groups without losing context.
+ */
+export function listQuickHashCollisions(): ResultAsync<CollisionGroup[], CoreError> {
+  return fromInvoke("list_quick_hash_collisions", {});
 }
