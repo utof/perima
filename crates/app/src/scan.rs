@@ -302,6 +302,20 @@ impl std::fmt::Debug for ScanUseCase {
     }
 }
 
+/// Per-file resolution result from [`ScanUseCase::resolve_with_cache`].
+///
+/// Triple of `(discovered_file, blake3_hash, quick_hash)`. `quick_hash`
+/// is `Some` for cache hits (`entry.quick_hash`) and cache misses (the
+/// freshly-computed fingerprint). It is `None` only when a cache lookup
+/// error demoted the file to the miss path and hashing was also skipped
+/// (cancellation). The scan loop passes this value through to
+/// `persist_file` to eagerly populate `files.quick_hash` per spec §4.1.1.
+///
+/// WHY type alias (not a struct): the 3-tuple is internal to this module;
+/// a struct would require field names and `pub` visibility for no gain.
+/// The alias suppresses `clippy::type_complexity` at all three use sites.
+type ResolveEntry = Result<(DiscoveredFile, BlakeHash, Option<BlakeHash>), CoreError>;
+
 impl ScanUseCase {
     /// Construct a `ScanUseCase` with the given dependency ports.
     ///
@@ -482,7 +496,12 @@ impl ScanUseCase {
         // standalone hash printing; a future minor can add a CLI flag
         // wiring quick_hash there too. Out of scope for v0.6.x.
         let cancel_token = cancel.clone();
-        let results: Vec<Result<(DiscoveredFile, BlakeHash), CoreError>> = if dry_run {
+        // WHY 3-tuple (d, h, quick_hash): dry-run carries None for quick_hash
+        // (no volume_id available so the cache key cannot be built; full_hash
+        // is used instead). The cache-aware path carries Some(quick_hash) from
+        // resolve_with_cache so persist_file can eagerly populate files.quick_hash
+        // per spec §4.1.1 — see WHY block in resolve_with_cache.
+        let results: Vec<ResolveEntry> = if dry_run {
             // Legacy dry-run path: parallel full_hash, no cache. Preserves
             // pre-Task-7 behaviour byte-for-byte.
             let hasher = Arc::clone(&self.hasher);
@@ -493,7 +512,7 @@ impl ScanUseCase {
                         return Err(CoreError::Internal("cancelled".into()));
                     }
                     let h = hasher.full_hash(&d.absolute_path)?;
-                    Ok((d, h))
+                    Ok((d, h, None))
                 })
                 .collect()
         } else {
@@ -523,7 +542,7 @@ impl ScanUseCase {
         for res in results {
             report.files_seen += 1;
             match res {
-                Ok((d, h)) => {
+                Ok((d, h, quick_hash)) => {
                     report.bytes_hashed += d.size.0;
                     report.per_file_entries.push(ScanReportEntry {
                         hash: h,
@@ -539,7 +558,7 @@ impl ScanUseCase {
                     let volume = volume_info
                         .as_ref()
                         .map_or_else(|| VolumeId(uuid::Uuid::nil()), |(v, _, _)| *v);
-                    match persist_file(&*self.files, &d, &h, device_id, volume) {
+                    match persist_file(&*self.files, &d, &h, quick_hash, device_id, volume) {
                         Ok(outcome) => {
                             // WHY: sentinel migration runs per-file,
                             // scoped to (relative_path, sentinel
@@ -693,18 +712,27 @@ impl ScanUseCase {
     /// `full_hash` (`UPDATE`s both the placeholder AND the new `full_hash`
     /// column atomically). Cache hits with `full_hash` already populated
     /// use the canonical `full_hash` directly — no placeholder needed.
+    /// Each success entry is `(discovered_file, blake3_hash, quick_hash)`.
+    ///
+    /// `quick_hash` is the cheap prefix+suffix fingerprint used to populate
+    /// `files.quick_hash` on INSERT (spec §4.1.1):
+    /// - Cache hit: `Some(entry.quick_hash)` — available without re-hashing.
+    /// - Cache miss: `Some(h)` — `h` is the freshly-computed `quick_hash`.
+    ///
+    /// Both branches are `Some`; `None` only arises on cache lookup failure
+    /// where the file was demoted to the miss path and hashed anyway.
     fn resolve_with_cache(
         &self,
         discovered: Vec<DiscoveredFile>,
         cancel: &CancellationToken,
         device: DeviceId,
         volume: VolumeId,
-    ) -> Vec<Result<(DiscoveredFile, BlakeHash), CoreError>> {
+    ) -> Vec<ResolveEntry> {
         // Phase 1: per-file stat + cache lookup. `hits` carry a (DiscoveredFile,
-        // BlakeHash) ready to push into results; `misses` carry the file +
-        // its CacheKey so phase 2 can insert the fresh cache row after hashing.
-        let mut results: Vec<Result<(DiscoveredFile, BlakeHash), CoreError>> =
-            Vec::with_capacity(discovered.len());
+        // BlakeHash, quick_hash) ready to push into results; `misses` carry
+        // the file + its CacheKey so phase 2 can insert the fresh cache row
+        // after hashing.
+        let mut results: Vec<ResolveEntry> = Vec::with_capacity(discovered.len());
         let mut misses: Vec<(DiscoveredFile, CacheKey)> = Vec::new();
         for d in discovered {
             if cancel.is_cancelled() {
@@ -725,7 +753,11 @@ impl ScanUseCase {
             match self.cache.lookup(&key) {
                 Ok(Some(entry)) => {
                     let h = cached_hash(&entry);
-                    results.push(Ok((d, h)));
+                    // WHY carry entry.quick_hash separately: `h` may be
+                    // `full_hash` when the cache row has been promoted,
+                    // but `files.quick_hash` must always store the cheap
+                    // prefix+suffix fingerprint, not the full hash.
+                    results.push(Ok((d, h, Some(entry.quick_hash))));
                 }
                 Ok(None) => misses.push((d, key)),
                 Err(e) => {
@@ -771,7 +803,10 @@ impl ScanUseCase {
                             "Tier-0 cache upsert failed; continuing scan",
                         );
                     }
-                    results.push(Ok((d, h)));
+                    // WHY Some(h) for miss path: h IS the quick_hash
+                    // (quick_hash_prefix_suffix result). Carry it so the
+                    // persist step can populate files.quick_hash eagerly.
+                    results.push(Ok((d, h, Some(h))));
                 }
                 Err(e) => results.push(Err(e)),
             }
@@ -811,10 +846,16 @@ const fn cached_hash(entry: &CacheEntry) -> BlakeHash {
 /// Persist a single hashed file: upsert the content record, then the
 /// location record. Returns the location outcome so the caller can
 /// classify the result as new/existing.
+///
+/// `quick_hash` is the cheap BLAKE3 prefix+suffix fingerprint. When
+/// `Some`, the adapter populates `files.quick_hash` on INSERT per spec
+/// §4.1.1, enabling `list_quick_hash_collisions` (Task 9) to return
+/// candidates immediately for files scanned post-Task-7-fix.
 fn persist_file(
     repo: &dyn FileRepository,
     d: &DiscoveredFile,
     h: &BlakeHash,
+    quick_hash: Option<BlakeHash>,
     device: DeviceId,
     volume: VolumeId,
 ) -> Result<UpsertOutcome, CoreError> {
@@ -822,7 +863,7 @@ fn persist_file(
         discovered: d.clone(),
         hash: *h,
     };
-    repo.upsert_file(&hf, device)?;
+    repo.upsert_file_with_quick_hash(&hf, device, quick_hash)?;
     repo.upsert_location(h, volume, &d.relative_path, device)
 }
 

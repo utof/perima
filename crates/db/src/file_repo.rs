@@ -195,6 +195,33 @@ impl FileRepository for SqliteFileRepository {
             .send(WriteCmd::File(FileWriteCmd::UpsertFile {
                 file: file.clone(),
                 device,
+                quick_hash: None,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
+    }
+
+    fn upsert_file_with_quick_hash(
+        &self,
+        file: &HashedFile,
+        device: DeviceId,
+        quick_hash: Option<BlakeHash>,
+    ) -> Result<UpsertOutcome, CoreError> {
+        let (reply_tx, reply_rx) = flume::bounded::<Result<UpsertOutcome, CoreError>>(1);
+        // WHY pass quick_hash through: scan-path callers supply the
+        // cheap prefix+suffix fingerprint computed during resolve_with_cache
+        // so the writer can populate files.quick_hash on INSERT per spec §4.1.1.
+        // Non-scan callers (watcher, tag attach) use the base upsert_file
+        // which sends None — the COALESCE in the UPDATE arm preserves any
+        // previously-stored value.
+        self.writer
+            .send(WriteCmd::File(FileWriteCmd::UpsertFile {
+                file: file.clone(),
+                device,
+                quick_hash,
                 reply: reply_tx,
             }))
             .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;

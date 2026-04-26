@@ -29,6 +29,7 @@ use perima_db::{
 };
 use perima_fs::WalkdirScanner;
 use perima_media::ThumbnailGenerator;
+use rusqlite::{Connection, OpenFlags};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -305,6 +306,28 @@ async fn cache_miss_calls_quick_hash_prefix_suffix() {
             + counting.full_dispatched_calls.load(Ordering::SeqCst),
         0,
         "miss path must not full-hash in v0.6.x — full_hash is Task 9 work",
+    );
+
+    // Spec §4.1.1: files.quick_hash must be populated after a cache-miss scan.
+    // WHY raw SQL: the port-trait read path does not expose quick_hash yet
+    // (Task 9 adds list_quick_hash_collisions). A direct SELECT verifies the
+    // writer actually wrote the column.
+    let ro = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .unwrap();
+    let quick_hash_count: i64 = ro
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE quick_hash IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        quick_hash_count, 1,
+        "spec §4.1.1: files.quick_hash must be non-NULL after a cache-miss scan \
+         (got {quick_hash_count} rows with quick_hash IS NOT NULL)"
     );
 
     drop(writer);

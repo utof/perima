@@ -95,9 +95,10 @@ pub(super) fn handle(conn: &mut Connection, cmd: FileWriteCmd, bus: &Arc<dyn Eve
         FileWriteCmd::UpsertFile {
             file,
             device,
+            quick_hash,
             reply,
         } => {
-            let out = upsert_file_impl(conn, &file, device, hlc);
+            let out = upsert_file_impl(conn, &file, device, hlc, quick_hash.as_ref());
             // WHY emit gated on Inserted | Updated: the `Unchanged`
             // arm writes zero rows and does not bump hlc — not a
             // logical event per spec §3.3.
@@ -230,6 +231,7 @@ fn upsert_file_impl(
     file: &HashedFile,
     device: DeviceId,
     hlc: i64,
+    quick_hash: Option<&BlakeHash>,
 ) -> Result<UpsertOutcome, CoreError> {
     // WHY BEGIN IMMEDIATE: historical rationale (pre-Batch-C) guarded
     // against two adapter handles racing on SELECT-then-INSERT. The
@@ -244,6 +246,7 @@ fn upsert_file_impl(
     let now = now_iso();
     let dev_str = device.0.to_string();
     let size_i64 = size_to_i64(file.discovered.size)?;
+    let quick_hex: Option<String> = quick_hash.map(BlakeHash::to_hex);
 
     // WHY two-statement SELECT-then-INSERT/UPDATE: `SQLite`'s `changes()`
     // cannot distinguish a fresh INSERT from a conflict-triggered UPDATE
@@ -266,12 +269,17 @@ fn upsert_file_impl(
             // dependent tables (file_locations, file_metadata, file_tags,
             // search_content) can join back via subquery lookup. Stable
             // across blake3_hash changes (lazy full_hash workflow).
+            //
+            // WHY quick_hash column populated here (spec §4.1.1): new rows
+            // carry the cheap prefix+suffix fingerprint so
+            // `list_quick_hash_collisions` (Task 9) can find candidates
+            // immediately without waiting for the Task 8 backfill worker.
             let file_uuid = perima_core::ids::new_id().to_string();
             tx.execute(
                 "INSERT INTO files
-                 (blake3_hash, file_uuid, file_size, first_seen, updated_at, device_id, hlc)
-                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)",
-                rusqlite::params![hash_hex, file_uuid, size_i64, now, dev_str, hlc],
+                 (blake3_hash, file_uuid, file_size, quick_hash, first_seen, updated_at, device_id, hlc)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
+                rusqlite::params![hash_hex, file_uuid, size_i64, quick_hex, now, dev_str, hlc],
             )
             .map_err(Error::from)?;
             UpsertOutcome::Inserted
@@ -285,11 +293,19 @@ fn upsert_file_impl(
             UpsertOutcome::Unchanged
         }
         Some(_) => {
+            // WHY COALESCE on quick_hash in the UPDATE path: the backfill
+            // worker (Task 8) may have already promoted this row with a
+            // real quick_hash; a re-scan carrying a newly-computed value
+            // must NOT overwrite a previously-stored fingerprint.
+            // COALESCE(quick_hash, ?) preserves the stored value when
+            // non-NULL and fills it when NULL (first re-scan after a
+            // schema migration, or a scan that predated Task 7 fix).
             tx.execute(
                 "UPDATE files
-                 SET file_size = ?1, updated_at = ?2, device_id = ?3, hlc = ?4
+                 SET file_size = ?1, updated_at = ?2, device_id = ?3, hlc = ?4,
+                     quick_hash = COALESCE(quick_hash, ?6)
                  WHERE blake3_hash = ?5",
-                rusqlite::params![size_i64, now, dev_str, hlc, hash_hex],
+                rusqlite::params![size_i64, now, dev_str, hlc, hash_hex, quick_hex],
             )
             .map_err(Error::from)?;
             UpsertOutcome::Updated

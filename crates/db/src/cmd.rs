@@ -244,6 +244,13 @@ pub enum FileWriteCmd {
         file: HashedFile,
         /// Device that initiated the upsert.
         device: DeviceId,
+        /// Cheap BLAKE3 prefix+suffix fingerprint to store in
+        /// `files.quick_hash` on INSERT (spec §4.1.1).
+        ///
+        /// `None` for callers that don't have a `quick_hash` at hand
+        /// (e.g. watcher-triggered upserts). `Some` for scan-path
+        /// upserts where the Tier-0 cache already computed this value.
+        quick_hash: Option<BlakeHash>,
         /// Reply channel carrying `Inserted / Updated / Unchanged`.
         reply: ReplyTx<UpsertOutcome>,
     },
