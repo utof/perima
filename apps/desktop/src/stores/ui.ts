@@ -18,7 +18,7 @@
  */
 import { create, type StateCreator } from "zustand";
 import { coreErrorMessage } from "../lib/coreError";
-import type { CoreError, ScanReport } from "../bindings";
+import type { BatchId, CoreError, FullHashOutcome, ScanReport } from "../bindings";
 
 type ViewMode = "table" | "grid";
 
@@ -56,7 +56,30 @@ interface NotificationsSlice {
   dismiss: (id: string) => void;
 }
 
-export type UiStore = ViewSlice & SearchSlice & ScanSlice & NotificationsSlice;
+/**
+ * Per-batch full-hash compute progress, pushed via `AppEvent::VerifyProgress`.
+ *
+ * WHY nullable top-level: when no batch is running the field is `null` so
+ * consumers can quickly gate on "batch active" without checking inner fields.
+ * Task 13 (`/dedup` route) subscribes to this slice to drive a progress bar.
+ */
+interface VerifyBatchSlice {
+  verifyBatch: {
+    batchId: BatchId;
+    filesDone: number;
+    filesTotal: number;
+    latestOutcome: FullHashOutcome | null;
+  } | null;
+  setVerifyBatchProgress: (
+    batchId: BatchId,
+    filesDone: number,
+    filesTotal: number,
+    latestOutcome: FullHashOutcome,
+  ) => void;
+  clearVerifyBatch: () => void;
+}
+
+export type UiStore = ViewSlice & SearchSlice & ScanSlice & NotificationsSlice & VerifyBatchSlice;
 
 const createViewSlice: StateCreator<UiStore, [], [], ViewSlice> = (set) => ({
   viewMode: "table",
@@ -105,9 +128,20 @@ const createNotificationsSlice: StateCreator<UiStore, [], [], NotificationsSlice
   },
 });
 
+const createVerifyBatchSlice: StateCreator<UiStore, [], [], VerifyBatchSlice> = (set) => ({
+  verifyBatch: null,
+  setVerifyBatchProgress: (batchId, filesDone, filesTotal, latestOutcome) => {
+    set({ verifyBatch: { batchId, filesDone, filesTotal, latestOutcome } });
+  },
+  clearVerifyBatch: () => {
+    set({ verifyBatch: null });
+  },
+});
+
 export const useUiStore = create<UiStore>()((...a) => ({
   ...createViewSlice(...a),
   ...createSearchSlice(...a),
   ...createScanSlice(...a),
   ...createNotificationsSlice(...a),
+  ...createVerifyBatchSlice(...a),
 }));

@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex};
 
 use perima_core::{
     AppEvent, BatchHandle, BatchId, BlakeHash, CollisionGroup, CoreError, DeviceId, DeviceKind,
-    EventBus, FileRepository, FileUuid, FullHashUnavailableReason, HashService,
+    EventBus, FileRepository, FileUuid, FullHashOutcome, FullHashUnavailableReason, HashService,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -112,17 +112,18 @@ impl ComputeFullHashUseCase {
     /// `file_uuids`, returning a [`BatchHandle`] immediately.
     ///
     /// The batch is processed sequentially (one file at a time) to avoid
-    /// parallel disk thrash on HDDs — spec §4.5. Per-file
-    /// `AppEvent::VerifyProgress` emission is deferred to Task 10. This
-    /// implementation emits one [`AppEvent::VerifyComplete`] at the very end.
+    /// parallel disk thrash on HDDs — spec §4.5. After each file completes
+    /// (successfully or not) the worker emits [`AppEvent::VerifyProgress`]
+    /// with the per-file outcome so the frontend can drive a progress bar.
+    /// One [`AppEvent::VerifyComplete`] is emitted at the very end.
     ///
     /// # Errors
     /// Currently infallible — all per-file failures are routed through
-    /// `AppEvent::VerifyProgress` (Task 10) rather than aborting the batch.
+    /// `AppEvent::VerifyProgress` rather than aborting the batch.
     #[allow(clippy::unused_async)]
     pub async fn execute_batch(&self, file_uuids: Vec<FileUuid>) -> Result<BatchHandle, CoreError> {
         let batch_id = BatchId::new();
-        let total = u32::try_from(file_uuids.len()).unwrap_or(u32::MAX);
+        let files_total = u32::try_from(file_uuids.len()).unwrap_or(u32::MAX);
 
         let cancel = CancellationToken::new();
         // Insert into the map BEFORE spawning so a racy `cancel_batch` call
@@ -138,16 +139,47 @@ impl ComputeFullHashUseCase {
         let batches = Arc::clone(&self.batches);
 
         tokio::spawn(async move {
+            let mut files_done: u32 = 0;
+
             for uuid in file_uuids {
                 if cancel.is_cancelled() {
                     break;
                 }
-                // WHY swallow per-file errors: a per-file failure must not
-                // abort the rest of the batch. Task 10 routes the outcome
-                // through `AppEvent::VerifyProgress`; for now we log + skip.
-                if let Err(e) = compute_one(&*hasher, &*files, uuid).await {
-                    tracing::warn!(file_uuid = %uuid.0, error = %e, "batch full_hash compute failed");
-                }
+
+                let result = compute_one(&*hasher, &*files, uuid).await;
+
+                // Build the per-file outcome regardless of success/failure so
+                // the frontend can distinguish `Computed` from `Failed` and
+                // update its progress bar with the right icon per file.
+                let outcome = match result {
+                    Ok(hash) => FullHashOutcome::Computed {
+                        file_uuid: uuid,
+                        hash,
+                    },
+                    Err(ref e) => {
+                        tracing::warn!(
+                            file_uuid = %uuid.0,
+                            error = %e,
+                            "batch full_hash compute failed",
+                        );
+                        FullHashOutcome::Failed {
+                            file_uuid: uuid,
+                            error: e.clone(),
+                        }
+                    }
+                };
+
+                files_done = files_done.saturating_add(1);
+
+                // WHY best-effort emit (ignore error): a slow/overflowed bus
+                // must not abort the batch. The bus logs its own warning on
+                // capacity-full. The `let _ =` silences the `must_use` lint.
+                let _ = events.emit(&AppEvent::VerifyProgress {
+                    batch_id,
+                    files_done,
+                    files_total,
+                    latest_outcome: outcome,
+                });
             }
 
             // Final `VerifyComplete` event so the frontend knows the batch is done.
@@ -162,7 +194,10 @@ impl ComputeFullHashUseCase {
             }
         });
 
-        Ok(BatchHandle { batch_id, total })
+        Ok(BatchHandle {
+            batch_id,
+            total: files_total,
+        })
     }
 
     /// Cancel an in-flight batch by id.

@@ -18,6 +18,7 @@ import { useDomainEvents } from "../../hooks/useDomainEvents";
 import { filesKeys } from "../../queries/files";
 import { tagsKeys } from "../../queries/tags";
 import { searchKeys } from "../../queries/search";
+import { dedupKeys } from "../../queries/dedup";
 import { useUiStore } from "../../stores/ui";
 import { makeFreshQueryClient, resetUiStore } from "../test-utils";
 
@@ -233,5 +234,98 @@ describe("useDomainEvents", () => {
         /Failed to subscribe to app events.*channel closed/,
       );
     });
+  });
+
+  test("VerifyProgress updates the verifyBatch Zustand slice", async () => {
+    const sub = createSubscription();
+    const queryClient = makeFreshQueryClient();
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+
+    renderHook(() => { useDomainEvents(); }, { wrapper });
+    await act(async () => { await Promise.resolve(); });
+
+    // Initially the slice is null.
+    expect(useUiStore.getState().verifyBatch).toBeNull();
+
+    act(() => {
+      sub.fire({
+        kind: "VerifyProgress",
+        data: {
+          batch_id: "batch-001",
+          files_done: 1,
+          files_total: 3,
+          latest_outcome: {
+            outcome: "Computed",
+            data: {
+              file_uuid: "uuid-aaa",
+              hash: "a".repeat(64),
+            },
+          },
+        },
+      });
+    });
+
+    // After the event the slice must reflect the progress payload.
+    const state = useUiStore.getState().verifyBatch;
+    expect(state).not.toBeNull();
+    expect(state?.batchId).toBe("batch-001");
+    expect(state?.filesDone).toBe(1);
+    expect(state?.filesTotal).toBe(3);
+    expect(state?.latestOutcome).toMatchObject({ outcome: "Computed" });
+  });
+
+  test("VerifyComplete resets verifyBatch slice and invalidates dedup query", async () => {
+    const sub = createSubscription();
+    const queryClient = makeFreshQueryClient();
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+
+    renderHook(() => { useDomainEvents(); }, { wrapper });
+    await act(async () => { await Promise.resolve(); });
+
+    // First put something into the slice.
+    act(() => {
+      sub.fire({
+        kind: "VerifyProgress",
+        data: {
+          batch_id: "batch-002",
+          files_done: 2,
+          files_total: 2,
+          latest_outcome: {
+            outcome: "Failed",
+            data: {
+              file_uuid: "uuid-bbb",
+              error: { kind: "Internal", data: "disk read error" },
+            },
+          },
+        },
+      });
+    });
+
+    expect(useUiStore.getState().verifyBatch).not.toBeNull();
+    invalidateSpy.mockClear();
+
+    // Now fire VerifyComplete.
+    act(() => {
+      sub.fire({ kind: "VerifyComplete", data: { batch_id: "batch-002" } });
+    });
+
+    // Slice must be cleared.
+    expect(useUiStore.getState().verifyBatch).toBeNull();
+
+    // dedup keys must be invalidated.
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: dedupKeys.all });
+
+    // Files / tags / search must NOT be invalidated by VerifyComplete.
+    const calledKeys = invalidateSpy.mock.calls.map(([arg]) => arg?.queryKey);
+    expect(calledKeys).not.toContainEqual(filesKeys.all);
+    expect(calledKeys).not.toContainEqual(tagsKeys.all);
+    expect(calledKeys).not.toContainEqual(searchKeys.all);
   });
 });

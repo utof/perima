@@ -22,6 +22,7 @@ import type { UnsubscribeFn } from "../api";
 import { filesKeys } from "../queries/files";
 import { tagsKeys } from "../queries/tags";
 import { searchKeys } from "../queries/search";
+import { dedupKeys } from "../queries/dedup";
 import { useUiStore } from "../stores/ui";
 
 const FILES_DEBOUNCE_MS = 300;
@@ -29,6 +30,8 @@ const FILES_DEBOUNCE_MS = 300;
 export function useDomainEvents(): void {
   const queryClient = useQueryClient();
   const notifyError = useUiStore((s) => s.notifyError);
+  const setVerifyBatchProgress = useUiStore((s) => s.setVerifyBatchProgress);
+  const clearVerifyBatch = useUiStore((s) => s.clearVerifyBatch);
 
   useEffect(() => {
     let active = true;
@@ -85,13 +88,24 @@ export function useDomainEvents(): void {
             }
             break;
           case "VerifyProgress":
-            // WHY: VerifyProgress events are consumed by the dedup route
-            // (Task 13) and the file-detail sidebar (Task 14). No query key
-            // to invalidate here — progress is pushed via the event, not polled.
+            // WHY push into Zustand (not TanStack Query): progress is a
+            // transient push value — not server state that should be cached or
+            // refetched. Task 13 (`/dedup` route) reads the `verifyBatch` slice
+            // from the store to drive a progress bar without polling IPC.
+            setVerifyBatchProgress(
+              event.data.batch_id,
+              event.data.files_done,
+              event.data.files_total,
+              event.data.latest_outcome,
+            );
             break;
           case "VerifyComplete":
-            // WHY: VerifyComplete triggers a final collision-group refresh.
-            // No query key exists yet — placeholder until Task 13 lands.
+            // WHY two actions on complete:
+            // 1. Reset the Zustand progress slice — batch is done.
+            // 2. Invalidate the collision-group query so the dedup table
+            //    reflects the newly-computed full-hash data.
+            clearVerifyBatch();
+            void queryClient.invalidateQueries({ queryKey: dedupKeys.all });
             break;
           default: {
             const _exhaustive: never = event;
@@ -113,5 +127,5 @@ export function useDomainEvents(): void {
       if (filesDebounceTimer) clearTimeout(filesDebounceTimer);
       if (unsubscribe) unsubscribe();
     };
-  }, [queryClient, notifyError]);
+  }, [queryClient, notifyError, setVerifyBatchProgress, clearVerifyBatch]);
 }

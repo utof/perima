@@ -36,6 +36,7 @@ export const defaultUiState = {
   debouncedQuery: "",
   scan: { status: "idle" as const, lastReport: null },
   notifications: [],
+  verifyBatch: null,
 };
 
 /** Reset the UI store to {@link defaultUiState}. Call from `beforeEach`. */
