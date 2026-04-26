@@ -71,7 +71,7 @@ impl DbEventHandler {
                 );
                 Ok(())
             }
-            FileEvent::Modified { path, volume } => {
+            FileEvent::Modified { path, volume, .. } => {
                 let n = self.repo.update_location_status(
                     *volume,
                     path,
@@ -85,7 +85,7 @@ impl DbEventHandler {
                 );
                 Ok(())
             }
-            FileEvent::Deleted { path, volume } => {
+            FileEvent::Deleted { path, volume, .. } => {
                 let n = self.repo.update_location_status(
                     *volume,
                     path,
@@ -99,7 +99,9 @@ impl DbEventHandler {
                 );
                 Ok(())
             }
-            FileEvent::Renamed { from, to, volume } => {
+            FileEvent::Renamed {
+                from, to, volume, ..
+            } => {
                 let n = self
                     .repo
                     .update_location_path(*volume, from, to, self.device)?;

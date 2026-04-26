@@ -102,7 +102,16 @@ fn resolve_hash(container: &AppContainer, path: &Path) -> Result<BlakeHash, Core
         ))
     })?;
 
-    Ok(record.hash)
+    // WHY surface a typed Unsupported error: the v0.6.x CLI tag commands key on
+    // `blake3_hash`. Pending files (no full_hash yet) cannot be tagged via this
+    // path; the desktop equivalent is `attach_tag_by_uuid`. CLI users see a
+    // clear next step.
+    record.hash.ok_or_else(|| {
+        CoreError::Unsupported(format!(
+            "file has no full_hash yet: {} (run `perima verify` first)",
+            absolute.display(),
+        ))
+    })
 }
 
 /// Attach one or more tags to a file.

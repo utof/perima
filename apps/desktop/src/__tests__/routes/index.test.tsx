@@ -99,9 +99,9 @@ describe("IndexRoute composition", () => {
     // Three hits in rank order b > c > a — sortByRank inverts (most negative wins).
     mockSearch.mockReturnValue(
       okAsync<SearchHit[]>([
-        { blake3_hash: "a", volume_id: "vol", relative_path: "a.jpg", rank: -1.0 },
-        { blake3_hash: "b", volume_id: "vol", relative_path: "b.jpg", rank: -2.5 },
-        { blake3_hash: "c", volume_id: "vol", relative_path: "c.jpg", rank: -1.5 },
+        { file_uuid: "uuid-a", blake3_hash: "a", volume_id: "vol", relative_path: "a.jpg", rank: -1.0 },
+        { file_uuid: "uuid-b", blake3_hash: "b", volume_id: "vol", relative_path: "b.jpg", rank: -2.5 },
+        { file_uuid: "uuid-c", blake3_hash: "c", volume_id: "vol", relative_path: "c.jpg", rank: -1.5 },
       ]),
     );
 
@@ -119,9 +119,9 @@ describe("IndexRoute composition", () => {
   it("case 4: search + tag → INTERSECTED, mode=facets, All count = intersection size (#25 pin)", async () => {
     mockSearch.mockReturnValue(
       okAsync<SearchHit[]>([
-        { blake3_hash: "a", volume_id: "vol", relative_path: "a.jpg", rank: -1.0 },
-        { blake3_hash: "b", volume_id: "vol", relative_path: "b.jpg", rank: -2.5 },
-        { blake3_hash: "c", volume_id: "vol", relative_path: "c.jpg", rank: -1.5 },
+        { file_uuid: "uuid-a", blake3_hash: "a", volume_id: "vol", relative_path: "a.jpg", rank: -1.0 },
+        { file_uuid: "uuid-b", blake3_hash: "b", volume_id: "vol", relative_path: "b.jpg", rank: -2.5 },
+        { file_uuid: "uuid-c", blake3_hash: "c", volume_id: "vol", relative_path: "c.jpg", rank: -1.5 },
       ]),
     );
 

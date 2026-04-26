@@ -65,6 +65,14 @@ fn parse_tag_id(s: &str) -> Result<uuid::Uuid, CoreError> {
     uuid::Uuid::parse_str(s).map_err(|e| CoreError::Internal(format!("bad tag UUID: {e}")))
 }
 
+/// Parses a string into a `FileUuid`, wrapping a parse failure as
+/// `CoreError::Internal`.
+fn parse_file_uuid_str(s: &str) -> Result<FileUuid, CoreError> {
+    uuid::Uuid::parse_str(s)
+        .map(FileUuid)
+        .map_err(|e| CoreError::Internal(format!("bad file UUID: {e}")))
+}
+
 /// Maximum time `scan` waits for the metadata worker to drain after
 /// the walk loop completes.
 ///
@@ -168,7 +176,7 @@ impl DbEventHandler {
                 );
                 Ok(())
             }
-            FileEvent::Modified { path, volume } => {
+            FileEvent::Modified { path, volume, .. } => {
                 let n = self.repo.update_location_status(
                     *volume,
                     path,
@@ -178,7 +186,7 @@ impl DbEventHandler {
                 tracing::debug!(path = path.as_str(), rows_affected = n, "marked stale");
                 Ok(())
             }
-            FileEvent::Deleted { path, volume } => {
+            FileEvent::Deleted { path, volume, .. } => {
                 let n = self.repo.update_location_status(
                     *volume,
                     path,
@@ -188,7 +196,9 @@ impl DbEventHandler {
                 tracing::debug!(path = path.as_str(), rows_affected = n, "marked missing");
                 Ok(())
             }
-            FileEvent::Renamed { from, to, volume } => {
+            FileEvent::Renamed {
+                from, to, volume, ..
+            } => {
                 let n = self
                     .repo
                     .update_location_path(*volume, from, to, self.device)?;
@@ -930,6 +940,98 @@ pub fn detach_tag_inner<T: TagRepository + ?Sized>(
     Ok(())
 }
 
+/// Attach a tag to a file by `file_uuid` instead of `blake3_hash`.
+///
+/// WHY (Task 11, spec §4.8): pending files (no `full_hash` computed yet)
+/// have no `blake3_hash` to attach a tag with. `file_uuid` is the stable
+/// surrogate present on every `files` row from V011 on, so this is the
+/// uuid-keyed analogue of [`attach_tag`]. Internally resolves
+/// `file_uuid` → `blake3_hash` via [`perima_core::FileRepository::lookup_by_file_uuid`]
+/// and reuses the existing tag-attach SQL path. Falls back to
+/// `CoreError::FullHashUnavailable` if the row exists but has no full hash
+/// yet — clients should compute the full hash first or accept that the
+/// tag attach is impossible until v0.7+'s `file_tags.file_uuid` PK pivot.
+///
+/// # Errors
+/// - [`CoreError::Internal`] if `file_uuid` cannot be parsed.
+/// - [`CoreError::NotFound`] if no `files` row exists for `file_uuid`.
+/// - [`CoreError::FullHashUnavailable`] if the row exists but has no
+///   `full_hash` yet (tag attach by content hash is not yet possible).
+/// - Other variants from the underlying [`TagCommand::Attach`] path.
+// WHY allow: Tauri owns the `State`, `String` params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn attach_tag_by_uuid(
+    file_uuid: String,
+    tag_name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Tag, CoreError> {
+    let parsed_uuid = parse_file_uuid_str(&file_uuid)?;
+    let (hash, _path, _size) = state
+        .container
+        .files_repo
+        .lookup_by_file_uuid(parsed_uuid)?
+        .ok_or_else(|| {
+            CoreError::NotFound(format!("no files row for file_uuid={}", parsed_uuid.0))
+        })?;
+    state
+        .container
+        .tag
+        .execute(TagCommand::Attach {
+            hash,
+            name: tag_name.clone(),
+            device: state.device_id,
+        })
+        .await?;
+    let tag = state.tag_repo.upsert_tag(&tag_name, state.device_id)?;
+    Ok(tag)
+}
+
+/// Detach a tag from a file by `file_uuid` instead of `blake3_hash`.
+///
+/// Symmetric to [`attach_tag_by_uuid`] (Task 11, spec §4.8).
+///
+/// # Errors
+/// Same shape as [`attach_tag_by_uuid`].
+// WHY allow: Tauri owns the `State`, `String` params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn detach_tag_by_uuid(
+    file_uuid: String,
+    tag_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CoreError> {
+    let parsed_uuid = parse_file_uuid_str(&file_uuid)?;
+    let parsed_id = parse_tag_id(&tag_id)?;
+    let (hash, _path, _size) = state
+        .container
+        .files_repo
+        .lookup_by_file_uuid(parsed_uuid)?
+        .ok_or_else(|| {
+            CoreError::NotFound(format!("no files row for file_uuid={}", parsed_uuid.0))
+        })?;
+
+    let tags = state.tag_repo.list_tags()?;
+    let tag_name = tags
+        .into_iter()
+        .find(|t| t.id == parsed_id)
+        .map(|t| t.name)
+        .ok_or_else(|| CoreError::Internal(format!("tag not found: {parsed_id}")))?;
+
+    state
+        .container
+        .tag
+        .execute(TagCommand::Detach {
+            hash,
+            name: tag_name,
+            device: state.device_id,
+        })
+        .await?;
+    Ok(())
+}
+
 /// List files with their metadata and any attached tags.
 ///
 /// Returns up to `limit` [`FileWithTagsPayload`] rows. Tags are fetched
@@ -996,14 +1098,19 @@ where
     T: TagRepository + ?Sized,
 {
     let rows = metadata_repo.list_with_metadata(limit as usize, volume)?;
-    let hashes: Vec<perima_core::BlakeHash> = rows.iter().map(|(loc, _)| loc.hash).collect();
+    // WHY filter_map: post-Task-11 `loc.hash` is `Option<BlakeHash>`. Pending
+    // files (no full_hash yet) cannot match the tag-by-hash lookup; their tags
+    // surface as the empty Vec below. To attach tags to pending files use the
+    // `attach_tag_by_uuid` IPC command.
+    let hashes: Vec<perima_core::BlakeHash> = rows.iter().filter_map(|(loc, _)| loc.hash).collect();
     let tag_map = tag_repo.tags_for_hashes(&hashes)?;
     Ok(rows
         .into_iter()
         .map(|(loc, meta)| {
-            let hash = loc.hash;
+            let tags = loc
+                .hash
+                .map_or_else(Vec::new, |h| tag_map.get(&h).cloned().unwrap_or_default());
             let file = FileWithMetadataPayload::from((loc, meta));
-            let tags = tag_map.get(&hash).cloned().unwrap_or_default();
             FileWithTagsPayload { file, tags }
         })
         .collect())

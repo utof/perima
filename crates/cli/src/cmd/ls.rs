@@ -155,9 +155,12 @@ fn apply_tag_filter(
 ) -> Vec<FileLocationRecord> {
     match filter {
         None => records,
+        // WHY `r.hash.is_some_and(...)`: post-Task-11 `FileLocationRecord.hash`
+        // is `Option<BlakeHash>`. Pending files (no full_hash) cannot match a
+        // tag filter keyed on content hash; they're silently excluded.
         Some(set) => records
             .into_iter()
-            .filter(|r| set.contains(&r.hash))
+            .filter(|r| r.hash.is_some_and(|h| set.contains(&h)))
             .collect(),
     }
 }
@@ -170,7 +173,7 @@ fn apply_metadata_tag_filter(
         None => rows,
         Some(set) => rows
             .into_iter()
-            .filter(|(r, _)| set.contains(&r.hash))
+            .filter(|(r, _)| r.hash.is_some_and(|h| set.contains(&h)))
             .collect(),
     }
 }
@@ -185,8 +188,11 @@ fn print_table(records: &[FileLocationRecord]) -> Result<(), CoreError> {
     )
     .map_err(CoreError::from)?;
     for r in records {
-        let hash_hex = r.hash.to_hex();
-        let hash_short = &hash_hex[..8];
+        // WHY `pending` placeholder when hash is None: post-Task-11 a row may
+        // have no `full_hash` yet (pending dedup). Render an 8-char "pending"
+        // sigil so columns align without forcing the operator to scroll.
+        let hash_hex = r.hash.map(|h| h.to_hex());
+        let hash_short = hash_hex.as_deref().map_or("pending ", |h| &h[..8]);
         let vol_str = r.volume_id.0.to_string();
         let vol_short = &vol_str[..8];
         let size = super::format::format_size(r.size.0);
@@ -213,8 +219,8 @@ fn print_table_with_metadata(
     )
     .map_err(CoreError::from)?;
     for (r, meta) in rows {
-        let hash_hex = r.hash.to_hex();
-        let hash_short = &hash_hex[..8];
+        let hash_hex = r.hash.map(|h| h.to_hex());
+        let hash_short = hash_hex.as_deref().map_or("pending ", |h| &h[..8]);
         let vol_str = r.volume_id.0.to_string();
         let vol_short = &vol_str[..8];
         let size = super::format::format_size(r.size.0);

@@ -16,6 +16,7 @@ fn file_event(name: &str) -> AppEvent {
     AppEvent::File(FileEvent::Created {
         path: MediaPath::new(name),
         volume: nil_volume(),
+        file_uuid: None,
     })
 }
 

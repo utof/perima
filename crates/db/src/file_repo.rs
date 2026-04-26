@@ -17,6 +17,7 @@ use perima_core::{
     VerifiedState, VolumeId,
 };
 use rusqlite::{Connection, OptionalExtension};
+use uuid::Uuid;
 
 use crate::cmd::{FileWriteCmd, WriteCmd};
 use crate::errors::Error;
@@ -73,6 +74,24 @@ fn i64_to_size(v: i64) -> Result<FileSize, CoreError> {
 /// the safest behaviour for a limit argument.
 fn limit_to_i64(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
+}
+
+/// Parse the `files.file_uuid` text column into a [`FileUuid`].
+pub(crate) fn parse_file_uuid(s: &str) -> Result<FileUuid, CoreError> {
+    Uuid::parse_str(s)
+        .map(FileUuid)
+        .map_err(|e| CoreError::Internal(format!("bad file_uuid: {e}")))
+}
+
+/// Parse the optional `files.blake3_hash` text column.
+///
+/// WHY optional: post-Task-11 the schema permits a `NULL` `blake3_hash` for
+/// rows whose `full_hash` has not yet been computed (pending dedup).
+pub(crate) fn parse_optional_hash(s: Option<&str>) -> Result<Option<BlakeHash>, CoreError> {
+    match s {
+        Some(hex) => Ok(Some(BlakeHash::parse_hex(hex)?)),
+        None => Ok(None),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -538,7 +557,7 @@ fn list_quick_hash_collisions_sql(conn: &Connection) -> Result<Vec<CollisionGrou
     // groups are sparse in real-world libraries), avoids a complex multi-key
     // JOIN.
     let loc_sql = "
-        SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
+        SELECT f.file_uuid, f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
                fl.status, fl.first_seen
         FROM file_locations fl
         JOIN files f ON f.blake3_hash = fl.blake3_hash
@@ -556,20 +575,22 @@ fn list_quick_hash_collisions_sql(conn: &Connection) -> Result<Vec<CollisionGrou
             .query_map(rusqlite::params![qh_hex], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
             })
             .map_err(Error::from)?;
 
         let mut files: Vec<FileLocationRecord> = Vec::new();
         for r in rows {
-            let (hash_hex, size, vol_str, rel_path, status_str, first_seen) =
+            let (file_uuid_str, hash_hex_opt, size, vol_str, rel_path, status_str, first_seen) =
                 r.map_err(Error::from)?;
-            let hash = BlakeHash::parse_hex(&hash_hex)?;
+            let file_uuid = parse_file_uuid(&file_uuid_str)?;
+            let hash = parse_optional_hash(hash_hex_opt.as_deref())?;
             let volume_id = VolumeId(
                 uuid::Uuid::parse_str(&vol_str)
                     .map_err(|e| CoreError::Internal(format!("bad volume uuid: {e}")))?,
@@ -586,6 +607,7 @@ fn list_quick_hash_collisions_sql(conn: &Connection) -> Result<Vec<CollisionGrou
                 }
             };
             files.push(FileLocationRecord {
+                file_uuid,
                 hash,
                 size: i64_to_size(size)?,
                 volume_id,
@@ -628,8 +650,12 @@ fn list_file_locations_sql(
     // EXPLAIN QUERY PLAN reports SCAN + TEMP B-TREE sort even when a concrete
     // volume_id is supplied. Branching here keeps both shapes index-eligible.
     let vol_filter = volume.map(|v| v.0.to_string());
+    // WHY `f.file_uuid` first column + `f.blake3_hash` typed as `Option<String>`:
+    // Task 11 surfaces `file_uuid` as the stable surrogate key on the IPC
+    // boundary; `blake3_hash` becomes nullable for rows whose `full_hash`
+    // has not yet been computed (spec §4.8).
     let sql: &str = if vol_filter.is_some() {
-        "SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
+        "SELECT f.file_uuid, f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
                 fl.status, fl.first_seen
          FROM file_locations fl
          JOIN files f ON f.blake3_hash = fl.blake3_hash
@@ -637,7 +663,7 @@ fn list_file_locations_sql(
          ORDER BY fl.relative_path
          LIMIT ?2"
     } else {
-        "SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
+        "SELECT f.file_uuid, f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
                 fl.status, fl.first_seen
          FROM file_locations fl
          JOIN files f ON f.blake3_hash = fl.blake3_hash
@@ -656,21 +682,31 @@ fn list_file_locations_sql(
 
     let rows = stmt
         .query_map(rusqlite::params_from_iter(params.iter()), |row| {
-            let hash_hex: String = row.get(0)?;
-            let size: i64 = row.get(1)?;
-            let vol_str: String = row.get(2)?;
-            let rel_path: String = row.get(3)?;
-            let status_str: String = row.get(4)?;
-            let first_seen: String = row.get(5)?;
-            Ok((hash_hex, size, vol_str, rel_path, status_str, first_seen))
+            let file_uuid_str: String = row.get(0)?;
+            let hash_hex: Option<String> = row.get(1)?;
+            let size: i64 = row.get(2)?;
+            let vol_str: String = row.get(3)?;
+            let rel_path: String = row.get(4)?;
+            let status_str: String = row.get(5)?;
+            let first_seen: String = row.get(6)?;
+            Ok((
+                file_uuid_str,
+                hash_hex,
+                size,
+                vol_str,
+                rel_path,
+                status_str,
+                first_seen,
+            ))
         })
         .map_err(Error::from)?;
 
     let mut out = Vec::new();
     for row in rows {
-        let (hash_hex, size, vol_str, rel_path, status_str, first_seen) =
+        let (file_uuid_str, hash_hex_opt, size, vol_str, rel_path, status_str, first_seen) =
             row.map_err(Error::from)?;
-        let hash = BlakeHash::parse_hex(&hash_hex)?;
+        let file_uuid = parse_file_uuid(&file_uuid_str)?;
+        let hash = parse_optional_hash(hash_hex_opt.as_deref())?;
         let volume_id = VolumeId(
             uuid::Uuid::parse_str(&vol_str)
                 .map_err(|e| CoreError::Internal(format!("bad volume uuid: {e}")))?,
@@ -687,6 +723,7 @@ fn list_file_locations_sql(
             }
         };
         out.push(FileLocationRecord {
+            file_uuid,
             hash,
             size: i64_to_size(size)?,
             volume_id,
@@ -1060,8 +1097,8 @@ mod tests {
         assert_eq!(rows.len(), 1, "exactly one active row after collision");
         assert_eq!(rows[0].relative_path.as_str(), "dest.jpg");
         assert_eq!(
-            rows[0].hash.to_hex(),
-            f_dest.hash.to_hex(),
+            rows[0].hash.map(|h| h.to_hex()),
+            Some(f_dest.hash.to_hex()),
             "destination hash must be preserved",
         );
     }

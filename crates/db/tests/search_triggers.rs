@@ -682,7 +682,7 @@ fn test_representative_location_soft_delete_repoints() {
         1,
         "C1: sibling location must be discoverable after representative soft-delete"
     );
-    assert_eq!(vol2_hits[0].blake3_hash, hash);
+    assert_eq!(vol2_hits[0].blake3_hash.as_deref(), Some(hash.as_str()));
 }
 
 /// Trigger 5: renaming a tag must update every `search_content` row that

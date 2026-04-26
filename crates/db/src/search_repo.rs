@@ -11,8 +11,9 @@
 //! `(writer_sender, read_pool)` via `SqliteSearchRepository::new`.
 
 use flume::Sender;
-use perima_core::{CoreError, SearchHit, SearchRepository};
+use perima_core::{CoreError, FileUuid, SearchHit, SearchRepository};
 use rusqlite::Connection;
+use uuid::Uuid;
 
 use crate::cmd::{SearchWriteCmd, WriteCmd};
 use crate::errors::Error;
@@ -80,9 +81,15 @@ impl SearchRepository for SqliteSearchRepository {
 /// mirrors the trigger representative-selection rule, so the `volume_id`
 /// returned here agrees with the path indexed in `search_content`.
 fn search_impl(conn: &Connection, query: &str, limit: u32) -> Result<Vec<SearchHit>, CoreError> {
+    // WHY `sc.file_uuid` first column + `sc.blake3_hash` typed as
+    // `Option<String>`: Task 11 makes `file_uuid` the stable surrogate on the
+    // IPC boundary; `blake3_hash` becomes nullable for rows whose `full_hash`
+    // has not yet been computed (spec §4.8). `search_content.file_uuid` was
+    // populated in V011 + has UNIQUE-NOT-NULL semantics post-Task-3.
     let mut stmt = conn
         .prepare(
-            "SELECT sc.blake3_hash,
+            "SELECT sc.file_uuid,
+                    sc.blake3_hash,
                     COALESCE((
                         SELECT fl.volume_id FROM file_locations fl
                         WHERE fl.blake3_hash = sc.blake3_hash
@@ -100,18 +107,32 @@ fn search_impl(conn: &Connection, query: &str, limit: u32) -> Result<Vec<SearchH
         )
         .map_err(Error::from)?;
 
-    let hits = stmt
+    let rows = stmt
         .query_map(rusqlite::params![query, limit], |row| {
-            Ok(SearchHit {
-                blake3_hash: row.get(0)?,
-                volume_id: row.get(1)?,
-                relative_path: row.get(2)?,
-                rank: row.get(3)?,
-            })
+            let file_uuid_str: String = row.get(0)?;
+            let blake3_hash: Option<String> = row.get(1)?;
+            let volume_id: String = row.get(2)?;
+            let relative_path: String = row.get(3)?;
+            let rank: f64 = row.get(4)?;
+            Ok((file_uuid_str, blake3_hash, volume_id, relative_path, rank))
         })
-        .map_err(Error::from)?
-        .collect::<Result<Vec<_>, _>>()
         .map_err(Error::from)?;
 
+    let mut hits = Vec::new();
+    for r in rows {
+        let (file_uuid_str, blake3_hash, volume_id, relative_path, rank) =
+            r.map_err(Error::from)?;
+        let file_uuid = FileUuid(
+            Uuid::parse_str(&file_uuid_str)
+                .map_err(|e| CoreError::Internal(format!("bad file_uuid: {e}")))?,
+        );
+        hits.push(SearchHit {
+            file_uuid,
+            blake3_hash,
+            volume_id,
+            relative_path,
+            rank,
+        });
+    }
     Ok(hits)
 }

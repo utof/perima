@@ -118,12 +118,22 @@ export type LocationStatus = "Active" | "Missing" | "Moved" | "Stale";
 /**
  * Filesystem event emitted by the backend watcher.
  * Rust: `#[serde(tag = "type")]` inline-tagged enum.
+ *
+ * Task 11 (spec §4.8): every variant carries `file_uuid: FileUuid | null`.
+ * The watcher emits `null` (no DB lookup at emission time); consumers do
+ * their own `(volume, path)` lookup as needed.
  */
 export type FileEvent =
-  | { type: "Created"; path: MediaPath; volume: VolumeId }
-  | { type: "Modified"; path: MediaPath; volume: VolumeId }
-  | { type: "Deleted"; path: MediaPath; volume: VolumeId }
-  | { type: "Renamed"; from: MediaPath; to: MediaPath; volume: VolumeId };
+  | { type: "Created"; path: MediaPath; volume: VolumeId; file_uuid: FileUuid | null }
+  | { type: "Modified"; path: MediaPath; volume: VolumeId; file_uuid: FileUuid | null }
+  | { type: "Deleted"; path: MediaPath; volume: VolumeId; file_uuid: FileUuid | null }
+  | {
+      type: "Renamed";
+      from: MediaPath;
+      to: MediaPath;
+      volume: VolumeId;
+      file_uuid: FileUuid | null;
+    };
 
 /**
  * Typed error returned by all Tauri command handlers.
@@ -145,9 +155,14 @@ export type CoreError =
 /**
  * A file location row — joined view of `files` + `file_locations`.
  * Rust: `crates/core/src/types.rs::FileLocationRecord`.
+ *
+ * Task 11 (spec §4.8): `file_uuid` is the stable surrogate for every row;
+ * `hash` becomes nullable for files whose `full_hash` has not yet been
+ * computed (pending dedup verification).
  */
 export type FileLocationRecord = {
-  hash: BlakeHash;
+  file_uuid: FileUuid;
+  hash: BlakeHash | null;
   size: FileSize;
   volume_id: VolumeId;
   relative_path: MediaPath;
@@ -201,9 +216,13 @@ export type Tag = {
 /**
  * A ranked result from the FTS5 full-text search index.
  * Rust: `crates/core/src/search.rs::SearchHit`.
+ *
+ * Task 11 (spec §4.8): `file_uuid` is the stable surrogate; `blake3_hash`
+ * becomes nullable for pending files (no `full_hash` yet).
  */
 export type SearchHit = {
-  blake3_hash: string;
+  file_uuid: FileUuid;
+  blake3_hash: string | null;
   volume_id: string;
   relative_path: string;
   rank: number;
@@ -231,9 +250,13 @@ export type ScanReport = {
  * Rust: `crates/desktop/src/payloads.rs::FileWithMetadataPayload`.
  * Shell-side flat composite — all fields present, metadata fields
  * nullable when no `file_metadata` row exists.
+ *
+ * Task 11 (spec §4.8): `file_uuid` is the stable surrogate (always
+ * present from V011 on); `hash` is nullable for pending files.
  */
 export type FileWithMetadataPayload = {
-  hash: string;
+  file_uuid: FileUuid;
+  hash: string | null;
   size: number;
   volume_id: string;
   relative_path: string;

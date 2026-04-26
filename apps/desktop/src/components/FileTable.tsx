@@ -1,7 +1,12 @@
 import { useState } from "react";
 import type { FileWithTagsPayload, Tag } from "../bindings";
 import TagChip from "./TagChip";
-import { useAttachTag, useDetachTag } from "../queries/tags";
+import {
+  useAttachTag,
+  useAttachTagByUuid,
+  useDetachTag,
+  useDetachTagByUuid,
+} from "../queries/tags";
 
 /**
  * Per-row tag input + chip strip with detach buttons.
@@ -10,18 +15,48 @@ import { useAttachTag, useDetachTag } from "../queries/tags";
  * its own draft text state. Hoisting it into FileTable's render would
  * collapse all rows into one shared input — every keystroke would re-render
  * every row. A small per-row component keeps state local.
+ *
+ * WHY (Task 11): `hash` may be `null` for pending files (no `full_hash`
+ * computed yet). Pending files use `file_uuid` to attach/detach via the
+ * `*_by_uuid` IPC endpoints. The aria-label falls back to `file_uuid` when
+ * `hash` is null so screen readers still get a stable identifier.
  */
-function RowTagsCell({ hash, tags }: { hash: string; tags: Tag[] }) {
+function RowTagsCell({
+  fileUuid,
+  hash,
+  tags,
+}: {
+  fileUuid: string;
+  hash: string | null;
+  tags: Tag[];
+}) {
   const [draft, setDraft] = useState("");
   const attach = useAttachTag();
   const detach = useDetachTag();
+  const attachByUuid = useAttachTagByUuid();
+  const detachByUuid = useDetachTagByUuid();
 
   function submit() {
     const name = draft.trim();
     if (name === "") return;
-    attach.mutate({ hash, tagName: name });
+    if (hash !== null) {
+      attach.mutate({ hash, tagName: name });
+    } else {
+      attachByUuid.mutate({ fileUuid, tagName: name });
+    }
     setDraft("");
   }
+
+  function onRemove(tagId: string) {
+    if (hash !== null) {
+      detach.mutate({ hash, tagId });
+    } else {
+      detachByUuid.mutate({ fileUuid, tagId });
+    }
+  }
+
+  const labelKey = hash ?? fileUuid;
+  const isPending = attach.isPending || attachByUuid.isPending;
 
   return (
     <div className="flex flex-wrap items-center gap-1">
@@ -29,7 +64,7 @@ function RowTagsCell({ hash, tags }: { hash: string; tags: Tag[] }) {
         <TagChip
           key={t.id}
           tag={t}
-          onRemove={() => { detach.mutate({ hash, tagId: t.id }); }}
+          onRemove={() => { onRemove(t.id); }}
         />
       ))}
       <input
@@ -43,8 +78,8 @@ function RowTagsCell({ hash, tags }: { hash: string; tags: Tag[] }) {
           }
         }}
         placeholder="+ tag"
-        aria-label={`Add tag to file ${hash.slice(0, 8)}`}
-        disabled={attach.isPending}
+        aria-label={`Add tag to file ${labelKey.slice(0, 8)}`}
+        disabled={isPending}
         className="w-20 bg-gray-700 text-white text-xs rounded px-1.5 py-0.5 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
       />
     </div>
@@ -91,10 +126,16 @@ export default function FileTable({ files, loading }: FileTableProps) {
     }
   }
 
+  // WHY (Task 11): `hash` is `string | null` post-spec-§4.8 sweep. Sorting on
+  // hash uses an empty string for null so pending rows cluster predictably
+  // (alphabetic-ascending puts them first, matching their "not-yet-computed"
+  // status semantically). Other string columns are unchanged.
   const sorted = [...files].sort((a, b) => {
     let cmp = 0;
     if (sortBy === "size") {
       cmp = a.size - b.size;
+    } else if (sortBy === "hash") {
+      cmp = (a.hash ?? "").localeCompare(b.hash ?? "");
     } else {
       cmp = a[sortBy].localeCompare(b[sortBy]);
     }
@@ -147,12 +188,17 @@ export default function FileTable({ files, loading }: FileTableProps) {
             </tr>
           ) : (
             sorted.map((f) => (
+              // WHY key={f.file_uuid} (Task 11, spec §4.8): `file_uuid` is the
+              // stable surrogate present on every row from V011 on. `hash` is
+              // nullable for pending files, so a `f.hash`-derived key would
+              // collide across pending rows and force React to re-mount when
+              // `full_hash` materialises later.
               <tr
-                key={`${f.hash}-${f.volume_id}-${f.relative_path}`}
+                key={f.file_uuid}
                 className="border-t border-gray-700 odd:bg-gray-900 even:bg-gray-800 hover:bg-gray-700"
               >
                 <td className="px-3 py-2 font-mono text-xs">
-                  {f.hash.slice(0, 8)}
+                  {f.hash ? f.hash.slice(0, 8) : "pending"}
                 </td>
                 <td className="px-3 py-2">{humanSize(f.size)}</td>
                 <td className="px-3 py-2 font-mono text-xs">
@@ -163,7 +209,11 @@ export default function FileTable({ files, loading }: FileTableProps) {
                 </td>
                 <td className="px-3 py-2">{f.status}</td>
                 <td className="px-3 py-2">
-                  <RowTagsCell hash={f.hash} tags={f.tags} />
+                  <RowTagsCell
+                    fileUuid={f.file_uuid}
+                    hash={f.hash}
+                    tags={f.tags}
+                  />
                 </td>
               </tr>
             ))

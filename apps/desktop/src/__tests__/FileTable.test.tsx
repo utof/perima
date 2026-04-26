@@ -5,6 +5,9 @@ import type { FileWithTagsPayload } from "../bindings";
 import { renderWithProviders } from "./test-utils";
 
 const makeEntry = (n: number): FileWithTagsPayload => ({
+  // WHY (Task 11): `file_uuid` is the React key + stable surrogate. Distinct
+  // per-fixture so the table doesn't collapse rows on a duplicate key.
+  file_uuid: `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`,
   hash: "a".repeat(62) + String(n).padStart(2, "0"),
   size: 1024 * n,
   volume_id: "00000000-0000-0000-0000-00000000000" + n,

@@ -29,7 +29,7 @@ fn search_finds_by_filename() {
     repo.rebuild().expect("rebuild");
     let hits = repo.search("sunset", 50).expect("search");
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].blake3_hash, HASH_A);
+    assert_eq!(hits[0].blake3_hash.as_deref(), Some(HASH_A));
 }
 
 #[test]
@@ -75,7 +75,7 @@ fn search_finds_by_tag() {
     repo.rebuild().expect("rebuild");
     let hits = repo.search("beachlife", 50).expect("search");
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].blake3_hash, HASH_A);
+    assert_eq!(hits[0].blake3_hash.as_deref(), Some(HASH_A));
 }
 
 #[test]
@@ -138,8 +138,8 @@ fn search_rank_orders_better_match_first() {
     let hits = repo.search("vacation", 50).expect("search");
     assert_eq!(hits.len(), 2, "both files should hit on 'vacation'");
     assert_eq!(
-        hits[0].blake3_hash,
-        HASH_A,
+        hits[0].blake3_hash.as_deref(),
+        Some(HASH_A),
         "tagged file must rank above filename-only file (got order: {:?})",
         hits.iter().map(|h| &h.blake3_hash).collect::<Vec<_>>()
     );

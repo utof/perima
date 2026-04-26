@@ -140,7 +140,7 @@ proptest::proptest! {
                         .expect("proptest search");
                     let found = hits
                         .iter()
-                        .any(|h| h.blake3_hash == file_hash);
+                        .any(|h| h.blake3_hash.as_deref() == Some(file_hash));
                     proptest::prop_assert_eq!(
                         found,
                         is_attached,

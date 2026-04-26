@@ -3,7 +3,7 @@
 use serde::Serialize;
 
 use crate::{
-    CoreError, MediaPath, VolumeId,
+    CoreError, FileUuid, MediaPath, VolumeId,
     dedup::{BatchId, FullHashOutcome},
 };
 
@@ -14,6 +14,13 @@ use crate::{
 /// frontend's `'file-event'` channel listener byte-compatible. `CoreError` uses
 /// `tag = "kind", content = "data"` — a different shape intentionally, because
 /// `CoreError` is a Result error type while `FileEvent` is a v1-frozen channel payload.
+///
+/// WHY `file_uuid: Option<FileUuid>` (Task 11, spec §4.8): the watcher emits
+/// `Created` events BEFORE the file enters the DB (no `file_uuid` exists yet),
+/// so the field is optional. `Modified` / `Deleted` / `Renamed` events also
+/// pass `None` from the current emitter — consumers do their own `(volume,
+/// path)` lookup to find the row. A future enhancement may populate the field
+/// from a DB lookup at emission time. Consumers migrate at their own pace.
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(tag = "type")]
@@ -24,6 +31,8 @@ pub enum FileEvent {
         path: MediaPath,
         /// Volume the file lives on.
         volume: VolumeId,
+        /// Stable file id, when known. `None` for newly-discovered files.
+        file_uuid: Option<FileUuid>,
     },
     /// An existing file's content was modified.
     Modified {
@@ -31,6 +40,8 @@ pub enum FileEvent {
         path: MediaPath,
         /// Volume the file lives on.
         volume: VolumeId,
+        /// Stable file id, when known.
+        file_uuid: Option<FileUuid>,
     },
     /// A file was deleted from this path.
     Deleted {
@@ -38,6 +49,8 @@ pub enum FileEvent {
         path: MediaPath,
         /// Volume the file lives on.
         volume: VolumeId,
+        /// Stable file id, when known.
+        file_uuid: Option<FileUuid>,
     },
     /// A file was renamed/moved within the same volume.
     Renamed {
@@ -47,6 +60,8 @@ pub enum FileEvent {
         to: MediaPath,
         /// Volume the file lives on.
         volume: VolumeId,
+        /// Stable file id, when known.
+        file_uuid: Option<FileUuid>,
     },
 }
 

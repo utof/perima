@@ -101,10 +101,17 @@ fn rebuild_impl(conn: &mut Connection) -> Result<(), CoreError> {
     // WHY filename = relative_path: SQLite has no built-in REVERSE() for
     // basename extraction; the unicode61 tokenizer splits on '/' and '.'
     // so basenames are discoverable via token match on relative_path.
+    //
+    // WHY include `file_uuid` (Task 11, spec §4.8): `search_content.file_uuid`
+    // is `NOT NULL UNIQUE` post-V011; the surrogate is sourced from the
+    // representative `file_locations` row alongside `blake3_hash`. A rebuild
+    // path that omits `file_uuid` violates the schema constraint and produces
+    // NULL values that the search SELECT cannot deserialise.
     tx.execute_batch(
         "INSERT INTO search_content
-             (blake3_hash, filename, relative_path, mime_type, camera_model, captured_at, tags)
-         SELECT fl.blake3_hash,
+             (file_uuid, blake3_hash, filename, relative_path, mime_type, camera_model, captured_at, tags)
+         SELECT fl.file_uuid,
+                fl.blake3_hash,
                 fl.relative_path,
                 fl.relative_path,
                 COALESCE(m.mime_type, ''),

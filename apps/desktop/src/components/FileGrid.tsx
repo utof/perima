@@ -40,10 +40,9 @@ export default function FileGrid({ files, loading = false }: FileGridProps) {
       role="list"
     >
       {files.map((f) => (
-        <FileGridTile
-          key={`${f.hash}-${f.volume_id}-${f.relative_path}`}
-          file={f}
-        />
+        // WHY key={f.file_uuid} (Task 11): stable across the
+        // pending → full-hash transition; matches FileTable.tsx's choice.
+        <FileGridTile key={f.file_uuid} file={f} />
       ))}
     </div>
   );

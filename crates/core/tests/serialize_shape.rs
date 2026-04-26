@@ -114,7 +114,8 @@ fn volume_id_serializes_as_uuid_string() {
 #[test]
 fn file_location_record_serializes_with_string_typed_fields() {
     let record = FileLocationRecord {
-        hash: BlakeHash::from_bytes([0xabu8; 32]),
+        file_uuid: FileUuid(uuid::Uuid::nil()),
+        hash: Some(BlakeHash::from_bytes([0xabu8; 32])),
         size: FileSize(1024),
         volume_id: VolumeId(uuid::Uuid::nil()),
         relative_path: MediaPath::new("docs/spec.md"),
@@ -123,7 +124,15 @@ fn file_location_record_serializes_with_string_typed_fields() {
     };
     let v = serde_json::to_value(&record).expect("serialize FileLocationRecord");
     // Verify object shape: all expected keys present and typed correctly.
-    assert!(v["hash"].is_string(), "hash must serialize as string");
+    assert!(v["file_uuid"].is_string(), "file_uuid must be string");
+    assert_eq!(
+        v["file_uuid"],
+        serde_json::json!(uuid::Uuid::nil().to_string())
+    );
+    assert!(
+        v["hash"].is_string(),
+        "hash (Some) must serialize as string"
+    );
     assert_eq!(v["hash"].as_str().expect("hash is string").len(), 64);
     assert!(v["size"].is_number(), "size must serialize as number");
     assert_eq!(v["size"], serde_json::json!(1024));
@@ -220,13 +229,18 @@ fn tag_serializes_with_id_name_first_seen() {
 #[test]
 fn search_hit_serializes_with_blake3_hash_and_rank() {
     let hit = SearchHit {
-        blake3_hash: "abc123".to_owned(),
+        file_uuid: FileUuid(uuid::Uuid::nil()),
+        blake3_hash: Some("abc123".to_owned()),
         volume_id: "00000000-0000-0000-0000-000000000000".to_owned(),
         relative_path: "photos/img.jpg".to_owned(),
         rank: -1.5_f64,
     };
     let v = serde_json::to_value(&hit).expect("serialize SearchHit");
     assert!(v.is_object(), "SearchHit JSON must be an object");
+    assert_eq!(
+        v["file_uuid"].as_str().expect("file_uuid is string"),
+        uuid::Uuid::nil().to_string()
+    );
     assert_eq!(v["blake3_hash"], serde_json::json!("abc123"));
     assert_eq!(
         v["volume_id"],
@@ -244,6 +258,7 @@ fn file_event_created_serializes_with_kind_and_data() {
     let event = FileEvent::Created {
         path: MediaPath::new("photos/img.jpg"),
         volume: VolumeId(uuid::Uuid::nil()),
+        file_uuid: None,
     };
     let v = serde_json::to_value(&event).expect("serialize FileEvent::Created");
     assert!(v.is_object(), "FileEvent JSON must be an object");
@@ -279,6 +294,7 @@ fn app_event_file_wraps_file_event_with_kind_data() {
     let event = AppEvent::File(FileEvent::Created {
         path: MediaPath::new("photos/img.jpg"),
         volume: VolumeId(uuid::Uuid::nil()),
+        file_uuid: None,
     });
     let v: serde_json::Value = serde_json::to_value(&event).expect("serialize");
     assert_eq!(v["kind"], "File");

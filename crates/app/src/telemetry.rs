@@ -85,6 +85,7 @@ mod tests {
         let event = AppEvent::File(FileEvent::Created {
             path: MediaPath::new("foo.txt"),
             volume: VolumeId(Uuid::nil()),
+            file_uuid: None,
         });
         // `handle` returns (); success = no panic.
         handler.handle(event).await;
@@ -101,6 +102,7 @@ mod tests {
             from: MediaPath::new("a.txt"),
             to: MediaPath::new("b.txt"),
             volume: VolumeId(Uuid::nil()),
+            file_uuid: None,
         });
         handler.handle(event).await;
     }

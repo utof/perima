@@ -167,9 +167,14 @@ fn map_event(event: &notify::Event, volume_root: &Path, volume_id: VolumeId) -> 
     match &event.kind {
         EventKind::Create(_) => {
             let path = relativize(event.paths.first()?, volume_root).ok()?;
+            // WHY file_uuid: None — the file just appeared on disk and has not
+            // yet been ingested by the writer; no row exists in `files` to
+            // resolve a `file_uuid` from. Spec §4.8: consumers do their own
+            // (volume, path) → file_uuid lookup as needed.
             Some(FileEvent::Created {
                 path,
                 volume: volume_id,
+                file_uuid: None,
             })
         }
         EventKind::Modify(ModifyKind::Data(_)) => {
@@ -177,6 +182,7 @@ fn map_event(event: &notify::Event, volume_root: &Path, volume_id: VolumeId) -> 
             Some(FileEvent::Modified {
                 path,
                 volume: volume_id,
+                file_uuid: None,
             })
         }
         EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
@@ -188,6 +194,7 @@ fn map_event(event: &notify::Event, volume_root: &Path, volume_id: VolumeId) -> 
                 from,
                 to,
                 volume: volume_id,
+                file_uuid: None,
             })
         }
         EventKind::Remove(_) => {
@@ -195,6 +202,7 @@ fn map_event(event: &notify::Event, volume_root: &Path, volume_id: VolumeId) -> 
             Some(FileEvent::Deleted {
                 path,
                 volume: volume_id,
+                file_uuid: None,
             })
         }
         // All other event kinds (Access, Modify::Metadata, etc.) are ignored.

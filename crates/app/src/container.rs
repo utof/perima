@@ -348,6 +348,7 @@ mod tests {
         AppEvent::File(FileEvent::Created {
             path: MediaPath::new("test-fanout.bin"),
             volume: VolumeId::new(),
+            file_uuid: None,
         })
     }
 

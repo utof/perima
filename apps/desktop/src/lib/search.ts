@@ -142,7 +142,10 @@ export function composeVisible(
     if (selectedTagId !== null && !f.tags.some((t) => t.id === selectedTagId)) {
       return false;
     }
-    if (searchHits !== null && !searchHits.has(f.hash)) {
+    // WHY (Task 11): `f.hash` is `string | null` post-spec-§4.8 sweep.
+    // Pending files have no hash so they cannot match a hash-keyed
+    // FTS hit set; they're filtered out when search is active.
+    if (searchHits !== null && (f.hash === null || !searchHits.has(f.hash))) {
       return false;
     }
     return true;
@@ -163,7 +166,9 @@ export function sortByRank(
   const ranked: Array<{ file: FileWithTagsPayload; rank: number }> = [];
   const unranked: FileWithTagsPayload[] = [];
   for (const f of files) {
-    const r = hitRanks.get(f.hash);
+    // WHY (Task 11): pending files (`f.hash === null`) cannot be looked up
+    // in the hash-keyed `hitRanks` map; they fall through to `unranked`.
+    const r = f.hash === null ? undefined : hitRanks.get(f.hash);
     if (r === undefined) unranked.push(f);
     else ranked.push({ file: f, rank: r });
   }

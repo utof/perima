@@ -88,3 +88,42 @@ export function useDetachTag() {
     },
   });
 }
+
+/**
+ * Mutation: attach a tag by `file_uuid` (stable surrogate) instead of `hash`.
+ *
+ * Task 11 (spec §4.8): pending files (no `full_hash` yet) must still be
+ * taggable. The frontend prefers this hook when `f.hash` is `null`.
+ */
+export function useAttachTagByUuid() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { fileUuid: string; tagName: string }) =>
+      api.attachTagByUuid(vars.fileUuid, vars.tagName).match(
+        (tag) => tag,
+        // eslint-disable-next-line @typescript-eslint/only-throw-error
+        (err) => { throw err; },
+      ),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: filesKeys.all });
+      void qc.invalidateQueries({ queryKey: tagsKeys.all });
+    },
+  });
+}
+
+/** Symmetric to {@link useAttachTagByUuid}. */
+export function useDetachTagByUuid() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (vars: { fileUuid: string; tagId: string }) =>
+      api.detachTagByUuid(vars.fileUuid, vars.tagId).match(
+        (v) => v,
+        // eslint-disable-next-line @typescript-eslint/only-throw-error
+        (err) => { throw err; },
+      ),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: filesKeys.all });
+      void qc.invalidateQueries({ queryKey: tagsKeys.all });
+    },
+  });
+}

@@ -207,6 +207,29 @@ export function detachTag(
   return fromInvoke("detach_tag", { hash, tagId });
 }
 
+/**
+ * Attach a tag by `file_uuid` (stable surrogate) instead of `blake3_hash`.
+ *
+ * Task 11 (spec §4.8): pending files (no `full_hash` yet) cannot be tagged
+ * via {@link attachTag}; this endpoint resolves `file_uuid` → hash internally
+ * and falls back to `CoreError::FullHashUnavailable` if no full hash is
+ * available yet.
+ */
+export function attachTagByUuid(
+  fileUuid: string,
+  tagName: string,
+): ResultAsync<Tag, CoreError> {
+  return fromInvoke("attach_tag_by_uuid", { fileUuid, tagName });
+}
+
+/** Detach a tag by `file_uuid`. Symmetric to {@link attachTagByUuid}. */
+export function detachTagByUuid(
+  fileUuid: string,
+  tagId: string,
+): ResultAsync<void, CoreError> {
+  return fromInvoke("detach_tag_by_uuid", { fileUuid, tagId });
+}
+
 /** List files with metadata and tags. */
 export function listFilesWithTags(
   limit: number,

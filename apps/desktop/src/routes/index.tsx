@@ -42,9 +42,25 @@ export default function IndexRoute() {
   // undefined when query.length < MIN_QUERY_LEN per the `enabled` clause.
   // Undefined means "no search active" → searchActive = false.
   const searchActive = searchHits !== undefined;
-  const hashSet = searchActive ? new Set(searchHits.map((h) => h.blake3_hash)) : null;
+  // WHY filter+typeguard (Task 11, spec §4.8): `SearchHit.blake3_hash` is now
+  // `string | null` because pending files (no `full_hash` yet) can still hit
+  // the FTS index. The hash-keyed compose/sort helpers operate on `Set<string>`
+  // / `Map<string, number>`, so we drop nullable hashes before constructing
+  // them. Pending files surface in the underlying `files` list and pass
+  // through `composeVisible` only when no search filter is active.
+  const hashSet = searchActive
+    ? new Set(
+        searchHits
+          .map((h) => h.blake3_hash)
+          .filter((h): h is string => h !== null),
+      )
+    : null;
   const rankMap = searchActive
-    ? new Map(searchHits.map((h) => [h.blake3_hash, h.rank]))
+    ? new Map(
+        searchHits
+          .filter((h): h is typeof h & { blake3_hash: string } => h.blake3_hash !== null)
+          .map((h) => [h.blake3_hash, h.rank]),
+      )
     : new Map<string, number>();
   const baseVisible = composeVisible(files, selectedTagId, hashSet);
   const visibleFiles = searchActive ? sortByRank(baseVisible, rankMap) : baseVisible;

@@ -287,11 +287,19 @@ pub enum UpsertOutcome {
 }
 
 /// Row returned by `FileRepository::list_file_locations`.
+///
+/// WHY `file_uuid` non-nullable + `hash` nullable (Task 11, spec §4.8):
+/// `file_uuid` is the stable surrogate present on every `files` row from V011
+/// on. `hash` (== `full_hash`) is `None` for files whose `full_hash` has not
+/// yet been computed (pending dedup verification). UI / test code that needs
+/// a stable React key MUST use `file_uuid`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct FileLocationRecord {
-    /// Content hash of the underlying file.
-    pub hash: BlakeHash,
+    /// Stable surrogate identifier for the file (`UUIDv7`).
+    pub file_uuid: FileUuid,
+    /// Content hash of the underlying file. `None` until `full_hash` computes.
+    pub hash: Option<BlakeHash>,
     /// File size in bytes.
     pub size: FileSize,
     /// Volume the location lives on.
