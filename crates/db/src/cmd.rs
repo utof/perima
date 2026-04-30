@@ -42,6 +42,12 @@ pub enum WriteCmd {
     Search(SearchWriteCmd),
     /// Identity-cache writes (populated Task 6 — cache port).
     Cache(CacheWriteCmd),
+    /// Produce a consistent single-file snapshot of the database at `target`.
+    /// Runs `VACUUM INTO ?1` against the writable connection.
+    ///
+    /// WHY no `force` field: existence-check + pre-removal happens in
+    /// `BackupDatabaseUseCase::execute`. The writer never sees `force`.
+    Backup(BackupWriteCmd),
     /// Cooperative shutdown signal — when the writer thread receives
     /// this it exits its loop. Sent by `SqliteWriterHandle::join` and
     /// the `Drop` impl.
@@ -71,6 +77,7 @@ impl WriteCmd {
             Self::File(_) => "file",
             Self::Search(_) => "search",
             Self::Cache(c) => c.kind_str(),
+            Self::Backup(_) => "backup",
             Self::Shutdown => "shutdown",
         }
     }
@@ -437,4 +444,17 @@ impl CacheWriteCmd {
             Self::SoftDeleteCacheRow { .. } => "soft_delete_cache_row",
         }
     }
+}
+
+/// Inner payload of [`WriteCmd::Backup`].
+///
+/// `target` is the absolute path the backup should land at; the
+/// use-case has already pre-removed any existing file (when `--force`).
+/// `reply` carries `size_bytes` on success or a typed `CoreError` on failure.
+#[derive(Debug)]
+pub struct BackupWriteCmd {
+    /// Absolute target path for the backup file.
+    pub target: std::path::PathBuf,
+    /// Reply channel; writer sends `Ok(size_bytes)` on success.
+    pub reply: flume::Sender<Result<u64, perima_core::CoreError>>,
 }
