@@ -5,9 +5,10 @@
 //!
 //! - [`AppDeps`] — flat `Arc<dyn Port>` DI struct; shells construct
 //!   one directly.
-//! - [`AppContainer`] — five `Arc<UseCase>` fields + shared
-//!   `Arc<dyn EventBus>` (a [`Bus`] under the hood). `Clone` is cheap;
-//!   axum `with_state` and Tauri `manage` both accept it trivially.
+//! - [`AppContainer`] — `Arc<UseCase>` fields (scan, search, tag, volume,
+//!   metadata, `compute_full_hash`, dedup, backup) + shared `Arc<dyn EventBus>`
+//!   (a [`Bus`] under the hood). `Clone` is cheap; axum `with_state` and
+//!   Tauri `manage` both accept it trivially.
 //!
 //! # Event-bus wiring (Batch E Task 6)
 //!
@@ -23,7 +24,7 @@ use std::sync::Arc;
 
 use perima_core::{
     FileRepository, HashService, IdentityCacheRepository, MetadataRepository, Scanner,
-    SearchRepository, TagRepository, VolumeRepository, events::EventBus,
+    SearchRepository, TagRepository, VolumeRepository, events::EventBus, ports::DatabaseAdmin,
 };
 use perima_media::ThumbnailGenerator;
 
@@ -41,13 +42,24 @@ use crate::{
 ///
 /// # Field count
 ///
-/// Eight fields (seven repository/service ports + the concrete
-/// [`ThumbnailGenerator`]). `ScanUseCase` requires the thumbnailer for
-/// post-hash thumbnail generation; since it's a concrete `Arc<T>` and
-/// not a `dyn Trait` port, it rides alongside the trait-object ports
-/// in this DI struct rather than being stubbed behind a port.
+/// Ten fields (one admin port, one path, seven repository/service ports + the
+/// concrete [`ThumbnailGenerator`]). `ScanUseCase` requires the thumbnailer
+/// for post-hash thumbnail generation; since it's a concrete `Arc<T>` and not
+/// a `dyn Trait` port, it rides alongside the trait-object ports in this DI
+/// struct rather than being stubbed behind a port.
 #[derive(Clone)]
 pub struct AppDeps {
+    /// Database-engine administration port (slice 1: backup; slice 2/3
+    /// of #168 will grow it for vault-sentinel + restore).
+    ///
+    /// WHY a port (not a `Sender<WriteCmd>`): keeps `crates/app`'s dep
+    /// graph free of `perima-db` types — admins are constructed in
+    /// shells (`SqliteDatabaseAdmin::new(writer.sender())`) and passed in.
+    pub admin: Arc<dyn DatabaseAdmin>,
+    /// Where the database file (and `backups/` subdir) live. Threaded
+    /// from each shell's startup-time path resolution
+    /// (CLI `Config::resolve()`, desktop `resolve_with_app_data_dir()`).
+    pub data_dir: std::path::PathBuf,
     /// File + location repository port.
     pub files: Arc<dyn FileRepository>,
     /// Volume repository port.
@@ -95,6 +107,8 @@ impl std::fmt::Debug for AppDeps {
 /// object keeps the container type stable across those configurations.
 #[derive(Clone)]
 pub struct AppContainer {
+    /// [`crate::BackupDatabaseUseCase`] — on-demand hot backup of the `SQLite` DB.
+    pub backup: Arc<crate::BackupDatabaseUseCase>,
     /// [`ScanUseCase`] — full + incremental scan orchestration.
     pub scan: Arc<ScanUseCase>,
     /// [`SearchUseCase`] — FTS5-backed full-text search.
@@ -260,6 +274,10 @@ impl AppContainer {
             Arc::clone(&deps.files),
             Arc::clone(&events),
         ));
+        let backup = Arc::new(crate::BackupDatabaseUseCase::new(
+            Arc::clone(&deps.admin),
+            deps.data_dir.clone(),
+        ));
 
         // WHY clone: the same `Arc<dyn VolumeRepository>` lives inside
         // `VolumeUseCase` (above) AND on the container field so shell
@@ -286,6 +304,7 @@ impl AppContainer {
         let hasher = Arc::clone(&deps.hasher);
 
         Arc::new(Self {
+            backup,
             scan,
             search,
             tag,
@@ -315,9 +334,9 @@ mod tests {
 
     use perima_core::{AppEvent, FileEvent, MediaPath, VolumeId};
     use perima_db::{
-        ReadPool, SqliteFileRepository, SqliteIdentityCacheRepository, SqliteMetadataRepository,
-        SqliteSearchRepository, SqliteTagRepository, SqliteVolumeRepository, SqliteWriter,
-        SqliteWriterHandle,
+        ReadPool, SqliteDatabaseAdmin, SqliteFileRepository, SqliteIdentityCacheRepository,
+        SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository,
+        SqliteVolumeRepository, SqliteWriter, SqliteWriterHandle,
     };
     use perima_fs::WalkdirScanner;
     use perima_hash::Blake3Service;
@@ -391,10 +410,15 @@ mod tests {
         let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
         let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());
         let thumbnailer: Arc<ThumbnailGenerator> = Arc::new(ThumbnailGenerator::disabled());
+        let admin: Arc<dyn perima_core::ports::DatabaseAdmin> =
+            Arc::new(SqliteDatabaseAdmin::new(writer.sender()));
+        let data_dir = db_tmp.path().to_path_buf();
 
         (
             db_tmp,
             AppDeps {
+                admin,
+                data_dir,
                 files,
                 volumes,
                 tags,
