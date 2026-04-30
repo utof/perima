@@ -3521,6 +3521,7 @@ version = "0.6.4"
 dependencies = [
  "async-broadcast",
  "async-trait",
+ "chrono",
  "directories",
  "futures",
  "insta",

@@ -26,6 +26,7 @@
 #![forbid(unsafe_code)]
 
 pub mod backfill;
+pub mod backup;
 pub mod bus;
 pub mod config;
 pub mod container;
@@ -39,6 +40,7 @@ pub mod telemetry;
 pub mod volume;
 
 pub use backfill::{BackfillRate, BackfillReport, BackfillRow, QuickHashBackfillWorker};
+pub use backup::{BackupCommand, BackupDatabaseUseCase, BackupOutput};
 pub use bus::Bus;
 pub use container::{AppContainer, AppDeps};
 pub use dedup::{ComputeFullHashUseCase, DedupUseCase};
