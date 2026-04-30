@@ -30,12 +30,25 @@ use crate::cmd::BackupWriteCmd;
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn handle(conn: &Connection, cmd: BackupWriteCmd) {
     let result = run(conn, &cmd.target);
-    let _ = cmd.reply.send(result);
+    if cmd.reply.send(result).is_err() {
+        tracing::debug!("backup reply channel closed before send");
+    }
 }
 
 fn run(conn: &Connection, target: &Path) -> Result<u64, CoreError> {
-    let target_str = target.to_string_lossy();
-    conn.execute("VACUUM INTO ?1", rusqlite::params![target_str.as_ref()])
+    // WHY to_str (not to_string_lossy): a non-UTF8 target would otherwise
+    // be silently mangled to U+FFFD, sent to SQLite, which would fail with
+    // CannotOpen against a phantom path — the user sees an error citing a
+    // path that doesn't exist on disk. Fail fast with TargetUnwritable so
+    // the user sees the actual path and can fix it. Mirrors the precedent
+    // at crates/db/src/writer/volume.rs:242-251.
+    let target_str = target.to_str().ok_or_else(|| CoreError::BackupFailed {
+        reason: BackupFailureReason::TargetUnwritable {
+            path: target.display().to_string(),
+            message: "target path is not valid UTF-8".to_string(),
+        },
+    })?;
+    conn.execute("VACUUM INTO ?1", rusqlite::params![target_str])
         .map_err(|e| {
             // SQLite reports SQLITE_FULL as ErrorCode::DiskFull;
             // SQLITE_CANTOPEN often means the target dir is unwritable.
