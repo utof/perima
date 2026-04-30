@@ -30,8 +30,9 @@ use perima_core::{
     SearchRepository, TagRepository, VolumeRepository,
 };
 use perima_db::{
-    ReadPool, SqliteFileRepository, SqliteIdentityCacheRepository, SqliteMetadataRepository,
-    SqliteSearchRepository, SqliteTagRepository, SqliteVolumeRepository, SqliteWriter,
+    ReadPool, SqliteDatabaseAdmin, SqliteFileRepository, SqliteIdentityCacheRepository,
+    SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository, SqliteVolumeRepository,
+    SqliteWriter,
 };
 use perima_fs::WalkdirScanner;
 use perima_hash::Blake3Service;
@@ -353,7 +354,16 @@ fn build_container(
             .to_path_buf(),
     ));
 
+    let admin: Arc<dyn perima_core::ports::DatabaseAdmin> =
+        Arc::new(SqliteDatabaseAdmin::new(writer.sender()));
+    let data_dir = db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+
     let deps = AppDeps {
+        admin,
+        data_dir,
         files,
         volumes,
         tags,
