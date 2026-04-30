@@ -10,7 +10,12 @@ import type { FileWithTagsPayload } from "../bindings";
  */
 function makeFile(overrides: Partial<FileWithTagsPayload>): FileWithTagsPayload {
   return {
+    // WHY (Task 11): `file_uuid` is the React key. Default to a placeholder
+    // and let `overrides` set it per-test; the FileGrid test that supplies
+    // multiple files must override or the keys collide.
+    file_uuid: "00000000-0000-0000-0000-000000000000",
     hash: "0".repeat(64),
+    quick_hash: null,
     size: 1024,
     volume_id: "00000000-0000-0000-0000-000000000000",
     relative_path: "photos/example.jpg",
@@ -36,18 +41,21 @@ describe("FileGrid", () => {
   it("renders an <img> for ready tiles and placeholders for others", () => {
     const files: FileWithTagsPayload[] = [
       makeFile({
+        file_uuid: "00000000-0000-0000-0000-00000000000a",
         hash: "a".repeat(64),
         relative_path: "photos/ready.jpg",
         thumbnail_path: "/var/data/perima/thumbnails/aa/ready.webp",
         thumbnail_status: "ready",
       }),
       makeFile({
+        file_uuid: "00000000-0000-0000-0000-00000000000b",
         hash: "b".repeat(64),
         relative_path: "photos/pending.jpg",
         thumbnail_path: null,
         thumbnail_status: "pending",
       }),
       makeFile({
+        file_uuid: "00000000-0000-0000-0000-00000000000c",
         hash: "c".repeat(64),
         relative_path: "photos/failed.jpg",
         thumbnail_path: null,

@@ -25,8 +25,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod backfill;
 pub mod bus;
+pub mod config;
 pub mod container;
+pub mod dedup;
 pub mod events;
 pub mod metadata;
 pub mod scan;
@@ -35,8 +38,10 @@ pub mod tag;
 pub mod telemetry;
 pub mod volume;
 
+pub use backfill::{BackfillRate, BackfillReport, BackfillRow, QuickHashBackfillWorker};
 pub use bus::Bus;
 pub use container::{AppContainer, AppDeps};
+pub use dedup::{ComputeFullHashUseCase, DedupUseCase};
 pub use events::EventHandler;
 pub use metadata::{MetadataCommand, MetadataOutput, MetadataUseCase};
 pub use scan::{

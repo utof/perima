@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use perima_core::{
-    BlakeHash, CoreError, DeviceId, DiscoveredFile, EventBus, FileRepository, HashService,
-    HashedFile, MediaPath, MetadataExtractor, MetadataRepository, Scanner, UpsertOutcome, VolumeId,
-    VolumeRepository,
+    BlakeHash, CacheEntry, CacheKey, CoreError, DeviceId, DiscoveredFile, EventBus, FileRepository,
+    FileStat, HashService, HashedFile, IdentityCacheRepository, MediaPath, MetadataExtractor,
+    MetadataRepository, Scanner, UpsertOutcome, VolumeId, VolumeRepository,
 };
 use perima_media::{
     CompositeExtractor, ImageExtractor, MetadataQueue, ThumbnailGenerator, VideoExtractor,
@@ -279,6 +279,11 @@ pub struct ScanUseCase {
     files: Arc<dyn FileRepository>,
     volumes: Arc<dyn VolumeRepository>,
     metadata: Arc<dyn MetadataRepository>,
+    // WHY `cache` is held alongside the other ports (Task 7): on every
+    // file the scan loop consults the Tier-0 identity cache before any
+    // hash compute (spec §4.3). Cache hits skip the file read entirely
+    // — that's the v0.6.x re-scan perf landing.
+    cache: Arc<dyn IdentityCacheRepository>,
     scanner: Arc<dyn Scanner>,
     hasher: Arc<dyn HashService>,
     thumbnailer: Arc<ThumbnailGenerator>,
@@ -297,16 +302,37 @@ impl std::fmt::Debug for ScanUseCase {
     }
 }
 
+/// Per-file resolution result from [`ScanUseCase::resolve_with_cache`].
+///
+/// Triple of `(discovered_file, blake3_hash, quick_hash)`. `quick_hash`
+/// is `Some` for cache hits (`entry.quick_hash`) and cache misses (the
+/// freshly-computed fingerprint). It is `None` only when a cache lookup
+/// error demoted the file to the miss path and hashing was also skipped
+/// (cancellation). The scan loop passes this value through to
+/// `persist_file` to eagerly populate `files.quick_hash` per spec §4.1.1.
+///
+/// WHY type alias (not a struct): the 3-tuple is internal to this module;
+/// a struct would require field names and `pub` visibility for no gain.
+/// The alias suppresses `clippy::type_complexity` at all three use sites.
+type ResolveEntry = Result<(DiscoveredFile, BlakeHash, Option<BlakeHash>), CoreError>;
+
 impl ScanUseCase {
     /// Construct a `ScanUseCase` with the given dependency ports.
     ///
-    /// The container (Task 7) calls this once and shares the resulting
-    /// `Arc<ScanUseCase>` across surfaces.
+    /// The container (`AppContainer::new`) calls this once and shares the
+    /// resulting `Arc<ScanUseCase>` across surfaces.
+    ///
+    /// WHY 8 ports (clippy `too_many_arguments` accepted): every field is
+    /// an `Arc<dyn _>` port the scan use case must own; collapsing into a
+    /// builder struct adds boilerplate without changing call sites
+    /// (the container is the only production caller).
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         files: Arc<dyn FileRepository>,
         volumes: Arc<dyn VolumeRepository>,
         metadata: Arc<dyn MetadataRepository>,
+        cache: Arc<dyn IdentityCacheRepository>,
         scanner: Arc<dyn Scanner>,
         hasher: Arc<dyn HashService>,
         thumbnailer: Arc<ThumbnailGenerator>,
@@ -316,6 +342,7 @@ impl ScanUseCase {
             files,
             volumes,
             metadata,
+            cache,
             scanner,
             hasher,
             thumbnailer,
@@ -454,23 +481,55 @@ impl ScanUseCase {
             .take_while(|_| !cancel.is_cancelled())
             .collect();
 
-        // Parallel hash. WHY cancellation check at the top of each map
-        // closure: in-flight hashes short-circuit the moment Ctrl-C
-        // lands — without this, a large fixture would drain the
-        // par_iter to completion even after the flag flips, defeating
-        // the "Ctrl-C stops hashing" guarantee.
+        // Resolve hashing: Tier-0 cache first, then quick_hash on miss.
+        //
+        // WHY two phases (sequential cache lookup, then parallel quick_hash):
+        // the cache lookup is a synchronous SELECT through the read pool;
+        // serialising the lookups keeps the read-pool contention low and
+        // batches all the misses into a single rayon par_iter that pays
+        // its overhead once. Cache hits skip every file read by design
+        // (spec §4.3) — that's the v0.6.x re-scan perf landing.
+        //
+        // WHY dry-run still uses `full_hash`: dry-run scans skip volume
+        // detection (volume_info is None), so the cache key (which needs
+        // a real volume_id) cannot be constructed. Dry-run is for
+        // standalone hash printing; a future minor can add a CLI flag
+        // wiring quick_hash there too. Out of scope for v0.6.x.
         let cancel_token = cancel.clone();
-        let hasher = Arc::clone(&self.hasher);
-        let results: Vec<Result<(DiscoveredFile, BlakeHash), CoreError>> = discovered
-            .into_par_iter()
-            .map(|d| {
-                if cancel_token.is_cancelled() {
-                    return Err(CoreError::Internal("cancelled".into()));
-                }
-                let h = hasher.full_hash(&d.absolute_path)?;
-                Ok((d, h))
-            })
-            .collect();
+        // WHY 3-tuple (d, h, quick_hash): dry-run carries None for quick_hash
+        // (no volume_id available so the cache key cannot be built; full_hash
+        // is used instead). The cache-aware path carries Some(quick_hash) from
+        // resolve_with_cache so persist_file can eagerly populate files.quick_hash
+        // per spec §4.1.1 — see WHY block in resolve_with_cache.
+        let results: Vec<ResolveEntry> = if dry_run {
+            // Legacy dry-run path: parallel full_hash, no cache. Preserves
+            // pre-Task-7 behaviour byte-for-byte.
+            let hasher = Arc::clone(&self.hasher);
+            discovered
+                .into_par_iter()
+                .map(|d| {
+                    if cancel_token.is_cancelled() {
+                        return Err(CoreError::Internal("cancelled".into()));
+                    }
+                    let h = hasher.full_hash(&d.absolute_path)?;
+                    Ok((d, h, None))
+                })
+                .collect()
+        } else {
+            // Cache-aware path. `volume_info` is Some in the non-dry-run
+            // arm (built unconditionally above when `!dry_run`).
+            let vol_id = volume_info.as_ref().map_or_else(
+                || {
+                    // Defensive: should be unreachable since !dry_run
+                    // implies volume_info was populated. Fall back to nil
+                    // so we degrade gracefully rather than panic.
+                    tracing::warn!("non-dry-run scan with no resolved volume; using nil fallback",);
+                    VolumeId(uuid::Uuid::nil())
+                },
+                |(v, _, _)| *v,
+            );
+            self.resolve_with_cache(discovered, &cancel_token, device_id, vol_id)
+        };
 
         let mut report = ScanReport {
             volume_label: volume_info.as_ref().map(|(_, label, _)| label.clone()),
@@ -483,7 +542,7 @@ impl ScanUseCase {
         for res in results {
             report.files_seen += 1;
             match res {
-                Ok((d, h)) => {
+                Ok((d, h, quick_hash)) => {
                     report.bytes_hashed += d.size.0;
                     report.per_file_entries.push(ScanReportEntry {
                         hash: h,
@@ -499,7 +558,7 @@ impl ScanUseCase {
                     let volume = volume_info
                         .as_ref()
                         .map_or_else(|| VolumeId(uuid::Uuid::nil()), |(v, _, _)| *v);
-                    match persist_file(&*self.files, &d, &h, device_id, volume) {
+                    match persist_file(&*self.files, &d, &h, quick_hash, device_id, volume) {
                         Ok(outcome) => {
                             // WHY: sentinel migration runs per-file,
                             // scoped to (relative_path, sentinel
@@ -622,15 +681,181 @@ impl ScanUseCase {
 
         Ok(report)
     }
+
+    /// Resolve `(DiscoveredFile, BlakeHash)` for every entry, consulting
+    /// the Tier-0 identity cache before any hash compute (spec §4.3).
+    ///
+    /// Phase 1: stat each file + look up the cache row sequentially. Hits
+    /// produce a hash directly from the cached entry; misses are pushed
+    /// to a separate vec for parallel hashing in phase 2.
+    ///
+    /// Phase 2: rayon `par_iter` `quick_hash_prefix_suffix` on the misses.
+    /// After hashing, the cache row is inserted (best-effort — logged on
+    /// failure but not propagated, since the cache is a perf optimisation
+    /// not a correctness gate).
+    ///
+    /// WHY two phases (not single `par_iter`): the cache lookup is a
+    /// synchronous read-pool query; serialising lookups keeps the pool
+    /// wait-times bounded and means hits never pay the rayon overhead.
+    /// The misses still parallelise in phase 2 — preserves the pre-Task-7
+    /// throughput on cold caches.
+    ///
+    /// WHY cancellation checks at every yield + at the top of each rayon
+    /// closure: matches the pre-Task-7 contract — Ctrl-C stops the scan
+    /// promptly, even mid-cache-resolution.
+    ///
+    /// WHY `blake3_hash = quick_hash` placeholder for new rows: V001
+    /// declares `files.blake3_hash TEXT PRIMARY KEY NOT NULL`. Until a
+    /// future V012 relaxes this to nullable (tracked GH issue post-Task-7),
+    /// new rows ride a placeholder content-hash equal to the `quick_hash`
+    /// fingerprint. Task 9's `compute_full_hash` later promotes the real
+    /// `full_hash` (`UPDATE`s both the placeholder AND the new `full_hash`
+    /// column atomically). Cache hits with `full_hash` already populated
+    /// use the canonical `full_hash` directly — no placeholder needed.
+    /// Each success entry is `(discovered_file, blake3_hash, quick_hash)`.
+    ///
+    /// `quick_hash` is the cheap prefix+suffix fingerprint used to populate
+    /// `files.quick_hash` on INSERT (spec §4.1.1):
+    /// - Cache hit: `Some(entry.quick_hash)` — available without re-hashing.
+    /// - Cache miss: `Some(h)` — `h` is the freshly-computed `quick_hash`.
+    ///
+    /// Both branches are `Some`; `None` only arises on cache lookup failure
+    /// where the file was demoted to the miss path and hashed anyway.
+    fn resolve_with_cache(
+        &self,
+        discovered: Vec<DiscoveredFile>,
+        cancel: &CancellationToken,
+        device: DeviceId,
+        volume: VolumeId,
+    ) -> Vec<ResolveEntry> {
+        // Phase 1: per-file stat + cache lookup. `hits` carry a (DiscoveredFile,
+        // BlakeHash, quick_hash) ready to push into results; `misses` carry
+        // the file + its CacheKey so phase 2 can insert the fresh cache row
+        // after hashing.
+        let mut results: Vec<ResolveEntry> = Vec::with_capacity(discovered.len());
+        let mut misses: Vec<(DiscoveredFile, CacheKey)> = Vec::new();
+        for d in discovered {
+            if cancel.is_cancelled() {
+                results.push(Err(CoreError::Internal("cancelled".into())));
+                continue;
+            }
+            let stat = match self.scanner.stat_with_id(&d.absolute_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    // WHY push as Err: matches the pre-Task-7 shape — a
+                    // failed hash also yielded Err in the old par_iter.
+                    // The outer loop classifies these as files_errored.
+                    results.push(Err(e));
+                    continue;
+                }
+            };
+            let key = make_cache_key(device, volume, stat);
+            match self.cache.lookup(&key) {
+                Ok(Some(entry)) => {
+                    let h = cached_hash(&entry);
+                    // WHY carry entry.quick_hash separately: `h` may be
+                    // `full_hash` when the cache row has been promoted,
+                    // but `files.quick_hash` must always store the cheap
+                    // prefix+suffix fingerprint, not the full hash.
+                    results.push(Ok((d, h, Some(entry.quick_hash))));
+                }
+                Ok(None) => misses.push((d, key)),
+                Err(e) => {
+                    // Lookup failure: degrade to a miss path so the file is
+                    // still hashed + persisted. WHY warn (not propagate):
+                    // the cache is a perf optimisation; a transient read-
+                    // pool error must not abort the scan.
+                    tracing::warn!(error = %e, path = %d.absolute_path.display(),
+                        "Tier-0 cache lookup failed; falling back to miss path");
+                    misses.push((d, key));
+                }
+            }
+        }
+
+        // Phase 2: parallel quick_hash_prefix_suffix on misses.
+        let cancel_for_par = cancel.clone();
+        let hasher = Arc::clone(&self.hasher);
+        let miss_results: Vec<Result<(DiscoveredFile, BlakeHash, CacheKey), CoreError>> = misses
+            .into_par_iter()
+            .map(|(d, key)| {
+                if cancel_for_par.is_cancelled() {
+                    return Err(CoreError::Internal("cancelled".into()));
+                }
+                let h = hasher.quick_hash_prefix_suffix(&d.absolute_path, d.size.0)?;
+                Ok((d, h, key))
+            })
+            .collect();
+
+        // Phase 3: insert cache rows for the freshly-hashed misses, then
+        // accumulate into results. Cache upsert errors are logged (not
+        // propagated) — the file write path is the source of truth.
+        for r in miss_results {
+            match r {
+                Ok((d, h, key)) => {
+                    let entry = CacheEntry {
+                        quick_hash: h,
+                        full_hash: None,
+                    };
+                    if let Err(e) = self.cache.upsert(&key, &entry) {
+                        tracing::warn!(
+                            error = %e,
+                            path = %d.absolute_path.display(),
+                            "Tier-0 cache upsert failed; continuing scan",
+                        );
+                    }
+                    // WHY Some(h) for miss path: h IS the quick_hash
+                    // (quick_hash_prefix_suffix result). Carry it so the
+                    // persist step can populate files.quick_hash eagerly.
+                    results.push(Ok((d, h, Some(h))));
+                }
+                Err(e) => results.push(Err(e)),
+            }
+        }
+        results
+    }
+}
+
+/// Build the Tier-0 cache lookup key from the per-file stat triple.
+///
+/// WHY a free function (not an inherent on `CacheKey`): `CacheKey` lives
+/// in `crates/core` and `FileStat` lives there too, but the conversion
+/// also assigns the (device, volume) coordinates which only the use case
+/// knows. Keeping the constructor here keeps `crates/core` framework-free.
+const fn make_cache_key(device: DeviceId, volume: VolumeId, stat: FileStat) -> CacheKey {
+    CacheKey {
+        device_id: device,
+        volume_id: volume,
+        fs_file_id: stat.fs_file_id,
+        size_bytes: stat.size_bytes,
+        mtime_ns: stat.mtime_ns,
+    }
+}
+
+/// Project a cached entry to the `BlakeHash` `ScanUseCase` will write.
+///
+/// Prefers `full_hash` when present (canonical content address); falls
+/// back to `quick_hash` as a placeholder when only the cheap fingerprint
+/// has been computed (the v0.6.x lazy-full-hash workflow).
+const fn cached_hash(entry: &CacheEntry) -> BlakeHash {
+    match entry.full_hash {
+        Some(h) => h,
+        None => entry.quick_hash,
+    }
 }
 
 /// Persist a single hashed file: upsert the content record, then the
 /// location record. Returns the location outcome so the caller can
 /// classify the result as new/existing.
+///
+/// `quick_hash` is the cheap BLAKE3 prefix+suffix fingerprint. When
+/// `Some`, the adapter populates `files.quick_hash` on INSERT per spec
+/// §4.1.1, enabling `list_quick_hash_collisions` (Task 9) to return
+/// candidates immediately for files scanned post-Task-7-fix.
 fn persist_file(
     repo: &dyn FileRepository,
     d: &DiscoveredFile,
     h: &BlakeHash,
+    quick_hash: Option<BlakeHash>,
     device: DeviceId,
     volume: VolumeId,
 ) -> Result<UpsertOutcome, CoreError> {
@@ -638,7 +863,7 @@ fn persist_file(
         discovered: d.clone(),
         hash: *h,
     };
-    repo.upsert_file(&hf, device)?;
+    repo.upsert_file_with_quick_hash(&hf, device, quick_hash)?;
     repo.upsert_location(h, volume, &d.relative_path, device)
 }
 
@@ -673,10 +898,10 @@ mod tests {
     use std::io::Write;
     use std::sync::Mutex;
 
-    use perima_core::{AppEvent, FileLocationRecord, MediaMetadata};
+    use perima_core::{AppEvent, MediaMetadata};
     use perima_db::{
-        ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteVolumeRepository,
-        SqliteWriter, SqliteWriterHandle,
+        ReadPool, SqliteFileRepository, SqliteIdentityCacheRepository, SqliteMetadataRepository,
+        SqliteVolumeRepository, SqliteWriter, SqliteWriterHandle,
     };
     use perima_fs::WalkdirScanner;
     use perima_hash::Blake3Service;
@@ -718,7 +943,7 @@ mod tests {
             &self,
             _limit: usize,
             _volume: Option<VolumeId>,
-        ) -> Result<Vec<(FileLocationRecord, Option<MediaMetadata>)>, CoreError> {
+        ) -> Result<Vec<perima_core::FileWithMetadataRow>, CoreError> {
             Ok(vec![])
         }
         fn update_thumbnail(
@@ -779,8 +1004,12 @@ mod tests {
         // Use the real metadata repo for the DB so persistence tests
         // see a consistent view. A second recording mock is wired via
         // Arc dyn but held out-of-band for tests that want it.
-        let _sqlite_meta: Arc<dyn MetadataRepository> =
-            Arc::new(SqliteMetadataRepository::new(writer.sender(), reads));
+        let _sqlite_meta: Arc<dyn MetadataRepository> = Arc::new(SqliteMetadataRepository::new(
+            writer.sender(),
+            reads.clone(),
+        ));
+        let cache: Arc<dyn perima_core::IdentityCacheRepository> =
+            Arc::new(SqliteIdentityCacheRepository::new(writer.sender(), reads));
         let recording = Arc::new(RecordingMetadata::default());
         let metadata: Arc<dyn MetadataRepository> = recording.clone();
 
@@ -793,6 +1022,7 @@ mod tests {
             files,
             volumes,
             metadata,
+            cache,
             scanner,
             hasher,
             thumbnailer,

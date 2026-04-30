@@ -23,14 +23,18 @@ pub mod state;
 use std::path::Path;
 use std::sync::Arc;
 
-use perima_app::{AppContainer, AppDeps, EventHandler, LogEventHandler};
+use perima_app::{
+    AppContainer, AppDeps, BackfillRate, EventHandler, LogEventHandler, QuickHashBackfillWorker,
+    backfill::{BACKFILL_QUERY_LIMIT, choose_backfill_rate},
+};
 use perima_core::{
-    EventBus, FileRepository, HashService, MetadataRepository, Scanner, SearchRepository,
-    TagRepository, VolumeRepository,
+    EventBus, FileRepository, HashService, IdentityCacheRepository, MetadataRepository, Scanner,
+    SearchRepository, TagRepository, VolumeRepository,
 };
 use perima_db::{
-    ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository,
-    SqliteTagRepository, SqliteVolumeRepository, SqliteWriter, SqliteWriterHandle,
+    ReadPool, SqliteFileRepository, SqliteIdentityCacheRepository, SqliteMetadataRepository,
+    SqliteSearchRepository, SqliteTagRepository, SqliteVolumeRepository, SqliteWriter,
+    SqliteWriterHandle,
 };
 use perima_fs::WalkdirScanner;
 use perima_hash::Blake3Service;
@@ -102,10 +106,17 @@ pub fn run() -> Result<(), RunError> {
         commands::is_watching,
         commands::list_tags,
         commands::attach_tag,
+        commands::attach_tag_by_uuid,
         commands::detach_tag,
+        commands::detach_tag_by_uuid,
         commands::list_files_with_tags,
         commands::search,
         commands::search_rebuild,
+        commands::compute_full_hash,
+        commands::compute_full_hash_batch,
+        commands::cancel_verify_batch,
+        commands::list_quick_hash_collisions,
+        commands::mark_verified_distinct,
     ]);
 
     // Export TypeScript bindings when the `specta-export` feature is
@@ -149,6 +160,23 @@ pub fn run() -> Result<(), RunError> {
                 .path()
                 .app_data_dir()
                 .map_err(|e| format!("resolve app_data_dir: {e}"))?;
+
+            // WHY this assertion: Task 0 (#154) unifies CLI + desktop data-dir
+            // resolution. `perima_app::config::resolve_data_dir()` returns
+            // `<base.data_dir>/dev.perima.desktop/perima/` which must live
+            // under Tauri's `app_data_dir` (`<base.data_dir>/dev.perima.desktop/`).
+            // If a future Tauri upgrade changes how `app_data_dir` resolves,
+            // this assertion fires loudly in debug builds instead of silently
+            // re-introducing the dual-DB bug.
+            let resolver_path = perima_app::config::resolve_data_dir()
+                .map_err(|e| format!("resolve_data_dir: {e}"))?;
+            debug_assert!(
+                resolver_path.starts_with(&app_data_dir),
+                "resolver path {} must live under tauri app_data_dir {}",
+                resolver_path.display(),
+                app_data_dir.display()
+            );
+
             let cfg = config::resolve_with_app_data_dir(&app_data_dir)?;
 
             // WHY resolve db_path up-front: used for the watch writer
@@ -212,6 +240,19 @@ pub fn run() -> Result<(), RunError> {
             drop(watch_writer);
             app.manage(writer_handle);
 
+            // Spawn the quick_hash backfill worker in the background (spec §4.1.5).
+            // WHY here (after build_container): the container's `files_repo` and
+            // `hasher` are the correct shared adapters; spawning before
+            // `manage(app_state)` keeps the wire-up co-located with the setup
+            // sequence and does not require a separate Tauri state entry.
+            // WHY CancellationToken::new(): the desktop process is long-running;
+            // the backfill task runs to completion naturally (no external cancel
+            // needed). The token is kept for API symmetry with the CLI path.
+            {
+                let backfill_cancel = tokio_util::sync::CancellationToken::new();
+                spawn_backfill_desktop(&container, cfg.device_id, backfill_cancel);
+            }
+
             let app_state = state::AppState::new(
                 cfg.data_dir,
                 cfg.device_id,
@@ -227,6 +268,71 @@ pub fn run() -> Result<(), RunError> {
         })
         .run(tauri::generate_context!())?;
     Ok(())
+}
+
+/// Spawn the `quick_hash` backfill worker for the desktop process.
+///
+/// Mirrors `crates/cli/src/main.rs::spawn_backfill`. Queries null rows,
+/// chooses an appropriate rate (spec §4.1.5), and `tokio::spawn`s the worker.
+/// The `JoinHandle` is dropped — the Tauri-managed runtime keeps the task alive
+/// until it drains or the process exits.
+///
+/// WHY a separate function (not inlined in `setup`): the `setup` closure is
+/// already long; extracting keeps it readable and the WHY-blocks co-located.
+fn spawn_backfill_desktop(
+    container: &AppContainer,
+    device_id: perima_core::DeviceId,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let rows = match container
+        .files_repo
+        .list_files_needing_backfill(BACKFILL_QUERY_LIMIT)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "backfill: could not query null quick_hash rows");
+            return;
+        }
+    };
+
+    if rows.is_empty() {
+        return;
+    }
+
+    let null_count = rows.len() as u64;
+    let rate = choose_backfill_rate(null_count);
+    tracing::info!(null_count, rate = ?rate, "spawning quick_hash backfill worker");
+
+    // Convert BackfillFileRow → BackfillRow, skipping rows with no active path.
+    let backfill_rows: Vec<_> = rows
+        .into_iter()
+        .filter_map(|r| {
+            r.active_path.map(|path| perima_app::BackfillRow {
+                hash: r.hash,
+                size_bytes: r.size_bytes,
+                path,
+            })
+        })
+        .collect();
+
+    let null_count_after_filter = backfill_rows.len() as u64;
+    let rate: BackfillRate = if null_count_after_filter == null_count {
+        rate
+    } else {
+        choose_backfill_rate(null_count_after_filter)
+    };
+
+    let _handle = QuickHashBackfillWorker::spawn(
+        Box::new(backfill_rows.into_iter()),
+        Arc::clone(&container.hasher),
+        Arc::clone(&container.files_repo),
+        device_id,
+        rate,
+        Arc::clone(&container.events),
+        cancel,
+    );
+    // WHY handle dropped: Tauri-managed runtime keeps the task alive;
+    // the process exit naturally cleans up the spawned future.
 }
 
 /// Build the [`AppContainer`] that backs every migrated Tauri handler.
@@ -263,7 +369,9 @@ fn build_container(
         writer.sender(),
         reads.clone(),
     ));
-    let search_repo = Arc::new(SqliteSearchRepository::new(writer.sender(), reads));
+    let search_repo = Arc::new(SqliteSearchRepository::new(writer.sender(), reads.clone()));
+    let identity_cache: Arc<dyn IdentityCacheRepository> =
+        Arc::new(SqliteIdentityCacheRepository::new(writer.sender(), reads));
     // WHY `.clone()` not `Arc::clone(&_)`: `AppDeps::{tags,metadata,search}`
     // are `Arc<dyn _>`. Method-syntax `.clone()` anchors `T = SqliteX` from
     // the receiver, returns `Arc<SqliteX>`, and the let binding triggers
@@ -296,6 +404,7 @@ fn build_container(
         tags,
         metadata,
         search,
+        identity_cache,
         hasher,
         scanner,
         thumbnailer,

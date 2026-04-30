@@ -2,7 +2,10 @@
 
 use serde::Serialize;
 
-use crate::{CoreError, MediaPath, VolumeId};
+use crate::{
+    CoreError, FileUuid, MediaPath, VolumeId,
+    dedup::{BatchId, FullHashOutcome},
+};
 
 /// A filesystem event detected by the watcher.
 ///
@@ -11,6 +14,13 @@ use crate::{CoreError, MediaPath, VolumeId};
 /// frontend's `'file-event'` channel listener byte-compatible. `CoreError` uses
 /// `tag = "kind", content = "data"` — a different shape intentionally, because
 /// `CoreError` is a Result error type while `FileEvent` is a v1-frozen channel payload.
+///
+/// WHY `file_uuid: Option<FileUuid>` (Task 11, spec §4.8): the watcher emits
+/// `Created` events BEFORE the file enters the DB (no `file_uuid` exists yet),
+/// so the field is optional. `Modified` / `Deleted` / `Renamed` events also
+/// pass `None` from the current emitter — consumers do their own `(volume,
+/// path)` lookup to find the row. A future enhancement may populate the field
+/// from a DB lookup at emission time. Consumers migrate at their own pace.
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(tag = "type")]
@@ -21,6 +31,8 @@ pub enum FileEvent {
         path: MediaPath,
         /// Volume the file lives on.
         volume: VolumeId,
+        /// Stable file id, when known. `None` for newly-discovered files.
+        file_uuid: Option<FileUuid>,
     },
     /// An existing file's content was modified.
     Modified {
@@ -28,6 +40,8 @@ pub enum FileEvent {
         path: MediaPath,
         /// Volume the file lives on.
         volume: VolumeId,
+        /// Stable file id, when known.
+        file_uuid: Option<FileUuid>,
     },
     /// A file was deleted from this path.
     Deleted {
@@ -35,6 +49,8 @@ pub enum FileEvent {
         path: MediaPath,
         /// Volume the file lives on.
         volume: VolumeId,
+        /// Stable file id, when known.
+        file_uuid: Option<FileUuid>,
     },
     /// A file was renamed/moved within the same volume.
     Renamed {
@@ -44,6 +60,8 @@ pub enum FileEvent {
         to: MediaPath,
         /// Volume the file lives on.
         volume: VolumeId,
+        /// Stable file id, when known.
+        file_uuid: Option<FileUuid>,
     },
 }
 
@@ -82,6 +100,27 @@ pub enum AppEvent {
         /// Which index category was invalidated.
         reason: InvalidationReason,
     },
+
+    /// Emitted by the full-hash worker after each file completes.
+    /// Frontend uses `batch_id` to correlate with the `BatchHandle`
+    /// returned by `compute_full_hash_batch`.
+    VerifyProgress {
+        /// The batch this event belongs to.
+        batch_id: BatchId,
+        /// Number of files completed so far (including this one).
+        files_done: u32,
+        /// Total files in the batch.
+        files_total: u32,
+        /// Outcome for the file just processed.
+        latest_outcome: FullHashOutcome,
+    },
+
+    /// Emitted by the full-hash worker when all files in a batch have
+    /// been processed (successfully or not).
+    VerifyComplete {
+        /// The batch that has finished.
+        batch_id: BatchId,
+    },
 }
 
 /// Categorical reason an index was invalidated.
@@ -99,6 +138,8 @@ pub enum InvalidationReason {
     MetadataChanged,
     /// FTS5 rebuild.
     SearchIndexRebuilt,
+    /// Collision groups changed (quick-hash or full-hash dedup result updated).
+    CollisionsChanged,
 }
 
 /// Consumer of application events.

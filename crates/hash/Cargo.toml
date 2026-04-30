@@ -28,6 +28,14 @@ tempfile.workspace = true
 # Observability-only per spec D-4: weekly cron prints results, no
 # threshold gate.
 criterion = "0.5"
+# WHY tracing-test: full_hash_dispatched tests assert distinct dispatch
+# span targets (update / update_mmap_hdd / update_mmap_rayon) via
+# logs_contain; tracing-test captures tracing output per test.
+# WHY no-env-filter: the dispatch debug! calls use custom targets
+# (e.g. "hash.dispatch.update") that don't match the default
+# `perima_hash=trace` filter; no-env-filter uses "trace" (all events)
+# so the custom targets are captured and logs_contain finds them.
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
 
 [[bench]]
 name = "blake3"

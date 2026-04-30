@@ -155,7 +155,10 @@ async fn list_files_with_metadata_returns_rows() {
     // `Vec<FileLocationRecord>` where `hash` is a typed `BlakeHash` value.
     let entries = list_files_inner(data_dir.path(), 100, None).expect("list_files_inner");
     assert!(!entries.is_empty(), "scan must have inserted ≥1 file");
-    let first_hash = entries[0].hash;
+    // WHY expect: scanner-inserted rows always carry a full_hash (post-Task-11
+    // pending state only applies to dedup-pending rows; this fixture path runs
+    // the full hashing pipeline).
+    let first_hash = entries[0].hash.expect("scanned row must carry full_hash");
 
     let db_path = data_dir.path().join("perima.db");
     // WHY writer+pool harness (post-Batch-C Task 4): the metadata
@@ -198,12 +201,12 @@ async fn list_files_with_metadata_returns_rows() {
         !rows.is_empty(),
         "expected ≥1 FileWithMetadataPayload row, got 0"
     );
-    // WHY `entries[0].hash.to_hex()`: `FileWithMetadataPayload.hash` is a
-    // hex String (flat IPC payload); `FileLocationRecord.hash` is `BlakeHash`.
-    // Compare using the hex representation.
+    // WHY: `FileWithMetadataPayload.hash` is now `Option<String>` (Task 11);
+    // compare to `Some(first_hash.to_hex())`. `entries[0].hash` is also
+    // `Option<BlakeHash>` so we re-use `first_hash` extracted above.
     let populated = rows
         .iter()
-        .find(|r| r.hash == entries[0].hash.to_hex())
+        .find(|r| r.hash.as_deref() == Some(first_hash.to_hex().as_str()))
         .expect("row for inserted metadata must be present");
     assert_eq!(populated.width, Some(640));
     assert_eq!(populated.height, Some(480));
@@ -379,7 +382,12 @@ async fn list_files_with_tags_returns_tagged_rows() {
     let files = list_files_with_metadata_inner(&metadata_repo, 100, None).expect("list");
     assert!(!files.is_empty(), "scan must have produced ≥1 file");
 
-    let first_hash = files[0].hash.clone();
+    // WHY expect: post-Task-11 `hash` is `Option<String>`. The scan path
+    // populates a full_hash for every file, so unwrap is safe in this fixture.
+    let first_hash = files[0]
+        .hash
+        .clone()
+        .expect("scanned file must carry full hash");
 
     // Attach a tag via the inner helper.
     // WHY `attach_tag_inner` now returns `Tag` (not `TagPayload`):
@@ -395,7 +403,7 @@ async fn list_files_with_tags_returns_tagged_rows() {
     assert!(!tagged.is_empty());
     let tagged_file = tagged
         .iter()
-        .find(|f| f.file.hash == first_hash)
+        .find(|f| f.file.hash.as_deref() == Some(first_hash.as_str()))
         .expect("find tagged file");
     assert_eq!(tagged_file.tags.len(), 1, "must have exactly 1 tag");
     assert_eq!(tagged_file.tags[0].name, "test-tag");
@@ -414,7 +422,7 @@ async fn list_files_with_tags_returns_tagged_rows() {
         .expect("list after detach");
     let tagged_file2 = tagged2
         .iter()
-        .find(|f| f.file.hash == first_hash)
+        .find(|f| f.file.hash.as_deref() == Some(first_hash.as_str()))
         .expect("find file after detach");
     assert!(tagged_file2.tags.is_empty(), "no tags after detach");
 

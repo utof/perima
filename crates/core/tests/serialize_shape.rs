@@ -7,8 +7,10 @@
 //! frontend's `parseCoreError` matcher.
 
 use perima_core::{
-    AppEvent, BlakeHash, CoreError, FileEvent, FileLocationRecord, FileSize, InvalidationReason,
-    LocationStatus, MediaMetadata, MediaPath, SearchHit, Tag, VolumeId, VolumeRecord,
+    AppEvent, BatchHandle, BatchId, BlakeHash, CollisionGroup, CoreError, DeviceKind, FileEvent,
+    FileLocationRecord, FileSize, FileUuid, FullHashOutcome, FullHashUnavailableReason,
+    InvalidationReason, LocationStatus, MediaMetadata, MediaPath, SearchHit, Tag, VerifiedState,
+    VolumeId, VolumeRecord,
 };
 
 #[test]
@@ -112,7 +114,8 @@ fn volume_id_serializes_as_uuid_string() {
 #[test]
 fn file_location_record_serializes_with_string_typed_fields() {
     let record = FileLocationRecord {
-        hash: BlakeHash::from_bytes([0xabu8; 32]),
+        file_uuid: FileUuid(uuid::Uuid::nil()),
+        hash: Some(BlakeHash::from_bytes([0xabu8; 32])),
         size: FileSize(1024),
         volume_id: VolumeId(uuid::Uuid::nil()),
         relative_path: MediaPath::new("docs/spec.md"),
@@ -121,7 +124,15 @@ fn file_location_record_serializes_with_string_typed_fields() {
     };
     let v = serde_json::to_value(&record).expect("serialize FileLocationRecord");
     // Verify object shape: all expected keys present and typed correctly.
-    assert!(v["hash"].is_string(), "hash must serialize as string");
+    assert!(v["file_uuid"].is_string(), "file_uuid must be string");
+    assert_eq!(
+        v["file_uuid"],
+        serde_json::json!(uuid::Uuid::nil().to_string())
+    );
+    assert!(
+        v["hash"].is_string(),
+        "hash (Some) must serialize as string"
+    );
     assert_eq!(v["hash"].as_str().expect("hash is string").len(), 64);
     assert!(v["size"].is_number(), "size must serialize as number");
     assert_eq!(v["size"], serde_json::json!(1024));
@@ -218,13 +229,18 @@ fn tag_serializes_with_id_name_first_seen() {
 #[test]
 fn search_hit_serializes_with_blake3_hash_and_rank() {
     let hit = SearchHit {
-        blake3_hash: "abc123".to_owned(),
+        file_uuid: FileUuid(uuid::Uuid::nil()),
+        blake3_hash: Some("abc123".to_owned()),
         volume_id: "00000000-0000-0000-0000-000000000000".to_owned(),
         relative_path: "photos/img.jpg".to_owned(),
         rank: -1.5_f64,
     };
     let v = serde_json::to_value(&hit).expect("serialize SearchHit");
     assert!(v.is_object(), "SearchHit JSON must be an object");
+    assert_eq!(
+        v["file_uuid"].as_str().expect("file_uuid is string"),
+        uuid::Uuid::nil().to_string()
+    );
     assert_eq!(v["blake3_hash"], serde_json::json!("abc123"));
     assert_eq!(
         v["volume_id"],
@@ -242,6 +258,7 @@ fn file_event_created_serializes_with_kind_and_data() {
     let event = FileEvent::Created {
         path: MediaPath::new("photos/img.jpg"),
         volume: VolumeId(uuid::Uuid::nil()),
+        file_uuid: None,
     };
     let v = serde_json::to_value(&event).expect("serialize FileEvent::Created");
     assert!(v.is_object(), "FileEvent JSON must be an object");
@@ -277,6 +294,7 @@ fn app_event_file_wraps_file_event_with_kind_data() {
     let event = AppEvent::File(FileEvent::Created {
         path: MediaPath::new("photos/img.jpg"),
         volume: VolumeId(uuid::Uuid::nil()),
+        file_uuid: None,
     });
     let v: serde_json::Value = serde_json::to_value(&event).expect("serialize");
     assert_eq!(v["kind"], "File");
@@ -311,4 +329,164 @@ fn app_event_index_invalidated_serializes_with_reason() {
     let v: serde_json::Value = serde_json::to_value(&event).expect("serialize");
     assert_eq!(v["kind"], "IndexInvalidated");
     assert_eq!(v["data"]["reason"], "TagsChanged");
+}
+
+// ── Task 4 wire-shape pins (fast-hashing batch) ────────────────────────────
+// WHY: Mirror the existing pattern above for the new types added in Task 4
+// (FileUuid, dedup module, FullHashUnavailable error, VerifyProgress events).
+// One assertion per type/variant; failure points at a serde-shape regression
+// before bindings.ts drifts.
+
+#[test]
+fn file_uuid_serializes_as_transparent_uuid_string() {
+    let u = uuid::Uuid::parse_str("01933a4b-1c2d-7000-8112-233445566778").expect("parse");
+    let v = serde_json::to_value(FileUuid(u)).expect("serialize");
+    assert_eq!(v, serde_json::Value::String(u.to_string()));
+}
+
+#[test]
+fn batch_id_serializes_as_transparent_uuid_string() {
+    let u = uuid::Uuid::parse_str("01933a4b-1c2d-7111-8222-334455667788").expect("parse");
+    let v = serde_json::to_value(BatchId(u)).expect("serialize");
+    assert_eq!(v, serde_json::Value::String(u.to_string()));
+}
+
+#[test]
+fn batch_handle_serializes_with_batch_id_and_total() {
+    let u = uuid::Uuid::nil();
+    let h = BatchHandle {
+        batch_id: BatchId(u),
+        total: 42,
+    };
+    let v = serde_json::to_value(&h).expect("serialize");
+    assert_eq!(v["batch_id"], u.to_string());
+    assert_eq!(v["total"], 42);
+}
+
+#[test]
+fn device_kind_serializes_as_external_tag_string() {
+    assert_eq!(
+        serde_json::to_value(DeviceKind::Hdd).expect("serialize"),
+        "Hdd"
+    );
+    assert_eq!(
+        serde_json::to_value(DeviceKind::Ssd).expect("serialize"),
+        "Ssd"
+    );
+    assert_eq!(
+        serde_json::to_value(DeviceKind::Unknown).expect("serialize"),
+        "Unknown"
+    );
+}
+
+#[test]
+fn verified_state_serializes_as_external_tag_string() {
+    assert_eq!(
+        serde_json::to_value(VerifiedState::Unverified).expect("serialize"),
+        "Unverified"
+    );
+    assert_eq!(
+        serde_json::to_value(VerifiedState::VerifiedDuplicate).expect("serialize"),
+        "VerifiedDuplicate"
+    );
+}
+
+#[test]
+fn collision_group_serializes_with_quick_hash_files_and_state() {
+    let g = CollisionGroup {
+        quick_hash: BlakeHash::from_bytes([0u8; 32]),
+        files: vec![],
+        verified_state: VerifiedState::Unverified,
+    };
+    let v = serde_json::to_value(&g).expect("serialize");
+    assert_eq!(
+        v["quick_hash"]
+            .as_str()
+            .expect("quick_hash is string")
+            .len(),
+        64
+    );
+    assert!(v["files"].is_array());
+    assert_eq!(v["verified_state"], "Unverified");
+}
+
+#[test]
+fn full_hash_outcome_computed_serializes_with_outcome_and_data() {
+    let u = uuid::Uuid::nil();
+    let o = FullHashOutcome::Computed {
+        file_uuid: FileUuid(u),
+        hash: BlakeHash::from_bytes([0u8; 32]),
+    };
+    let v = serde_json::to_value(&o).expect("serialize");
+    assert_eq!(v["outcome"], "Computed");
+    assert_eq!(v["data"]["file_uuid"], u.to_string());
+    assert_eq!(
+        v["data"]["hash"].as_str().expect("hash is string").len(),
+        64
+    );
+}
+
+#[test]
+fn full_hash_unavailable_reason_serializes_with_kind_tag() {
+    let r = FullHashUnavailableReason::NotMounted {
+        volume_id: "vol-1".into(),
+    };
+    let v = serde_json::to_value(&r).expect("serialize");
+    assert_eq!(v["kind"], "NotMounted");
+    assert_eq!(v["volume_id"], "vol-1");
+
+    let r = FullHashUnavailableReason::NotComputed;
+    let v = serde_json::to_value(&r).expect("serialize");
+    assert_eq!(v["kind"], "NotComputed");
+}
+
+#[test]
+fn core_error_full_hash_unavailable_serializes_with_kind_and_data_reason() {
+    let err = CoreError::FullHashUnavailable {
+        reason: FullHashUnavailableReason::NotComputed,
+    };
+    let v = serde_json::to_value(&err).expect("serialize");
+    assert_eq!(v["kind"], "FullHashUnavailable");
+    assert_eq!(v["data"]["reason"]["kind"], "NotComputed");
+}
+
+#[test]
+fn app_event_verify_progress_serializes_with_kind_and_data() {
+    let bid = uuid::Uuid::nil();
+    let event = AppEvent::VerifyProgress {
+        batch_id: BatchId(bid),
+        files_done: 1,
+        files_total: 3,
+        latest_outcome: FullHashOutcome::Computed {
+            file_uuid: FileUuid(uuid::Uuid::nil()),
+            hash: BlakeHash::from_bytes([0u8; 32]),
+        },
+    };
+    let v = serde_json::to_value(&event).expect("serialize");
+    assert_eq!(v["kind"], "VerifyProgress");
+    assert_eq!(v["data"]["batch_id"], bid.to_string());
+    assert_eq!(v["data"]["files_done"], 1);
+    assert_eq!(v["data"]["files_total"], 3);
+    assert_eq!(v["data"]["latest_outcome"]["outcome"], "Computed");
+}
+
+#[test]
+fn app_event_verify_complete_serializes_with_kind_and_data() {
+    let bid = uuid::Uuid::nil();
+    let event = AppEvent::VerifyComplete {
+        batch_id: BatchId(bid),
+    };
+    let v = serde_json::to_value(&event).expect("serialize");
+    assert_eq!(v["kind"], "VerifyComplete");
+    assert_eq!(v["data"]["batch_id"], bid.to_string());
+}
+
+#[test]
+fn invalidation_reason_collisions_changed_serializes_as_string() {
+    let event = AppEvent::IndexInvalidated {
+        reason: InvalidationReason::CollisionsChanged,
+    };
+    let v = serde_json::to_value(&event).expect("serialize");
+    assert_eq!(v["kind"], "IndexInvalidated");
+    assert_eq!(v["data"]["reason"], "CollisionsChanged");
 }

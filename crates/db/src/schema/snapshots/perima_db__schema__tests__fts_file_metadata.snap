@@ -1,8 +1,8 @@
 ---
 source: crates/db/src/schema/mod.rs
-assertion_line: 152
 expression: "render_for_source(\"file_metadata\")"
 ---
+
 
 
 
@@ -83,17 +83,17 @@ CREATE TRIGGER search_after_metadata_insert
 AFTER INSERT ON file_metadata
 WHEN NEW.deleted_at IS NULL
 BEGIN
-INSERT OR IGNORE INTO search_content (blake3_hash, filename, relative_path)
-    SELECT NEW.blake3_hash, fl.relative_path, fl.relative_path
+INSERT OR IGNORE INTO search_content (file_uuid, blake3_hash, filename, relative_path)
+    SELECT NEW.file_uuid, fl.blake3_hash, fl.relative_path, fl.relative_path
     FROM file_locations fl
-    WHERE fl.blake3_hash = NEW.blake3_hash AND fl.deleted_at IS NULL
+    WHERE fl.file_uuid = NEW.file_uuid AND fl.deleted_at IS NULL
     ORDER BY fl.first_seen ASC, fl.id ASC LIMIT 1;
 
     UPDATE search_content
     SET mime_type    = COALESCE(NEW.mime_type, ''),
         camera_model = COALESCE(NEW.camera_model, ''),
         captured_at  = COALESCE(NEW.captured_at, '')
-    WHERE blake3_hash = NEW.blake3_hash;
+    WHERE file_uuid = NEW.file_uuid;
 END;
 
 
@@ -110,5 +110,5 @@ UPDATE search_content
         captured_at  = CASE WHEN NEW.deleted_at IS NULL
                             THEN COALESCE(NEW.captured_at, '')
                             ELSE '' END
-    WHERE blake3_hash = NEW.blake3_hash;
+    WHERE file_uuid = NEW.file_uuid;
 END;

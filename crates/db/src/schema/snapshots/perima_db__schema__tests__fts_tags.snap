@@ -1,8 +1,8 @@
 ---
 source: crates/db/src/schema/mod.rs
-assertion_line: 162
 expression: "render_for_source(\"tags\")"
 ---
+
 
 
 
@@ -88,12 +88,12 @@ UPDATE search_content
     SET tags = COALESCE((
         SELECT GROUP_CONCAT(t.name, ' ')
         FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
-        WHERE ft.blake3_hash = search_content.blake3_hash
+        WHERE ft.file_uuid = search_content.file_uuid
           AND ft.deleted_at IS NULL
           AND t.deleted_at IS NULL
     ), '')
-    WHERE blake3_hash IN (
-        SELECT ft.blake3_hash FROM file_tags ft
+    WHERE file_uuid IN (
+        SELECT ft.file_uuid FROM file_tags ft
         WHERE ft.tag_id = NEW.id AND ft.deleted_at IS NULL
     );
 END;
@@ -107,12 +107,12 @@ UPDATE search_content
     SET tags = COALESCE((
         SELECT GROUP_CONCAT(t.name, ' ')
         FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
-        WHERE ft.blake3_hash = search_content.blake3_hash
+        WHERE ft.file_uuid = search_content.file_uuid
           AND ft.deleted_at IS NULL
           AND t.deleted_at IS NULL
     ), '')
-    WHERE blake3_hash IN (
-        SELECT ft.blake3_hash FROM file_tags ft
+    WHERE file_uuid IN (
+        SELECT ft.file_uuid FROM file_tags ft
         WHERE ft.tag_id = NEW.id AND ft.deleted_at IS NULL
     );
 END;
@@ -125,12 +125,12 @@ UPDATE search_content
     SET tags = COALESCE((
         SELECT GROUP_CONCAT(t.name, ' ')
         FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
-        WHERE ft.blake3_hash = search_content.blake3_hash
+        WHERE ft.file_uuid = search_content.file_uuid
           AND ft.deleted_at IS NULL
           AND t.deleted_at IS NULL
     ), '')
-    WHERE blake3_hash IN (
-        SELECT ft.blake3_hash FROM file_tags ft
+    WHERE file_uuid IN (
+        SELECT ft.file_uuid FROM file_tags ft
         WHERE ft.tag_id = OLD.id AND ft.deleted_at IS NULL
     );
 END;

@@ -8,12 +8,12 @@
 # merge during slice 1 (continue-on-error swallows non-zero exit).
 
 name: mutants
-# WHY workflow_dispatch added (2026-04-25): allows on-demand "real deal"
-# workspace-wide mutation runs (no --in-diff filter) — much longer than
-# per-PR mode (HOURS, not 1-2 minutes). The per-PR `pull_request:` trigger
-# stays as-is; the run-step branches on github.event_name to choose mode.
+# WHY workflow_dispatch only (2026-04-30): the `pull_request:` trigger was
+# removed at user request. Mutation testing is observability-only and was
+# adding noise to per-PR check rollups without blocking merges (already
+# `continue-on-error`). Manual dispatch retains the workspace-wide capability
+# for periodic baseline-collection runs.
 on:
-  pull_request:
   workflow_dispatch:
 
 permissions:

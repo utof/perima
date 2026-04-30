@@ -4,6 +4,19 @@ use crate::{
     BlakeHash, CoreError, DeviceId, FileLocationRecord, MediaMetadata, UpsertOutcome, VolumeId,
 };
 
+/// A `(location, metadata, quick_hash)` row returned by
+/// [`MetadataRepository::list_with_metadata`].
+///
+/// WHY type alias: `clippy::type_complexity` fires on the 3-tuple when it
+/// appears inline in the trait method signature; a named alias both satisfies
+/// the lint and documents the shape in one place.
+///
+/// `quick_hash` is `files.quick_hash` as a lowercase hex string, or `None`
+/// if the backfill worker has not yet run for this row. The frontend uses
+/// equality with `hash` to detect placeholder rows
+/// (`hash == quick_hash` → full hash not yet computed).
+pub type FileWithMetadataRow = (FileLocationRecord, Option<MediaMetadata>, Option<String>);
+
 /// Persistence boundary for `file_metadata`.
 ///
 /// WHY `&self` everywhere (not `&mut self` like `FileRepository`):
@@ -30,13 +43,19 @@ pub trait MetadataRepository: Send + Sync {
     /// Adapter-level failures surface as `CoreError::Internal`.
     fn find_by_hash(&self, hash: &BlakeHash) -> Result<Option<MediaMetadata>, CoreError>;
 
-    /// List `(file_location, metadata)` pairs up to `limit`, optionally
-    /// filtered by `volume`.
+    /// List `(file_location, metadata, quick_hash)` triples up to `limit`,
+    /// optionally filtered by `volume`.
     ///
     /// `None` metadata means the extractor has not yet run for that
     /// file (the scanner enqueued it but the worker is behind) or
     /// extraction failed — callers should treat it as "pending", not
     /// "absent".
+    ///
+    /// The third element is `files.quick_hash` as a lowercase hex string,
+    /// or `None` if the backfill worker has not yet run for this row.
+    /// The frontend uses it to detect placeholder rows: when
+    /// `location.hash == quick_hash` the file has a quick-hash-only
+    /// identity and the full canonical hash has not been computed yet.
     ///
     /// # Errors
     /// Adapter-level failures surface as `CoreError::Internal`.
@@ -44,7 +63,7 @@ pub trait MetadataRepository: Send + Sync {
         &self,
         limit: usize,
         volume: Option<VolumeId>,
-    ) -> Result<Vec<(FileLocationRecord, Option<MediaMetadata>)>, CoreError>;
+    ) -> Result<Vec<FileWithMetadataRow>, CoreError>;
 
     /// Update the thumbnail columns on the `file_metadata` row for
     /// `hash`. Returns the number of rows updated (0 if no metadata row

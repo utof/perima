@@ -18,7 +18,7 @@
 //! There is no equivalent flat type in `perima-core`. The same rationale
 //! applies to `FileWithTagsPayload`.
 
-use perima_core::{FileLocationRecord, MediaMetadata, Tag};
+use perima_core::{FileLocationRecord, FileUuid, MediaMetadata, Tag};
 use serde::Serialize;
 
 /// Flattened `(FileLocationRecord, Option<MediaMetadata>)` pair for the
@@ -29,11 +29,28 @@ use serde::Serialize;
 /// single key. Nesting would force every cell to traverse an optional
 /// subobject just to discover it is absent. Flat fields with `None`
 /// columns match SQL's native shape and the existing encoding.
+///
+/// WHY `file_uuid` non-nullable + `hash` nullable (Task 11, spec §4.8):
+/// `file_uuid` is the stable surrogate present on every `files` row from V011
+/// on, so React keys + IPC lookups use it. `hash` (full BLAKE3) is `None` for
+/// pending files (no `full_hash` computed yet).
 #[derive(Debug, Clone, Serialize, specta::Type)]
 pub struct FileWithMetadataPayload {
     // File-location fields (mirrors `FileLocationRecord`).
-    /// BLAKE3-256 content hash as lowercase hex.
-    pub hash: String,
+    /// Stable surrogate identifier for the file row (`UUIDv7`).
+    pub file_uuid: FileUuid,
+    /// BLAKE3-256 content hash as lowercase hex; `None` until `full_hash`
+    /// computes for this file.
+    pub hash: Option<String>,
+    /// Quick-hash value as lowercase hex, or `None` if the backfill worker
+    /// has not yet run for this row.
+    ///
+    /// WHY exposed here: pre-V012 `blake3_hash` is `NOT NULL` — the scan
+    /// path stores `quick_hash` there as a placeholder until
+    /// `compute_full_hash` promotes the real hash. So `hash == null` never
+    /// fires for any file today. The frontend detects placeholder rows via
+    /// `hash === quick_hash` (same value = placeholder, different = promoted).
+    pub quick_hash: Option<String>,
     /// File size in bytes.
     pub size: u64,
     /// Volume UUID.
@@ -92,8 +109,10 @@ pub struct FileWithTagsPayload {
     pub tags: Vec<Tag>,
 }
 
-impl From<(FileLocationRecord, Option<MediaMetadata>)> for FileWithMetadataPayload {
-    fn from((loc, meta): (FileLocationRecord, Option<MediaMetadata>)) -> Self {
+impl From<(FileLocationRecord, Option<MediaMetadata>, Option<String>)> for FileWithMetadataPayload {
+    fn from(
+        (loc, meta, quick_hash): (FileLocationRecord, Option<MediaMetadata>, Option<String>),
+    ) -> Self {
         // WHY unzip via `meta.map(...)`: the nine optional metadata
         // fields each need independent `None` defaults when the
         // metadata row is absent. Chained `.map(|m| m.field.clone())`
@@ -131,7 +150,9 @@ impl From<(FileLocationRecord, Option<MediaMetadata>)> for FileWithMetadataPaylo
             ),
         };
         Self {
-            hash: loc.hash.to_hex(),
+            file_uuid: loc.file_uuid,
+            hash: loc.hash.map(|h| h.to_hex()),
+            quick_hash,
             size: loc.size.0,
             volume_id: loc.volume_id.0.to_string(),
             relative_path: loc.relative_path.as_str().to_owned(),

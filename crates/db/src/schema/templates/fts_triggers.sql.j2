@@ -24,13 +24,15 @@
 
 {# === Shared aggregation macros ============================================ #}
 
-{# Tag-name aggregation for a given hash expression. Both deleted_at
-   filters are MANDATORY -- this is the V008 #1 fix encoded once. #}
-{% macro tags_agg(blake_expr) -%}
+{# Tag-name aggregation for a given file_uuid expression. Both deleted_at
+   filters are MANDATORY -- this is the V008 #1 fix encoded once. The
+   v0.6.x pivot from blake3_hash to file_uuid (spec §4.1.4) lets pending
+   files (no full_hash yet) participate in tag aggregation immediately. #}
+{% macro tags_agg(file_uuid_expr) -%}
 COALESCE((
             SELECT GROUP_CONCAT(t.name, ' ')
             FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
-            WHERE ft.blake3_hash = {{ blake_expr }}
+            WHERE ft.file_uuid = {{ file_uuid_expr }}
               AND ft.deleted_at IS NULL
               AND t.deleted_at IS NULL
         ), '')
@@ -38,50 +40,65 @@ COALESCE((
 
 {# Single-column lookup from file_metadata, filtered live. The COALESCE
    collapses both NULL-row (no metadata) and NULL-column cases to ''. #}
-{% macro metadata_col(col, blake_expr) -%}
+{% macro metadata_col(col, file_uuid_expr) -%}
 COALESCE((SELECT {{ col }} FROM file_metadata
-                                  WHERE blake3_hash = {{ blake_expr }}
+                                  WHERE file_uuid = {{ file_uuid_expr }}
                                     AND deleted_at IS NULL), '')
 {%- endmacro %}
 
-{# Representative path for a given hash expression: the first-seen
-   surviving location row (deterministic via (first_seen ASC, id ASC)). #}
-{% macro representative_path(blake_expr) -%}
+{# Representative path for a given file_uuid expression: the first-seen
+   surviving location row (deterministic via (first_seen ASC, id ASC)).
+   Multiple file_locations rows can share the same file_uuid (when they
+   share blake3_hash post-V011 backfill); the deterministic ordering
+   still picks one canonical representative. #}
+{% macro representative_path(file_uuid_expr) -%}
 (SELECT fl.relative_path FROM file_locations fl
-                         WHERE fl.blake3_hash = {{ blake_expr }} AND fl.deleted_at IS NULL
+                         WHERE fl.file_uuid = {{ file_uuid_expr }} AND fl.deleted_at IS NULL
                          ORDER BY fl.first_seen ASC, fl.id ASC LIMIT 1)
 {%- endmacro %}
 
 {# Seed an empty search_content row with the representative path columns
    (filename + relative_path) only. Metadata/tags columns get refreshed
-   by a follow-up UPDATE in the calling trigger body. #}
-{% macro seed_search_content(blake_expr) -%}
-INSERT OR IGNORE INTO search_content (blake3_hash, filename, relative_path)
-    SELECT {{ blake_expr }}, fl.relative_path, fl.relative_path
+   by a follow-up UPDATE in the calling trigger body. The row carries
+   BOTH file_uuid (the new join key) AND blake3_hash (preserved per spec
+   §4.1.3 for back-compat); blake3_hash is sourced from the canonical
+   file_locations row to stay consistent with the rest of the picked path. #}
+{% macro seed_search_content(file_uuid_expr) -%}
+INSERT OR IGNORE INTO search_content (file_uuid, blake3_hash, filename, relative_path)
+    SELECT {{ file_uuid_expr }}, fl.blake3_hash, fl.relative_path, fl.relative_path
     FROM file_locations fl
-    WHERE fl.blake3_hash = {{ blake_expr }} AND fl.deleted_at IS NULL
+    WHERE fl.file_uuid = {{ file_uuid_expr }} AND fl.deleted_at IS NULL
     ORDER BY fl.first_seen ASC, fl.id ASC LIMIT 1;
 {%- endmacro %}
 
-{# Refresh the path/metadata/tags columns of an already-seeded
+{# Refresh the path/metadata/tags + blake3_hash columns of an already-seeded
    search_content row, reading every value from joined live state. Used
    by hash-change-seed and location-restore. NEVER pass NEW.relative_path
    here; per V008 #2 the representative's path must come from a fresh
-   live-state lookup, not from the row that fired the trigger. #}
-{% macro refresh_full_from_live(blake_expr) -%}
+   live-state lookup, not from the row that fired the trigger.
+
+   WHY blake3_hash refresh: post-Task-3 pivot the search_content row is
+   keyed by file_uuid, so a hash change on file_locations leaves an
+   existing search_content row in place (UNIQUE on file_uuid). The OLD
+   blake3_hash value in search_content goes stale unless we explicitly
+   refresh it from the live representative location's blake3_hash. #}
+{% macro refresh_full_from_live(file_uuid_expr) -%}
 UPDATE search_content
-    SET filename      = {{ representative_path(blake_expr) }},
-        relative_path = {{ representative_path(blake_expr) }},
-        mime_type     = {{ metadata_col('mime_type', blake_expr) }},
-        camera_model  = {{ metadata_col('camera_model', blake_expr) }},
-        captured_at   = {{ metadata_col('captured_at', blake_expr) }},
-        tags          = {{ tags_agg(blake_expr) }}
-    WHERE blake3_hash = {{ blake_expr }};
+    SET blake3_hash   = (SELECT fl.blake3_hash FROM file_locations fl
+                         WHERE fl.file_uuid = {{ file_uuid_expr }} AND fl.deleted_at IS NULL
+                         ORDER BY fl.first_seen ASC, fl.id ASC LIMIT 1),
+        filename      = {{ representative_path(file_uuid_expr) }},
+        relative_path = {{ representative_path(file_uuid_expr) }},
+        mime_type     = {{ metadata_col('mime_type', file_uuid_expr) }},
+        camera_model  = {{ metadata_col('camera_model', file_uuid_expr) }},
+        captured_at   = {{ metadata_col('captured_at', file_uuid_expr) }},
+        tags          = {{ tags_agg(file_uuid_expr) }}
+    WHERE file_uuid = {{ file_uuid_expr }};
 {%- endmacro %}
 
-{# Refresh the tags column for every search_content row whose hash is
+{# Refresh the tags column for every search_content row whose file_uuid is
    referenced by a non-soft-deleted file_tags entry pointing at `tag_id_expr`.
-   Correlated subquery uses search_content.blake3_hash, NOT NEW/OLD --
+   Correlated subquery uses search_content.file_uuid, NOT NEW/OLD --
    intentional, so the same body works for tag rename + tag soft-delete +
    tag restore + tag hard-delete. #}
 {% macro refresh_tags_for_holders(tag_id_expr) -%}
@@ -89,12 +106,12 @@ UPDATE search_content
     SET tags = COALESCE((
         SELECT GROUP_CONCAT(t.name, ' ')
         FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
-        WHERE ft.blake3_hash = search_content.blake3_hash
+        WHERE ft.file_uuid = search_content.file_uuid
           AND ft.deleted_at IS NULL
           AND t.deleted_at IS NULL
     ), '')
-    WHERE blake3_hash IN (
-        SELECT ft.blake3_hash FROM file_tags ft
+    WHERE file_uuid IN (
+        SELECT ft.file_uuid FROM file_tags ft
         WHERE ft.tag_id = {{ tag_id_expr }} AND ft.deleted_at IS NULL
     );
 {%- endmacro %}
@@ -136,40 +153,47 @@ UPDATE search_content
 
 {% macro body_file_locations_insert() -%}
     INSERT OR IGNORE INTO search_content
-        (blake3_hash, filename, relative_path, mime_type, camera_model, captured_at, tags)
-    SELECT NEW.blake3_hash,
+        (file_uuid, blake3_hash, filename, relative_path, mime_type, camera_model, captured_at, tags)
+    SELECT NEW.file_uuid,
+           NEW.blake3_hash,
            NEW.relative_path,
            NEW.relative_path,
            COALESCE(m.mime_type, ''),
            COALESCE(m.camera_model, ''),
            COALESCE(m.captured_at, ''),
-           {{ tags_agg('NEW.blake3_hash') }}
+           {{ tags_agg('NEW.file_uuid') }}
     FROM (SELECT NULL) placeholder
-    LEFT JOIN file_metadata m ON m.blake3_hash = NEW.blake3_hash
+    LEFT JOIN file_metadata m ON m.file_uuid = NEW.file_uuid
                               AND m.deleted_at IS NULL;
 {%- endmacro %}
 
-{% macro body_location_hash_change_retire() -%}
-    DELETE FROM search_content
-    WHERE blake3_hash = OLD.blake3_hash
-      AND NOT EXISTS (
-          SELECT 1 FROM file_locations fl
-          WHERE fl.blake3_hash = OLD.blake3_hash
-            AND fl.deleted_at IS NULL
-            AND fl.id != NEW.id
-      );
-{%- endmacro %}
+{# Hash-change seed (post-Task-3, single-trigger replacement of V008's
+   retire + seed pair). file_uuid is stable across blake3_hash changes, so
+   the search_content row keyed by file_uuid is the SAME row before and
+   after the change -- it just needs its `blake3_hash` + path columns
+   refreshed from live state. seed_search_content's INSERT OR IGNORE is
+   a no-op when the row already exists; refresh_full_from_live then
+   updates every aggregated column to match the new live state.
 
+   WHY a single trigger: combining retire + seed in two AFTER triggers on
+   the same UPDATE OF blake3_hash event has a SQLite quirk where the
+   second trigger fails to fire after the first removes and re-inserts
+   the same UNIQUE-keyed row in the same statement scope (reproduced in
+   `crates/db/tests/fts_codegen_round_trip.rs::fts_consistent_under_hash_change_and_restore`
+   pre-merge). Pre-pivot, retire targeted the OLD-hash row and seed
+   inserted the NEW-hash row -- different UNIQUE keys, no quirk.
+   Post-pivot they touch the same file_uuid row, so we collapse to one
+   trigger. #}
 {% macro body_location_hash_change_seed() -%}
-    {{ seed_search_content('NEW.blake3_hash') }}
+    {{ seed_search_content('NEW.file_uuid') }}
 
-    {{ refresh_full_from_live('NEW.blake3_hash') }}
+    {{ refresh_full_from_live('NEW.file_uuid') }}
 {%- endmacro %}
 
 {# RenameRepresentative is the ONE body that intentionally consumes
    NEW.relative_path directly rather than via representative_path().
    The trigger's WHEN-guard already asserts NEW IS the representative
-   (NEW.id = first-seen surviving location for NEW.blake3_hash), so
+   (NEW.id = first-seen surviving location for NEW.file_uuid post-pivot), so
    NEW.* IS the live state by definition. DO NOT "fix" this to use
    representative_path() -- that would just round-trip the same value
    through a redundant subquery. See V007:206-223 + V008 commentary. #}
@@ -177,39 +201,39 @@ UPDATE search_content
     UPDATE search_content
     SET relative_path = NEW.relative_path,
         filename      = NEW.relative_path
-    WHERE blake3_hash = NEW.blake3_hash;
+    WHERE file_uuid = NEW.file_uuid;
 {%- endmacro %}
 
 {% macro body_location_soft_delete() -%}
     UPDATE search_content SET
-        relative_path = COALESCE({{ representative_path('OLD.blake3_hash') }}, relative_path),
-        filename      = COALESCE({{ representative_path('OLD.blake3_hash') }}, filename)
-    WHERE blake3_hash = OLD.blake3_hash
+        relative_path = COALESCE({{ representative_path('OLD.file_uuid') }}, relative_path),
+        filename      = COALESCE({{ representative_path('OLD.file_uuid') }}, filename)
+    WHERE file_uuid = OLD.file_uuid
       AND EXISTS (SELECT 1 FROM file_locations
-                  WHERE blake3_hash = OLD.blake3_hash AND deleted_at IS NULL);
+                  WHERE file_uuid = OLD.file_uuid AND deleted_at IS NULL);
 
     DELETE FROM search_content
-    WHERE blake3_hash = OLD.blake3_hash
+    WHERE file_uuid = OLD.file_uuid
       AND NOT EXISTS (SELECT 1 FROM file_locations
-                      WHERE blake3_hash = OLD.blake3_hash AND deleted_at IS NULL);
+                      WHERE file_uuid = OLD.file_uuid AND deleted_at IS NULL);
 {%- endmacro %}
 
 {% macro body_location_restore() -%}
-    {{ seed_search_content('NEW.blake3_hash') }}
+    {{ seed_search_content('NEW.file_uuid') }}
 
-    {{ refresh_full_from_live('NEW.blake3_hash') }}
+    {{ refresh_full_from_live('NEW.file_uuid') }}
 {%- endmacro %}
 
 {# file_metadata triggers. #}
 
 {% macro body_metadata_insert() -%}
-    {{ seed_search_content('NEW.blake3_hash') }}
+    {{ seed_search_content('NEW.file_uuid') }}
 
     UPDATE search_content
     SET mime_type    = COALESCE(NEW.mime_type, ''),
         camera_model = COALESCE(NEW.camera_model, ''),
         captured_at  = COALESCE(NEW.captured_at, '')
-    WHERE blake3_hash = NEW.blake3_hash;
+    WHERE file_uuid = NEW.file_uuid;
 {%- endmacro %}
 
 {% macro body_metadata_update() -%}
@@ -223,23 +247,23 @@ UPDATE search_content
         captured_at  = CASE WHEN NEW.deleted_at IS NULL
                             THEN COALESCE(NEW.captured_at, '')
                             ELSE '' END
-    WHERE blake3_hash = NEW.blake3_hash;
+    WHERE file_uuid = NEW.file_uuid;
 {%- endmacro %}
 
 {# file_tags triggers. #}
 
 {% macro body_file_tags_insert() -%}
-    {{ seed_search_content('NEW.blake3_hash') }}
+    {{ seed_search_content('NEW.file_uuid') }}
 
     UPDATE search_content
-    SET tags = {{ tags_agg('NEW.blake3_hash') }}
-    WHERE blake3_hash = NEW.blake3_hash;
+    SET tags = {{ tags_agg('NEW.file_uuid') }}
+    WHERE file_uuid = NEW.file_uuid;
 {%- endmacro %}
 
 {% macro body_file_tags_update() -%}
     UPDATE search_content
-    SET tags = {{ tags_agg('NEW.blake3_hash') }}
-    WHERE blake3_hash = NEW.blake3_hash;
+    SET tags = {{ tags_agg('NEW.file_uuid') }}
+    WHERE file_uuid = NEW.file_uuid;
 {%- endmacro %}
 
 {# tags triggers. #}
@@ -290,8 +314,6 @@ BEGIN
 {{ body_search_content_after_delete() }}
 {%- elif agg.body == "FileLocationsInsert" %}
 {{ body_file_locations_insert() }}
-{%- elif agg.body == "LocationHashChangeRetire" %}
-{{ body_location_hash_change_retire() }}
 {%- elif agg.body == "LocationHashChangeSeed" %}
 {{ body_location_hash_change_seed() }}
 {%- elif agg.body == "RenameRepresentative" %}

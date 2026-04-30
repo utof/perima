@@ -11,8 +11,14 @@ import type { FileWithTagsPayload } from "../../bindings";
  * `tags[].id`) take real values; everything else is a neutral default.
  */
 export function file(hash: string, tagIds: string[]): FileWithTagsPayload {
+  // WHY (Task 11): `file_uuid` is the stable surrogate (always present);
+  // `hash` is `string | null` post-spec-§4.8. Tests pass a non-null hash by
+  // default so the existing assertions still hold; new pending-file tests
+  // construct payloads inline to exercise the null branch.
   return {
+    file_uuid: `uuid-${hash}`,
     hash,
+    quick_hash: null,
     size: 0,
     volume_id: "vol",
     relative_path: `${hash}.jpg`,

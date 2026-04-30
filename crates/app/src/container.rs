@@ -22,14 +22,14 @@
 use std::sync::Arc;
 
 use perima_core::{
-    FileRepository, HashService, MetadataRepository, Scanner, SearchRepository, TagRepository,
-    VolumeRepository, events::EventBus,
+    FileRepository, HashService, IdentityCacheRepository, MetadataRepository, Scanner,
+    SearchRepository, TagRepository, VolumeRepository, events::EventBus,
 };
 use perima_media::ThumbnailGenerator;
 
 use crate::{
-    Bus, MetadataUseCase, ScanUseCase, SearchUseCase, TagUseCase, VolumeUseCase,
-    events::EventHandler,
+    Bus, ComputeFullHashUseCase, DedupUseCase, MetadataUseCase, ScanUseCase, SearchUseCase,
+    TagUseCase, VolumeUseCase, events::EventHandler,
 };
 
 // ---------------------------------------------------------------------------
@@ -58,6 +58,12 @@ pub struct AppDeps {
     pub metadata: Arc<dyn MetadataRepository>,
     /// Search repository port (FTS5-backed in the live adapter).
     pub search: Arc<dyn SearchRepository>,
+    /// Tier-0 identity-cache repository port (device-local; stores
+    /// `quick_hash` and optional `full_hash` keyed on the tuple
+    /// `(device, volume, fs_file_id, size, mtime_ns)`). Wired into
+    /// `ScanUseCase` so re-scans skip rehashing unchanged files
+    /// (spec §4.3 — the v0.6.x perf landing).
+    pub identity_cache: Arc<dyn IdentityCacheRepository>,
     /// Content-hash service port.
     pub hasher: Arc<dyn HashService>,
     /// Filesystem walker port.
@@ -99,6 +105,10 @@ pub struct AppContainer {
     pub volume: Arc<VolumeUseCase>,
     /// [`MetadataUseCase`] — list files + attached metadata.
     pub metadata: Arc<MetadataUseCase>,
+    /// [`ComputeFullHashUseCase`] — on-demand full-hash compute (single + batch).
+    pub compute_full_hash: Arc<ComputeFullHashUseCase>,
+    /// [`DedupUseCase`] — quick-hash collision listing + verified-distinct flips.
+    pub dedup: Arc<DedupUseCase>,
     /// Shared event bus — same `Arc` used inside every `UseCase`.
     pub events: Arc<dyn EventBus>,
     /// Direct handle to the volume repository port.
@@ -151,6 +161,13 @@ pub struct AppContainer {
     /// this single adapter handle. Same pattern as `volumes`, `tags`,
     /// `metadata_repo` above.
     pub files_repo: Arc<dyn FileRepository>,
+    /// Direct handle to the content-hash service port.
+    ///
+    /// WHY exposed (Task 8 backfill): the backfill worker needs the same
+    /// `Arc<dyn HashService>` that `ScanUseCase` holds internally so it
+    /// can compute `quick_hash_prefix_suffix` without re-constructing a
+    /// `Blake3Service`. The field is a refcount clone — zero allocation.
+    pub hasher: Arc<dyn HashService>,
 }
 
 impl std::fmt::Debug for AppContainer {
@@ -210,6 +227,7 @@ impl AppContainer {
             Arc::clone(&deps.files),
             Arc::clone(&deps.volumes),
             Arc::clone(&deps.metadata),
+            Arc::clone(&deps.identity_cache),
             Arc::clone(&deps.scanner),
             Arc::clone(&deps.hasher),
             Arc::clone(&deps.thumbnailer),
@@ -233,6 +251,15 @@ impl AppContainer {
             Arc::clone(&deps.metadata),
             Arc::clone(&events),
         ));
+        let compute_full_hash = Arc::new(ComputeFullHashUseCase::new(
+            Arc::clone(&deps.hasher),
+            Arc::clone(&deps.files),
+            Arc::clone(&events),
+        ));
+        let dedup = Arc::new(DedupUseCase::new(
+            Arc::clone(&deps.files),
+            Arc::clone(&events),
+        ));
 
         // WHY clone: the same `Arc<dyn VolumeRepository>` lives inside
         // `VolumeUseCase` (above) AND on the container field so shell
@@ -253,6 +280,10 @@ impl AppContainer {
         // `FileRepository::list_file_locations`. Not exposed by any
         // UseCase. Arc::clone is refcount-only.
         let files_repo = Arc::clone(&deps.files);
+        // WHY same treatment for hasher: the backfill worker (Task 8)
+        // needs `quick_hash_prefix_suffix` without re-constructing
+        // a Blake3Service. Arc::clone is refcount-only.
+        let hasher = Arc::clone(&deps.hasher);
 
         Arc::new(Self {
             scan,
@@ -260,11 +291,14 @@ impl AppContainer {
             tag,
             volume,
             metadata,
+            compute_full_hash,
+            dedup,
             events,
             volumes,
             tags,
             metadata_repo,
             files_repo,
+            hasher,
         })
     }
 }
@@ -281,8 +315,9 @@ mod tests {
 
     use perima_core::{AppEvent, FileEvent, MediaPath, VolumeId};
     use perima_db::{
-        ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository,
-        SqliteTagRepository, SqliteVolumeRepository, SqliteWriter, SqliteWriterHandle,
+        ReadPool, SqliteFileRepository, SqliteIdentityCacheRepository, SqliteMetadataRepository,
+        SqliteSearchRepository, SqliteTagRepository, SqliteVolumeRepository, SqliteWriter,
+        SqliteWriterHandle,
     };
     use perima_fs::WalkdirScanner;
     use perima_hash::Blake3Service;
@@ -313,6 +348,7 @@ mod tests {
         AppEvent::File(FileEvent::Created {
             path: MediaPath::new("test-fanout.bin"),
             volume: VolumeId::new(),
+            file_uuid: None,
         })
     }
 
@@ -349,7 +385,9 @@ mod tests {
             reads.clone(),
         ));
         let search: Arc<dyn SearchRepository> =
-            Arc::new(SqliteSearchRepository::new(writer.sender(), reads));
+            Arc::new(SqliteSearchRepository::new(writer.sender(), reads.clone()));
+        let identity_cache: Arc<dyn perima_core::IdentityCacheRepository> =
+            Arc::new(SqliteIdentityCacheRepository::new(writer.sender(), reads));
         let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
         let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());
         let thumbnailer: Arc<ThumbnailGenerator> = Arc::new(ThumbnailGenerator::disabled());
@@ -362,6 +400,7 @@ mod tests {
                 tags,
                 metadata,
                 search,
+                identity_cache,
                 hasher,
                 scanner,
                 thumbnailer,
@@ -392,7 +431,8 @@ mod tests {
         // The container's `events` field is the single shared `Bus`;
         // each UseCase receives an `Arc::clone` of it. After construction,
         // the strong count on `container.events` reflects the shared
-        // ownership: 1 (container) + 5 (one per UseCase) = 6.
+        // ownership: 1 (container) + 7 (one per UseCase: scan, search, tag,
+        // volume, metadata, compute_full_hash, dedup) = 8.
         let (_db_tmp, deps, _writer) = deps_harness();
 
         // Pass a recording handler so we can observe fan-out from the
@@ -405,7 +445,7 @@ mod tests {
 
         let events_strong = Arc::strong_count(&container.events);
         assert_eq!(
-            events_strong, 6,
+            events_strong, 8,
             "container.events should be Arc-cloned once per UseCase plus the container field"
         );
 

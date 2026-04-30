@@ -56,10 +56,27 @@ export function buildFtsQuery(raw: string): string {
     return prefix === "" ? suffix : `${prefix} ${suffix}`;
   }
 
-  // Plain tokens: strip unsafe, split, quote each.
+  // Plain tokens: strip unsafe, split, quote each, AND auto-suffix `*` to
+  // the last token so users get prefix-match by default.
+  //
+  // WHY auto-prefix on the last token (added 2026-04-25): FTS5's default
+  // is whole-token MATCH — typing "Cl" returned zero results even when
+  // many files contained "Claude" because there's no token literally
+  // equal to "cl". Native expectation in 2026 is "match as I type".
+  // Earlier tokens are kept as whole-token AND clauses (so "vacation
+  // sun" matches "vacation sunset" but also "vacation sundown" — the
+  // last-token-prefix rule, NOT every-token-prefix, balances recall
+  // against noise). Users who want exact whole-token can wrap in quotes
+  // (phrase passthrough); users who want explicit prefix can still type
+  // `foo*` (handled above).
   const sanitized = stripUnsafe(trimmed);
   const tokens = sanitized.split(/\s+/).filter((t) => t !== "");
-  return tokens.map((t) => `"${t}"`).join(" ");
+  if (tokens.length === 0) return "";
+  // WHY: filter+length-guard above means tokens is non-empty here.
+  const last = tokens.pop()!;
+  const prefix = tokens.map((t) => `"${t}"`).join(" ");
+  const suffix = `"${last}"*`;
+  return prefix === "" ? suffix : `${prefix} ${suffix}`;
 }
 
 /** Strip FTS5-unsafe characters before tokenisation. */
@@ -125,7 +142,10 @@ export function composeVisible(
     if (selectedTagId !== null && !f.tags.some((t) => t.id === selectedTagId)) {
       return false;
     }
-    if (searchHits !== null && !searchHits.has(f.hash)) {
+    // WHY (Task 11): `f.hash` is `string | null` post-spec-§4.8 sweep.
+    // Pending files have no hash so they cannot match a hash-keyed
+    // FTS hit set; they're filtered out when search is active.
+    if (searchHits !== null && (f.hash === null || !searchHits.has(f.hash))) {
       return false;
     }
     return true;
@@ -146,7 +166,9 @@ export function sortByRank(
   const ranked: Array<{ file: FileWithTagsPayload; rank: number }> = [];
   const unranked: FileWithTagsPayload[] = [];
   for (const f of files) {
-    const r = hitRanks.get(f.hash);
+    // WHY (Task 11): pending files (`f.hash === null`) cannot be looked up
+    // in the hash-keyed `hitRanks` map; they fall through to `unranked`.
+    const r = f.hash === null ? undefined : hitRanks.get(f.hash);
     if (r === undefined) unranked.push(f);
     else ranked.push({ file: f, rank: r });
   }

@@ -12,10 +12,12 @@
 
 use flume::Sender;
 use perima_core::{
-    BlakeHash, CoreError, DeviceId, FileLocationRecord, FileRepository, FileSize, HashedFile,
-    LocationStatus, MediaPath, UpsertOutcome, VolumeId,
+    BackfillFileRow, BlakeHash, CollisionGroup, CoreError, DeviceId, FileLocationRecord,
+    FileRepository, FileSize, FileUuid, HashedFile, LocationStatus, MediaPath, UpsertOutcome,
+    VerifiedState, VolumeId,
 };
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
+use uuid::Uuid;
 
 use crate::cmd::{FileWriteCmd, WriteCmd};
 use crate::errors::Error;
@@ -72,6 +74,24 @@ fn i64_to_size(v: i64) -> Result<FileSize, CoreError> {
 /// the safest behaviour for a limit argument.
 fn limit_to_i64(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
+}
+
+/// Parse the `files.file_uuid` text column into a [`FileUuid`].
+pub(crate) fn parse_file_uuid(s: &str) -> Result<FileUuid, CoreError> {
+    Uuid::parse_str(s)
+        .map(FileUuid)
+        .map_err(|e| CoreError::Internal(format!("bad file_uuid: {e}")))
+}
+
+/// Parse the optional `files.blake3_hash` text column.
+///
+/// WHY optional: post-Task-11 the schema permits a `NULL` `blake3_hash` for
+/// rows whose `full_hash` has not yet been computed (pending dedup).
+pub(crate) fn parse_optional_hash(s: Option<&str>) -> Result<Option<BlakeHash>, CoreError> {
+    match s {
+        Some(hex) => Ok(Some(BlakeHash::parse_hex(hex)?)),
+        None => Ok(None),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +215,33 @@ impl FileRepository for SqliteFileRepository {
             .send(WriteCmd::File(FileWriteCmd::UpsertFile {
                 file: file.clone(),
                 device,
+                quick_hash: None,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
+    }
+
+    fn upsert_file_with_quick_hash(
+        &self,
+        file: &HashedFile,
+        device: DeviceId,
+        quick_hash: Option<BlakeHash>,
+    ) -> Result<UpsertOutcome, CoreError> {
+        let (reply_tx, reply_rx) = flume::bounded::<Result<UpsertOutcome, CoreError>>(1);
+        // WHY pass quick_hash through: scan-path callers supply the
+        // cheap prefix+suffix fingerprint computed during resolve_with_cache
+        // so the writer can populate files.quick_hash on INSERT per spec §4.1.1.
+        // Non-scan callers (watcher, tag attach) use the base upsert_file
+        // which sends None — the COALESCE in the UPDATE arm preserves any
+        // previously-stored value.
+        self.writer
+            .send(WriteCmd::File(FileWriteCmd::UpsertFile {
+                file: file.clone(),
+                device,
+                quick_hash,
                 reply: reply_tx,
             }))
             .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
@@ -238,6 +285,429 @@ impl FileRepository for SqliteFileRepository {
         let conn = self.reads.get()?;
         list_file_locations_sql(&conn, limit, volume)
     }
+
+    fn list_files_needing_backfill(&self, limit: u32) -> Result<Vec<BackfillFileRow>, CoreError> {
+        // WHY pool-only: this is a pure SELECT — no write needed.
+        // WHY LEFT JOIN volume_mounts: we want to return the absolute
+        // path for the backfill worker so it can read the bytes without
+        // opening a second DB connection. `volume_mounts` stores the
+        // mount_path on the local machine. Rows without an active mount
+        // will have NULL mount_path → active_path = None, which the
+        // worker treats as "skip (no active location)". Spec §4.1.5.
+        let conn = self.reads.get()?;
+        list_files_needing_backfill_sql(&conn, limit)
+    }
+
+    fn lookup_by_file_uuid(
+        &self,
+        file_uuid: FileUuid,
+    ) -> Result<Option<(Option<BlakeHash>, std::path::PathBuf, u64)>, CoreError> {
+        // WHY pool-only: pure SELECT joining `files` → `file_locations` →
+        // `volume_mounts` to assemble an absolute path the caller can read.
+        // Same shape as `list_files_needing_backfill_sql` but keyed on
+        // `file_uuid` instead of NULL-ness of `quick_hash`.
+        let conn = self.reads.get()?;
+        lookup_by_file_uuid_sql(&conn, file_uuid)
+    }
+
+    fn update_full_hash(&self, file_uuid: FileUuid, hash: BlakeHash) -> Result<(), CoreError> {
+        // WHY device sourced from a sentinel here: the writer needs SOME
+        // device for CRDT bookkeeping. This adapter does not carry a
+        // device handle (it's per-process, not per-machine in the API);
+        // the use case supplies the right device through `mark_verified_distinct`,
+        // but `update_full_hash` is a single-row promotion that fires from
+        // the backfill / on-demand path which already binds the device at
+        // hash-compute time. We thread a fresh `DeviceId::new()` here for
+        // now — Task 11 (file_uuid migration sweep) will widen the trait
+        // signature to take `device: DeviceId`. The placeholder is safe
+        // because `device_id` on `files` is overwritten on every UPDATE.
+        let device = DeviceId::new();
+        let (reply_tx, reply_rx) = flume::bounded::<Result<u64, CoreError>>(1);
+        self.writer
+            .send(WriteCmd::File(FileWriteCmd::PromoteFullHash {
+                file_uuid,
+                full_hash: hash,
+                device,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        let rows = reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))??;
+        if rows == 0 {
+            // No row matched — caller asked us to promote a file_uuid that
+            // does not exist (or was soft-deleted). Surface this as NotFound
+            // so the use case can map to `CoreError::FullHashUnavailable`.
+            return Err(CoreError::NotFound(format!(
+                "no files row for file_uuid={}",
+                file_uuid.0
+            )));
+        }
+        Ok(())
+    }
+
+    fn list_quick_hash_collisions(&self) -> Result<Vec<CollisionGroup>, CoreError> {
+        // WHY pool-only: pure SELECT.
+        let conn = self.reads.get()?;
+        list_quick_hash_collisions_sql(&conn)
+    }
+
+    fn mark_verified_distinct(
+        &self,
+        file_uuids: Vec<FileUuid>,
+        device: DeviceId,
+    ) -> Result<(), CoreError> {
+        let (reply_tx, reply_rx) = flume::bounded::<Result<u64, CoreError>>(1);
+        self.writer
+            .send(WriteCmd::File(FileWriteCmd::MarkVerifiedDistinct {
+                file_uuids,
+                device,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        let _rows = reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))??;
+        Ok(())
+    }
+
+    fn list_files_pending_full_hash(&self, limit: usize) -> Result<Vec<FileUuid>, CoreError> {
+        // WHY pool-only: pure SELECT; no write needed.
+        let conn = self.reads.get()?;
+        list_files_pending_full_hash_sql(&conn, limit)
+    }
+}
+
+/// SELECT body for [`SqliteFileRepository::list_files_needing_backfill`].
+///
+/// Joins `files` → `file_locations` → `volume_mounts` to build absolute
+/// paths for the backfill worker. Only non-deleted file rows with
+/// `quick_hash IS NULL` are returned. The LEFT JOIN on `volume_mounts`
+/// means rows on unmounted volumes produce `mount_path = NULL`; those
+/// rows surface with `active_path = None` so the worker can skip them.
+///
+/// WHY one-row-per-file (GROUP BY): `file_locations` may have multiple
+/// active rows for the same hash (e.g. duplicates on the same volume).
+/// We want exactly one `BackfillFileRow` per `files` row — GROUP BY
+/// plus MIN aggregates ensure that. This avoids a lateral join (not
+/// supported in older `SQLite`) while remaining indexable.
+fn list_files_needing_backfill_sql(
+    conn: &Connection,
+    limit: u32,
+) -> Result<Vec<BackfillFileRow>, perima_core::CoreError> {
+    let sql = "
+        SELECT f.blake3_hash, f.file_size,
+               MIN(vm.mount_path) AS mount_path,
+               MIN(fl.relative_path) AS rel_path
+        FROM files f
+        LEFT JOIN file_locations fl
+          ON fl.blake3_hash = f.blake3_hash
+         AND fl.deleted_at IS NULL
+         AND fl.status = 'active'
+        LEFT JOIN volume_mounts vm
+          ON vm.volume_id = fl.volume_id
+         AND vm.deleted_at IS NULL
+        WHERE f.quick_hash IS NULL
+          AND f.deleted_at IS NULL
+        GROUP BY f.blake3_hash
+        ORDER BY f.blake3_hash
+        LIMIT ?1
+    ";
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(Error::from)
+        .map_err(perima_core::CoreError::from)?;
+    let rows = stmt
+        .query_map(rusqlite::params![limit], |row| {
+            let hash_hex: String = row.get(0)?;
+            let size_i64: i64 = row.get(1)?;
+            let mount_path: Option<String> = row.get(2)?;
+            let rel_path: Option<String> = row.get(3)?;
+            Ok((hash_hex, size_i64, mount_path, rel_path))
+        })
+        .map_err(Error::from)
+        .map_err(perima_core::CoreError::from)?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (hash_hex, size_i64, mount_path, rel_path) = row
+            .map_err(Error::from)
+            .map_err(perima_core::CoreError::from)?;
+        let hash = BlakeHash::parse_hex(&hash_hex)?;
+        // WHY unwrap_or(0): a negative size in the DB indicates corruption;
+        // 0 causes `quick_hash_prefix_suffix` to hash an empty prefix which
+        // is benign — the writer's COALESCE guard preserves any race-winning
+        // real value.
+        let size_bytes = u64::try_from(size_i64).unwrap_or(0);
+
+        // Build the absolute path only if both mount_path and rel_path exist.
+        let active_path = match (mount_path, rel_path) {
+            (Some(mp), Some(rp)) => {
+                let mut p = std::path::PathBuf::from(mp);
+                p.push(rp);
+                Some(p)
+            }
+            _ => None,
+        };
+
+        out.push(BackfillFileRow {
+            hash,
+            size_bytes,
+            active_path,
+        });
+    }
+    Ok(out)
+}
+
+/// SELECT body for [`SqliteFileRepository::lookup_by_file_uuid`].
+///
+/// Returns the `(blake3_hash, absolute_path, file_size)` triple for the
+/// non-deleted `files` row identified by `file_uuid`. The absolute path is
+/// resolved by joining `file_locations` → `volume_mounts` and selecting
+/// the lex-smallest active mount path (deterministic across calls).
+///
+/// Returns `Ok(None)` when no row matches OR when no active mount is
+/// available (the volume is not mounted). The caller (`ComputeFullHashUseCase`)
+/// maps `None` to `CoreError::FullHashUnavailable` with the appropriate
+/// reason.
+/// Row type for [`lookup_by_file_uuid_sql`]'s query output.
+///
+/// WHY type alias: `clippy::type_complexity` fires on four-element tuples
+/// with multiple Option arms; a named alias keeps the function body clean.
+type LookupByUuidRow = (Option<String>, i64, Option<String>, Option<String>);
+
+fn lookup_by_file_uuid_sql(
+    conn: &Connection,
+    file_uuid: FileUuid,
+) -> Result<Option<(Option<BlakeHash>, std::path::PathBuf, u64)>, CoreError> {
+    // WHY GROUP BY + MIN(...) for path: a file may have multiple active
+    // locations (true duplicates on the same volume); we only need one to
+    // hash the bytes. MIN keeps the result deterministic so two calls in a
+    // row return the same `active_path`.
+    //
+    // WHY JOIN on `fl.file_uuid = f.file_uuid` instead of `fl.blake3_hash`:
+    // when `files.blake3_hash IS NULL` (a pending file whose full_hash has
+    // not yet been computed), the hash-based join produces no rows because
+    // SQLite NULL equality is always NULL. The V011 migration backfills
+    // `file_locations.file_uuid`, so the surrogate key is the stable join
+    // axis for both hashed and pending rows (spec §4.8).
+    //
+    // WHY `blake3_hash` returned as `Option<String>`: V011 makes
+    // `files.blake3_hash` nullable for pending rows. The trait signature
+    // returns `Option<BlakeHash>` so callers can distinguish "no hash yet"
+    // from "file not found". See `FileRepository::lookup_by_file_uuid` doc.
+    let sql = "
+        SELECT f.blake3_hash, f.file_size,
+               MIN(vm.mount_path) AS mount_path,
+               MIN(fl.relative_path) AS rel_path
+        FROM files f
+        LEFT JOIN file_locations fl
+          ON fl.file_uuid = f.file_uuid
+         AND fl.deleted_at IS NULL
+         AND fl.status = 'active'
+        LEFT JOIN volume_mounts vm
+          ON vm.volume_id = fl.volume_id
+         AND vm.deleted_at IS NULL
+        WHERE f.file_uuid = ?1
+          AND f.deleted_at IS NULL
+        GROUP BY f.file_uuid
+    ";
+    let uuid_str = file_uuid.0.to_string();
+    let mut stmt = conn.prepare(sql).map_err(Error::from)?;
+    let row: Option<LookupByUuidRow> = stmt
+        .query_row(rusqlite::params![uuid_str], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .optional()
+        .map_err(Error::from)?;
+
+    let Some((hash_hex_opt, size_i64, mount_path, rel_path)) = row else {
+        return Ok(None);
+    };
+
+    let hash = match hash_hex_opt {
+        Some(hex) => Some(BlakeHash::parse_hex(&hex)?),
+        None => None,
+    };
+    let size_bytes = u64::try_from(size_i64)
+        .map_err(|_| CoreError::Internal(format!("stored file_size {size_i64} is negative")))?;
+
+    // Build the absolute path only if both mount_path and rel_path exist.
+    let abs_path = match (mount_path, rel_path) {
+        (Some(mp), Some(rp)) => {
+            let mut p = std::path::PathBuf::from(mp);
+            p.push(rp);
+            p
+        }
+        _ => return Ok(None),
+    };
+
+    Ok(Some((hash, abs_path, size_bytes)))
+}
+
+/// SELECT body for [`SqliteFileRepository::list_files_pending_full_hash`].
+///
+/// Returns `file_uuid` values for every non-deleted `files` row whose
+/// `blake3_hash` (== `full_hash`) is `NULL` AND that has at least one active
+/// mounted location on this device. Rows without an active mount are skipped
+/// because `ComputeFullHashUseCase::execute_single` would immediately return
+/// `FullHashUnavailable::NotMounted` for them, making the iteration useless.
+///
+/// WHY JOIN on `fl.file_uuid = f.file_uuid` instead of `fl.blake3_hash`:
+/// when `files.blake3_hash IS NULL` the hash-based join produces no rows.
+/// The V011 migration backfills `file_locations.file_uuid`, so the surrogate
+/// key is the correct join axis for pending rows (spec §4.8).
+///
+/// WHY DISTINCT: a single `files` row may have multiple active `file_locations`
+/// entries (true duplicates on the same volume). DISTINCT ensures one `file_uuid`
+/// per logical file.
+fn list_files_pending_full_hash_sql(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<FileUuid>, CoreError> {
+    let sql = "
+        SELECT DISTINCT f.file_uuid
+        FROM files f
+        JOIN file_locations fl
+          ON fl.file_uuid = f.file_uuid
+         AND fl.deleted_at IS NULL
+         AND fl.status = 'active'
+        JOIN volume_mounts vm
+          ON vm.volume_id = fl.volume_id
+         AND vm.deleted_at IS NULL
+        WHERE f.blake3_hash IS NULL
+          AND f.deleted_at IS NULL
+        ORDER BY f.file_uuid
+        LIMIT ?1
+    ";
+    let limit_i64 = limit_to_i64(limit);
+    let mut stmt = conn.prepare(sql).map_err(Error::from)?;
+    let rows = stmt
+        .query_map(rusqlite::params![limit_i64], |row| row.get::<_, String>(0))
+        .map_err(Error::from)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Error::from)?;
+
+    rows.into_iter().map(|s| parse_file_uuid(&s)).collect()
+}
+
+/// SELECT body for [`SqliteFileRepository::list_quick_hash_collisions`].
+///
+/// Groups `files` rows by `quick_hash`, returning every group with `COUNT > 1`
+/// where at least one row has not been marked `verified_distinct`. For each
+/// surviving group, fetches the active `file_locations` rows so the frontend
+/// can render path / volume info per file.
+///
+/// WHY two-step (group, then per-group locations): `SQLite`'s `GROUP_CONCAT`
+/// would force string-parsing on the Rust side; preparing a per-group SELECT
+/// keeps the typing clean and the result Vec sized correctly.
+fn list_quick_hash_collisions_sql(conn: &Connection) -> Result<Vec<CollisionGroup>, CoreError> {
+    // Step 1: find the colliding quick_hash values.
+    let group_sql = "
+        SELECT quick_hash
+        FROM files
+        WHERE quick_hash IS NOT NULL
+          AND deleted_at IS NULL
+          AND verified_distinct = 0
+        GROUP BY quick_hash
+        HAVING COUNT(*) > 1
+        ORDER BY quick_hash
+    ";
+    let mut stmt = conn.prepare(group_sql).map_err(Error::from)?;
+    let quick_hashes: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(Error::from)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Error::from)?;
+    drop(stmt);
+
+    if quick_hashes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Step 2: for each colliding quick_hash, fetch the per-file location rows.
+    // WHY one SELECT per group: clean typing, bounded result set (collision
+    // groups are sparse in real-world libraries), avoids a complex multi-key
+    // JOIN.
+    let loc_sql = "
+        SELECT f.file_uuid, f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
+               fl.status, fl.first_seen
+        FROM file_locations fl
+        JOIN files f ON f.blake3_hash = fl.blake3_hash
+        WHERE f.quick_hash = ?1
+          AND f.deleted_at IS NULL
+          AND fl.deleted_at IS NULL
+        ORDER BY fl.relative_path
+    ";
+    let mut loc_stmt = conn.prepare(loc_sql).map_err(Error::from)?;
+
+    let mut groups = Vec::with_capacity(quick_hashes.len());
+    for qh_hex in &quick_hashes {
+        let quick_hash = BlakeHash::parse_hex(qh_hex)?;
+        let rows = loc_stmt
+            .query_map(rusqlite::params![qh_hex], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })
+            .map_err(Error::from)?;
+
+        let mut files: Vec<FileLocationRecord> = Vec::new();
+        for r in rows {
+            let (file_uuid_str, hash_hex_opt, size, vol_str, rel_path, status_str, first_seen) =
+                r.map_err(Error::from)?;
+            let file_uuid = parse_file_uuid(&file_uuid_str)?;
+            let hash = parse_optional_hash(hash_hex_opt.as_deref())?;
+            let volume_id = VolumeId(
+                uuid::Uuid::parse_str(&vol_str)
+                    .map_err(|e| CoreError::Internal(format!("bad volume uuid: {e}")))?,
+            );
+            let status = match status_str.as_str() {
+                "active" => LocationStatus::Active,
+                "missing" => LocationStatus::Missing,
+                "moved" => LocationStatus::Moved,
+                "stale" => LocationStatus::Stale,
+                other => {
+                    return Err(CoreError::Internal(format!(
+                        "unknown location status: {other}"
+                    )));
+                }
+            };
+            files.push(FileLocationRecord {
+                file_uuid,
+                hash,
+                size: i64_to_size(size)?,
+                volume_id,
+                relative_path: MediaPath::new(&rel_path),
+                status,
+                first_seen,
+            });
+        }
+
+        // Skip groups that lost all their location rows between the two
+        // SELECTs (deletion race). The frontend would render an empty group.
+        if files.is_empty() {
+            continue;
+        }
+
+        groups.push(CollisionGroup {
+            quick_hash,
+            files,
+            // WHY VerifiedState::Unverified for v1: the schema doesn't yet
+            // distinguish per-group verification states. Once Task 14 wires
+            // up "Compute full hash" UI per file, the group's state becomes a
+            // function of the per-file `full_hash` results — folded in then.
+            verified_state: VerifiedState::Unverified,
+        });
+    }
+
+    Ok(groups)
 }
 
 /// Shared SELECT body for `list_file_locations`.
@@ -253,8 +723,12 @@ fn list_file_locations_sql(
     // EXPLAIN QUERY PLAN reports SCAN + TEMP B-TREE sort even when a concrete
     // volume_id is supplied. Branching here keeps both shapes index-eligible.
     let vol_filter = volume.map(|v| v.0.to_string());
+    // WHY `f.file_uuid` first column + `f.blake3_hash` typed as `Option<String>`:
+    // Task 11 surfaces `file_uuid` as the stable surrogate key on the IPC
+    // boundary; `blake3_hash` becomes nullable for rows whose `full_hash`
+    // has not yet been computed (spec §4.8).
     let sql: &str = if vol_filter.is_some() {
-        "SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
+        "SELECT f.file_uuid, f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
                 fl.status, fl.first_seen
          FROM file_locations fl
          JOIN files f ON f.blake3_hash = fl.blake3_hash
@@ -262,7 +736,7 @@ fn list_file_locations_sql(
          ORDER BY fl.relative_path
          LIMIT ?2"
     } else {
-        "SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
+        "SELECT f.file_uuid, f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
                 fl.status, fl.first_seen
          FROM file_locations fl
          JOIN files f ON f.blake3_hash = fl.blake3_hash
@@ -281,21 +755,31 @@ fn list_file_locations_sql(
 
     let rows = stmt
         .query_map(rusqlite::params_from_iter(params.iter()), |row| {
-            let hash_hex: String = row.get(0)?;
-            let size: i64 = row.get(1)?;
-            let vol_str: String = row.get(2)?;
-            let rel_path: String = row.get(3)?;
-            let status_str: String = row.get(4)?;
-            let first_seen: String = row.get(5)?;
-            Ok((hash_hex, size, vol_str, rel_path, status_str, first_seen))
+            let file_uuid_str: String = row.get(0)?;
+            let hash_hex: Option<String> = row.get(1)?;
+            let size: i64 = row.get(2)?;
+            let vol_str: String = row.get(3)?;
+            let rel_path: String = row.get(4)?;
+            let status_str: String = row.get(5)?;
+            let first_seen: String = row.get(6)?;
+            Ok((
+                file_uuid_str,
+                hash_hex,
+                size,
+                vol_str,
+                rel_path,
+                status_str,
+                first_seen,
+            ))
         })
         .map_err(Error::from)?;
 
     let mut out = Vec::new();
     for row in rows {
-        let (hash_hex, size, vol_str, rel_path, status_str, first_seen) =
+        let (file_uuid_str, hash_hex_opt, size, vol_str, rel_path, status_str, first_seen) =
             row.map_err(Error::from)?;
-        let hash = BlakeHash::parse_hex(&hash_hex)?;
+        let file_uuid = parse_file_uuid(&file_uuid_str)?;
+        let hash = parse_optional_hash(hash_hex_opt.as_deref())?;
         let volume_id = VolumeId(
             uuid::Uuid::parse_str(&vol_str)
                 .map_err(|e| CoreError::Internal(format!("bad volume uuid: {e}")))?,
@@ -312,6 +796,7 @@ fn list_file_locations_sql(
             }
         };
         out.push(FileLocationRecord {
+            file_uuid,
             hash,
             size: i64_to_size(size)?,
             volume_id,
@@ -685,8 +1170,8 @@ mod tests {
         assert_eq!(rows.len(), 1, "exactly one active row after collision");
         assert_eq!(rows[0].relative_path.as_str(), "dest.jpg");
         assert_eq!(
-            rows[0].hash.to_hex(),
-            f_dest.hash.to_hex(),
+            rows[0].hash.map(|h| h.to_hex()),
+            Some(f_dest.hash.to_hex()),
             "destination hash must be preserved",
         );
     }

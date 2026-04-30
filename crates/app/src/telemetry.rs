@@ -58,6 +58,17 @@ impl EventHandler for LogEventHandler {
             AppEvent::IndexInvalidated { reason } => {
                 tracing::info!(?reason, "index invalidated");
             }
+            AppEvent::VerifyProgress {
+                batch_id,
+                files_done,
+                files_total,
+                ..
+            } => {
+                tracing::info!(?batch_id, files_done, files_total, "verify progress");
+            }
+            AppEvent::VerifyComplete { batch_id } => {
+                tracing::info!(?batch_id, "verify complete");
+            }
         }
     }
 }
@@ -74,6 +85,7 @@ mod tests {
         let event = AppEvent::File(FileEvent::Created {
             path: MediaPath::new("foo.txt"),
             volume: VolumeId(Uuid::nil()),
+            file_uuid: None,
         });
         // `handle` returns (); success = no panic.
         handler.handle(event).await;
@@ -90,6 +102,7 @@ mod tests {
             from: MediaPath::new("a.txt"),
             to: MediaPath::new("b.txt"),
             volume: VolumeId(Uuid::nil()),
+            file_uuid: None,
         });
         handler.handle(event).await;
     }

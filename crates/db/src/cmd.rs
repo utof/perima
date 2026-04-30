@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use flume::Sender;
 
 use perima_core::{
-    BlakeHash, CoreError, DeviceId, HashedFile, LocationStatus, MediaMetadata, MediaPath, Tag,
-    UpsertOutcome, VolumeId, VolumeIdentifiers,
+    BlakeHash, CacheEntry, CacheKey, CoreError, DeviceId, HashedFile, LocationStatus,
+    MediaMetadata, MediaPath, Tag, UpsertOutcome, VolumeId, VolumeIdentifiers,
 };
 use uuid::Uuid;
 
@@ -40,6 +40,8 @@ pub enum WriteCmd {
     File(FileWriteCmd),
     /// Search-repo writes (populated Task 6).
     Search(SearchWriteCmd),
+    /// Identity-cache writes (populated Task 6 — cache port).
+    Cache(CacheWriteCmd),
     /// Cooperative shutdown signal — when the writer thread receives
     /// this it exits its loop. Sent by `SqliteWriterHandle::join` and
     /// the `Drop` impl.
@@ -68,6 +70,7 @@ impl WriteCmd {
             Self::Metadata(_) => "metadata",
             Self::File(_) => "file",
             Self::Search(_) => "search",
+            Self::Cache(c) => c.kind_str(),
             Self::Shutdown => "shutdown",
         }
     }
@@ -241,6 +244,13 @@ pub enum FileWriteCmd {
         file: HashedFile,
         /// Device that initiated the upsert.
         device: DeviceId,
+        /// Cheap BLAKE3 prefix+suffix fingerprint to store in
+        /// `files.quick_hash` on INSERT (spec §4.1.1).
+        ///
+        /// `None` for callers that don't have a `quick_hash` at hand
+        /// (e.g. watcher-triggered upserts). `Some` for scan-path
+        /// upserts where the Tier-0 cache already computed this value.
+        quick_hash: Option<BlakeHash>,
         /// Reply channel carrying `Inserted / Updated / Unchanged`.
         reply: ReplyTx<UpsertOutcome>,
     },
@@ -312,6 +322,40 @@ pub enum FileWriteCmd {
         /// Reply channel carrying `rows_changed` (`0` or `1`).
         reply: ReplyTx<u64>,
     },
+    /// Promote a freshly-computed `full_hash` onto a `files` row keyed by `file_uuid`.
+    ///
+    /// WHY: in v0.6.x's lazy-full-hash workflow (spec §4.1), `full_hash` is
+    /// computed on demand by [`crate::cmd::FileWriteCmd::PromoteFullHash`]'s
+    /// caller (the `ComputeFullHashUseCase`). This variant updates BOTH
+    /// `files.blake3_hash` AND a placeholder `full_hash` mirror column; today
+    /// the schema does not yet split the two (#161 placeholder convention),
+    /// so the writer just rewrites `blake3_hash` with the freshly computed
+    /// value. Bumps `files.hlc` per spec §3.7.
+    PromoteFullHash {
+        /// Surrogate file id (FK on `files.file_uuid`).
+        file_uuid: perima_core::FileUuid,
+        /// Newly computed full BLAKE3-256 hash.
+        full_hash: BlakeHash,
+        /// Device that initiated the promotion.
+        device: DeviceId,
+        /// Reply channel carrying `rows_changed` (`0` if the `file_uuid` no
+        /// longer exists, `1` on success).
+        reply: ReplyTx<u64>,
+    },
+    /// Set `files.verified_distinct = 1` on every row in `file_uuids`.
+    ///
+    /// WHY: groups of files that share `quick_hash` but whose `full_hash`
+    /// proves them distinct should not surface again as collision candidates
+    /// (spec §4.6). One transaction so the UI flip is all-or-nothing.
+    /// Bumps `files.hlc` per spec §3.7.
+    MarkVerifiedDistinct {
+        /// Surrogate file ids (FKs on `files.file_uuid`).
+        file_uuids: Vec<perima_core::FileUuid>,
+        /// Device that initiated the mark.
+        device: DeviceId,
+        /// Reply channel carrying total `rows_changed`.
+        reply: ReplyTx<u64>,
+    },
 }
 
 /// Search-repo write commands. Populated by Task 6.
@@ -334,4 +378,63 @@ pub enum SearchWriteCmd {
         /// Reply channel; writer sends `Ok(())` on success.
         reply: ReplyTx<()>,
     },
+}
+
+/// Identity-cache write commands.
+///
+/// WHY device-local (no HLC): `file_identity_cache` caches per-device
+/// filesystem metadata (inode, mtime, size) to avoid rehashing unchanged
+/// files. It is never synced across devices, so CLAUDE.md "Schema rules
+/// expansion" exempts it from the `hlc` column requirement.
+///
+/// WHY writer-side select-then-insert for upsert: the lookup index
+/// `idx_fic_lookup (device_id, volume_id, fs_file_id, size_bytes, mtime_ns)`
+/// is NON-UNIQUE (`mtime_ns` is mutable — CLAUDE.md forbids UNIQUE on
+/// mutable columns). `INSERT … ON CONFLICT DO UPDATE` requires a UNIQUE
+/// target; without one we run a SELECT-then-INSERT-or-UPDATE inside a
+/// single transaction on the writer thread, avoiding a second connection.
+///
+/// WHY no `AppEvent` emission: cache writes affect only device-local state.
+/// The search/files/tags indexes are not stale after a cache write, so
+/// emitting `IndexInvalidated` would cause spurious frontend refreshes.
+#[derive(Debug)]
+pub enum CacheWriteCmd {
+    /// Insert or update the cache row whose lookup tuple matches `key`.
+    ///
+    /// The writer handler runs a transaction that:
+    /// 1. SELECTs the existing live row for `key`.
+    /// 2. If no row exists: INSERTs a fresh UUIDv7-PKd row.
+    /// 3. If a row exists: UPDATEs its `quick_hash` / `full_hash` /
+    ///    `last_verified` / `updated_at`.
+    ///
+    /// Either path sends `Ok(())` on success.
+    UpsertCacheRow {
+        /// Lookup key identifying the file snapshot.
+        key: CacheKey,
+        /// Cached hash data to store (or refresh).
+        entry: CacheEntry,
+        /// Reply channel; writer sends `Ok(())` on success.
+        reply: ReplyTx<()>,
+    },
+    /// Soft-delete the live cache row whose lookup tuple matches `key`.
+    ///
+    /// Sets `deleted_at = NOW` and `updated_at = NOW` on the matched row.
+    /// If no live row exists the operation completes successfully (idempotent).
+    SoftDeleteCacheRow {
+        /// Lookup key identifying the file snapshot to soft-delete.
+        key: CacheKey,
+        /// Reply channel; writer sends `Ok(())` on success.
+        reply: ReplyTx<()>,
+    },
+}
+
+impl CacheWriteCmd {
+    /// Short kind name for tracing spans. WHY: mirrors `WriteCmd::kind_str`
+    /// for per-variant observability (Batch I Task 5 pattern).
+    pub(crate) const fn kind_str(&self) -> &'static str {
+        match self {
+            Self::UpsertCacheRow { .. } => "upsert_cache_row",
+            Self::SoftDeleteCacheRow { .. } => "soft_delete_cache_row",
+        }
+    }
 }

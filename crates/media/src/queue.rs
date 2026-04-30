@@ -283,8 +283,8 @@ mod tests {
     use std::time::Duration;
 
     use perima_core::{
-        BlakeHash, CoreError, DeviceId, FileLocationRecord, MediaMetadata, MetadataExtractor,
-        MetadataRepository, UpsertOutcome, VolumeId,
+        BlakeHash, CoreError, DeviceId, MediaMetadata, MetadataExtractor, MetadataRepository,
+        UpsertOutcome, VolumeId,
     };
 
     use super::*;
@@ -346,7 +346,7 @@ mod tests {
             &self,
             _limit: usize,
             _volume: Option<VolumeId>,
-        ) -> Result<Vec<(FileLocationRecord, Option<MediaMetadata>)>, CoreError> {
+        ) -> Result<Vec<perima_core::FileWithMetadataRow>, CoreError> {
             Ok(vec![])
         }
         fn update_thumbnail(

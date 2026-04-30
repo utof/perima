@@ -4,6 +4,11 @@
 // (Task 12) gates future regeneration. Constructed analytically from
 // the post-Batch-D Rust types via specta translation rules in spec §4.2
 // + §3 row K. Field names are Rust snake_case (no rename_all applied).
+//
+// Task 4 additions (fast-hashing): FileUuid, BatchId, BatchHandle, DeviceKind,
+// CollisionGroup, VerifiedState, FullHashOutcome, FullHashUnavailableReason,
+// CoreError::FullHashUnavailable, AppEvent::VerifyProgress/VerifyComplete,
+// InvalidationReason::CollisionsChanged.
 
 // ── Primitive newtypes ────────────────────────────────────────────────
 
@@ -37,6 +42,20 @@ export type VolumeId = string;
  */
 export type DeviceId = string;
 
+/**
+ * Stable surrogate identifier for a file row in `files`.
+ * Rust: `FileUuid(pub uuid::Uuid)` with `#[specta(transparent)]`.
+ * Immutable across the file's lifetime; used as FK target instead of
+ * `BlakeHash` (since `full_hash` is lazy and `quick_hash` is a fingerprint).
+ */
+export type FileUuid = string;
+
+/**
+ * Stable identifier for a `compute_full_hash_batch` operation.
+ * Rust: `BatchId(pub uuid::Uuid)` with `#[specta(transparent)]`.
+ */
+export type BatchId = string;
+
 // ── Enums ────────────────────────────────────────────────────────────
 
 /**
@@ -58,7 +77,17 @@ export type AppEvent =
         duration_ms: number;
       };
     }
-  | { kind: "IndexInvalidated"; data: { reason: InvalidationReason } };
+  | { kind: "IndexInvalidated"; data: { reason: InvalidationReason } }
+  | {
+      kind: "VerifyProgress";
+      data: {
+        batch_id: BatchId;
+        files_done: number;
+        files_total: number;
+        latest_outcome: FullHashOutcome;
+      };
+    }
+  | { kind: "VerifyComplete"; data: { batch_id: BatchId } };
 
 /**
  * Categorical reason an index was invalidated. Inner field of
@@ -77,7 +106,8 @@ export type InvalidationReason =
   | "TagsChanged"
   | "FilesChanged"
   | "MetadataChanged"
-  | "SearchIndexRebuilt";
+  | "SearchIndexRebuilt"
+  | "CollisionsChanged";
 
 /**
  * Status of a file location row.
@@ -88,12 +118,22 @@ export type LocationStatus = "Active" | "Missing" | "Moved" | "Stale";
 /**
  * Filesystem event emitted by the backend watcher.
  * Rust: `#[serde(tag = "type")]` inline-tagged enum.
+ *
+ * Task 11 (spec §4.8): every variant carries `file_uuid: FileUuid | null`.
+ * The watcher emits `null` (no DB lookup at emission time); consumers do
+ * their own `(volume, path)` lookup as needed.
  */
 export type FileEvent =
-  | { type: "Created"; path: MediaPath; volume: VolumeId }
-  | { type: "Modified"; path: MediaPath; volume: VolumeId }
-  | { type: "Deleted"; path: MediaPath; volume: VolumeId }
-  | { type: "Renamed"; from: MediaPath; to: MediaPath; volume: VolumeId };
+  | { type: "Created"; path: MediaPath; volume: VolumeId; file_uuid: FileUuid | null }
+  | { type: "Modified"; path: MediaPath; volume: VolumeId; file_uuid: FileUuid | null }
+  | { type: "Deleted"; path: MediaPath; volume: VolumeId; file_uuid: FileUuid | null }
+  | {
+      type: "Renamed";
+      from: MediaPath;
+      to: MediaPath;
+      volume: VolumeId;
+      file_uuid: FileUuid | null;
+    };
 
 /**
  * Typed error returned by all Tauri command handlers.
@@ -107,16 +147,22 @@ export type CoreError =
   | { kind: "InvalidTag"; data: string }
   | { kind: "Io"; data: { kind: string; message: string } }
   | { kind: "Unsupported"; data: string }
-  | { kind: "Internal"; data: string };
+  | { kind: "Internal"; data: string }
+  | { kind: "FullHashUnavailable"; data: { reason: FullHashUnavailableReason } };
 
 // ── Structs ──────────────────────────────────────────────────────────
 
 /**
  * A file location row — joined view of `files` + `file_locations`.
  * Rust: `crates/core/src/types.rs::FileLocationRecord`.
+ *
+ * Task 11 (spec §4.8): `file_uuid` is the stable surrogate for every row;
+ * `hash` becomes nullable for files whose `full_hash` has not yet been
+ * computed (pending dedup verification).
  */
 export type FileLocationRecord = {
-  hash: BlakeHash;
+  file_uuid: FileUuid;
+  hash: BlakeHash | null;
   size: FileSize;
   volume_id: VolumeId;
   relative_path: MediaPath;
@@ -170,9 +216,13 @@ export type Tag = {
 /**
  * A ranked result from the FTS5 full-text search index.
  * Rust: `crates/core/src/search.rs::SearchHit`.
+ *
+ * Task 11 (spec §4.8): `file_uuid` is the stable surrogate; `blake3_hash`
+ * becomes nullable for pending files (no `full_hash` yet).
  */
 export type SearchHit = {
-  blake3_hash: string;
+  file_uuid: FileUuid;
+  blake3_hash: string | null;
   volume_id: string;
   relative_path: string;
   rank: number;
@@ -200,9 +250,20 @@ export type ScanReport = {
  * Rust: `crates/desktop/src/payloads.rs::FileWithMetadataPayload`.
  * Shell-side flat composite — all fields present, metadata fields
  * nullable when no `file_metadata` row exists.
+ *
+ * Task 11 (spec §4.8): `file_uuid` is the stable surrogate (always
+ * present from V011 on); `hash` is nullable for pending files.
+ *
+ * Task 14 must-fix: `quick_hash` is exposed so the frontend can detect
+ * placeholder rows via `hash === quick_hash`. Pre-V012 `blake3_hash` is
+ * NOT NULL, so `hash === null` never fires; equality comparison is the
+ * only reliable signal.
  */
 export type FileWithMetadataPayload = {
-  hash: string;
+  file_uuid: FileUuid;
+  hash: string | null;
+  /** Quick-hash value as lowercase hex, or null if backfill not yet run. */
+  quick_hash: string | null;
   size: number;
   volume_id: string;
   relative_path: string;
@@ -228,4 +289,58 @@ export type FileWithMetadataPayload = {
  */
 export type FileWithTagsPayload = FileWithMetadataPayload & {
   tags: Tag[];
+};
+
+// ── Dedup types (Task 4) ─────────────────────────────────────────────
+
+/**
+ * Why a `full_hash` could not be produced.
+ * Rust: `FullHashUnavailableReason` with `#[serde(tag = "kind")]`.
+ */
+export type FullHashUnavailableReason =
+  | { kind: "NotMounted"; volume_id: string }
+  | { kind: "NotComputed" }
+  | { kind: "IoError"; message: string };
+
+/**
+ * Per-file outcome inside `AppEvent::VerifyProgress`.
+ * Rust: `FullHashOutcome` with `#[serde(tag = "outcome", content = "data")]`.
+ */
+export type FullHashOutcome =
+  | { outcome: "Computed"; data: { file_uuid: FileUuid; hash: BlakeHash } }
+  | { outcome: "Failed"; data: { file_uuid: FileUuid; error: CoreError } };
+
+/**
+ * Returned from `compute_full_hash_batch`.
+ * Rust: `BatchHandle` struct.
+ */
+export type BatchHandle = {
+  batch_id: BatchId;
+  total: number;
+};
+
+/**
+ * What kind of physical storage backs a volume.
+ * Rust: `DeviceKind` plain enum (no serde tag).
+ */
+export type DeviceKind = "Hdd" | "Ssd" | "Unknown";
+
+/**
+ * State of a candidate duplicate group's verification.
+ * Rust: `VerifiedState` plain enum (no serde tag).
+ */
+export type VerifiedState =
+  | "Unverified"
+  | "VerifiedDuplicate"
+  | "VerifiedDistinct"
+  | "Mixed";
+
+/**
+ * A group of files sharing the same `quick_hash` — candidate duplicates.
+ * Rust: `CollisionGroup` struct in `crates/core/src/dedup.rs`.
+ */
+export type CollisionGroup = {
+  quick_hash: BlakeHash;
+  files: FileLocationRecord[];
+  verified_state: VerifiedState;
 };

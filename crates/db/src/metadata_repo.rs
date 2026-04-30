@@ -230,7 +230,7 @@ impl MetadataRepository for SqliteMetadataRepository {
         &self,
         limit: usize,
         volume: Option<VolumeId>,
-    ) -> Result<Vec<(FileLocationRecord, Option<MediaMetadata>)>, CoreError> {
+    ) -> Result<Vec<perima_core::FileWithMetadataRow>, CoreError> {
         let conn = self.reads.get()?;
         let vol_filter = volume.map(|v| v.0.to_string());
 
@@ -247,13 +247,19 @@ impl MetadataRepository for SqliteMetadataRepository {
         // even when a concrete volume_id is supplied (SQLite's planner cannot
         // factor NULL out of the disjunction). Branching at Rust level keeps
         // both shapes index-eligible.
+        // WHY f.quick_hash as col 19: the frontend needs it to detect
+        // placeholder rows (hash === quick_hash means full_hash not yet
+        // computed). Pre-V012 blake3_hash is NOT NULL (placeholder convention),
+        // so `location.hash === null` never fires; equality comparison is the
+        // only reliable signal.
         let sql: &str = if vol_filter.is_some() {
-            "SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
+            "SELECT f.file_uuid, f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
                     fl.status, fl.first_seen,
                     fm.updated_at,
                     fm.width, fm.height, fm.duration_ms, fm.captured_at,
                     fm.camera_make, fm.camera_model, fm.codec, fm.bitrate_bps,
-                    fm.mime_type, fm.thumbnail_path, fm.thumbnail_status
+                    fm.mime_type, fm.thumbnail_path, fm.thumbnail_status,
+                    f.quick_hash
              FROM file_locations fl
              JOIN files f ON f.blake3_hash = fl.blake3_hash
              LEFT JOIN file_metadata fm
@@ -263,12 +269,13 @@ impl MetadataRepository for SqliteMetadataRepository {
              ORDER BY fl.relative_path
              LIMIT ?2"
         } else {
-            "SELECT f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
+            "SELECT f.file_uuid, f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
                     fl.status, fl.first_seen,
                     fm.updated_at,
                     fm.width, fm.height, fm.duration_ms, fm.captured_at,
                     fm.camera_make, fm.camera_model, fm.codec, fm.bitrate_bps,
-                    fm.mime_type, fm.thumbnail_path, fm.thumbnail_status
+                    fm.mime_type, fm.thumbnail_path, fm.thumbnail_status,
+                    f.quick_hash
              FROM file_locations fl
              JOIN files f ON f.blake3_hash = fl.blake3_hash
              LEFT JOIN file_metadata fm
@@ -289,25 +296,28 @@ impl MetadataRepository for SqliteMetadataRepository {
 
         let rows = stmt
             .query_map(rusqlite::params_from_iter(params.iter()), |row| {
-                let hash_hex: String = row.get(0)?;
-                let size: i64 = row.get(1)?;
-                let vol_str: String = row.get(2)?;
-                let rel_path: String = row.get(3)?;
-                let status_str: String = row.get(4)?;
-                let first_seen: String = row.get(5)?;
-                let fm_updated_at: Option<String> = row.get(6)?;
-                let width: Option<i64> = row.get(7)?;
-                let height: Option<i64> = row.get(8)?;
-                let duration_ms: Option<i64> = row.get(9)?;
-                let captured_at: Option<String> = row.get(10)?;
-                let camera_make: Option<String> = row.get(11)?;
-                let camera_model: Option<String> = row.get(12)?;
-                let codec: Option<String> = row.get(13)?;
-                let bitrate_bps: Option<i64> = row.get(14)?;
-                let mime_type: Option<String> = row.get(15)?;
-                let thumbnail_path: Option<String> = row.get(16)?;
-                let thumbnail_status: Option<String> = row.get(17)?;
+                let file_uuid_str: String = row.get(0)?;
+                let hash_hex: Option<String> = row.get(1)?;
+                let size: i64 = row.get(2)?;
+                let vol_str: String = row.get(3)?;
+                let rel_path: String = row.get(4)?;
+                let status_str: String = row.get(5)?;
+                let first_seen: String = row.get(6)?;
+                let fm_updated_at: Option<String> = row.get(7)?;
+                let width: Option<i64> = row.get(8)?;
+                let height: Option<i64> = row.get(9)?;
+                let duration_ms: Option<i64> = row.get(10)?;
+                let captured_at: Option<String> = row.get(11)?;
+                let camera_make: Option<String> = row.get(12)?;
+                let camera_model: Option<String> = row.get(13)?;
+                let codec: Option<String> = row.get(14)?;
+                let bitrate_bps: Option<i64> = row.get(15)?;
+                let mime_type: Option<String> = row.get(16)?;
+                let thumbnail_path: Option<String> = row.get(17)?;
+                let thumbnail_status: Option<String> = row.get(18)?;
+                let quick_hash: Option<String> = row.get(19)?;
                 Ok((
+                    file_uuid_str,
                     hash_hex,
                     size,
                     vol_str,
@@ -326,6 +336,7 @@ impl MetadataRepository for SqliteMetadataRepository {
                     mime_type,
                     thumbnail_path,
                     thumbnail_status,
+                    quick_hash,
                 ))
             })
             .map_err(Error::from)?;
@@ -333,7 +344,8 @@ impl MetadataRepository for SqliteMetadataRepository {
         let mut out = Vec::new();
         for row in rows {
             let (
-                hash_hex,
+                file_uuid_str,
+                hash_hex_opt,
                 size,
                 vol_str,
                 rel_path,
@@ -351,14 +363,17 @@ impl MetadataRepository for SqliteMetadataRepository {
                 mime_type,
                 thumbnail_path,
                 thumbnail_status,
+                quick_hash,
             ) = row.map_err(Error::from)?;
-            let hash = BlakeHash::parse_hex(&hash_hex)?;
+            let file_uuid = crate::file_repo::parse_file_uuid(&file_uuid_str)?;
+            let hash = crate::file_repo::parse_optional_hash(hash_hex_opt.as_deref())?;
             let volume_id = VolumeId(
                 uuid::Uuid::parse_str(&vol_str)
                     .map_err(|e| CoreError::Internal(format!("bad volume uuid: {e}")))?,
             );
             let status = status_from_str(&status_str)?;
             let location = FileLocationRecord {
+                file_uuid,
                 hash,
                 size: i64_to_size(size)?,
                 volume_id,
@@ -372,11 +387,19 @@ impl MetadataRepository for SqliteMetadataRepository {
             // there is no match. `updated_at` is NOT NULL in
             // file_metadata, so NULL here unambiguously means "no row"
             // rather than "row with an unset optional field".
+            //
+            // WHY MediaMetadata.hash sentinel for missing full_hash: when
+            // `f.blake3_hash IS NULL` the legacy `MediaMetadata::hash` field
+            // (still keyed on the full hash for v0.6.x — the file_uuid pivot
+            // for the metadata row is a separate v0.7+ migration) gets the
+            // all-zeros placeholder. Callers should branch on the location's
+            // `Option<BlakeHash>` and not infer identity from the metadata.
+            let metadata_hash = hash.unwrap_or_else(|| BlakeHash::from_bytes([0u8; 32]));
             let metadata = if fm_updated_at.is_none() {
                 None
             } else {
                 Some(MediaMetadata {
-                    hash,
+                    hash: metadata_hash,
                     width: i64_to_u32_opt(width)?,
                     height: i64_to_u32_opt(height)?,
                     duration_ms: i64_to_u64_opt(duration_ms)?,
@@ -391,7 +414,7 @@ impl MetadataRepository for SqliteMetadataRepository {
                 })
             };
 
-            out.push((location, metadata));
+            out.push((location, metadata, quick_hash));
         }
         Ok(out)
     }
@@ -655,8 +678,8 @@ mod tests {
 
         // Assert: one row, metadata is None.
         assert_eq!(rows.len(), 1, "expected exactly one (file_loc, meta) pair");
-        let (loc, meta) = &rows[0];
-        assert_eq!(loc.hash, f.hash);
+        let (loc, meta, _quick_hash) = &rows[0];
+        assert_eq!(loc.hash, Some(f.hash));
         assert_eq!(loc.relative_path.as_str(), "no_meta.txt");
         assert!(
             meta.is_none(),
@@ -692,8 +715,8 @@ mod tests {
 
         // Assert
         assert_eq!(rows.len(), 1);
-        let (loc, got_meta) = &rows[0];
-        assert_eq!(loc.hash, f.hash);
+        let (loc, got_meta, _quick_hash) = &rows[0];
+        assert_eq!(loc.hash, Some(f.hash));
         let got = got_meta
             .as_ref()
             .expect("metadata present for file with file_metadata row");

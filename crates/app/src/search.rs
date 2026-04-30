@@ -210,14 +210,16 @@ mod tests {
         // canonical structural fix.
         #[allow(clippy::disallowed_methods)]
         let conn = Connection::open(db_path).unwrap();
-        // WHY explicit column list: matches V007 `search_content` schema
-        // (blake3_hash, filename, relative_path, mime_type, camera_model,
-        //  captured_at, tags). Omitting optional columns uses their DEFAULT ''.
+        // WHY explicit column list: matches V011 `search_content` schema
+        // (file_uuid, blake3_hash, filename, relative_path, mime_type,
+        //  camera_model, captured_at, tags). `file_uuid` is `NOT NULL UNIQUE`
+        //  post-V011; we synthesise a fresh UUIDv7 per seed call so each row
+        //  satisfies the constraint.
         conn.execute(
             "INSERT INTO search_content \
-             (blake3_hash, filename, relative_path, mime_type, camera_model, captured_at, tags) \
-             VALUES (?1, '', ?2, ?3, '', '', '')",
-            rusqlite::params![hash, path, mime],
+             (file_uuid, blake3_hash, filename, relative_path, mime_type, camera_model, captured_at, tags) \
+             VALUES (?1, ?2, '', ?3, ?4, '', '', '')",
+            rusqlite::params![uuid::Uuid::now_v7().to_string(), hash, path, mime],
         )
         .unwrap();
     }
@@ -246,7 +248,7 @@ mod tests {
 
         assert_eq!(out.hits.len(), 1, "one seeded row matches 'vacation'");
         assert_eq!(out.hits[0].relative_path, "photos/vacation.jpg");
-        assert_eq!(out.hits[0].blake3_hash, "aabbcc");
+        assert_eq!(out.hits[0].blake3_hash.as_deref(), Some("aabbcc"));
     }
 
     #[tokio::test]

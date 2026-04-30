@@ -1,8 +1,8 @@
 ---
 source: crates/db/src/schema/mod.rs
-assertion_line: 157
 expression: "render_for_source(\"file_tags\")"
 ---
+
 
 
 
@@ -83,21 +83,21 @@ CREATE TRIGGER search_after_file_tags_insert
 AFTER INSERT ON file_tags
 WHEN NEW.deleted_at IS NULL
 BEGIN
-INSERT OR IGNORE INTO search_content (blake3_hash, filename, relative_path)
-    SELECT NEW.blake3_hash, fl.relative_path, fl.relative_path
+INSERT OR IGNORE INTO search_content (file_uuid, blake3_hash, filename, relative_path)
+    SELECT NEW.file_uuid, fl.blake3_hash, fl.relative_path, fl.relative_path
     FROM file_locations fl
-    WHERE fl.blake3_hash = NEW.blake3_hash AND fl.deleted_at IS NULL
+    WHERE fl.file_uuid = NEW.file_uuid AND fl.deleted_at IS NULL
     ORDER BY fl.first_seen ASC, fl.id ASC LIMIT 1;
 
     UPDATE search_content
     SET tags = COALESCE((
             SELECT GROUP_CONCAT(t.name, ' ')
             FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
-            WHERE ft.blake3_hash = NEW.blake3_hash
+            WHERE ft.file_uuid = NEW.file_uuid
               AND ft.deleted_at IS NULL
               AND t.deleted_at IS NULL
         ), '')
-    WHERE blake3_hash = NEW.blake3_hash;
+    WHERE file_uuid = NEW.file_uuid;
 END;
 
 
@@ -108,9 +108,9 @@ UPDATE search_content
     SET tags = COALESCE((
             SELECT GROUP_CONCAT(t.name, ' ')
             FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
-            WHERE ft.blake3_hash = NEW.blake3_hash
+            WHERE ft.file_uuid = NEW.file_uuid
               AND ft.deleted_at IS NULL
               AND t.deleted_at IS NULL
         ), '')
-    WHERE blake3_hash = NEW.blake3_hash;
+    WHERE file_uuid = NEW.file_uuid;
 END;

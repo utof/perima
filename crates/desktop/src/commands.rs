@@ -30,9 +30,9 @@ use perima_app::{
     SearchCommand, SearchOutput, TagCommand, TagFilter, TagOutput, VolumeCommand, VolumeOutput,
 };
 use perima_core::{
-    AppEvent, CoreError, DeviceId, EventBus, FileEvent, FileLocationRecord, LocationStatus,
-    MetadataExtractor, MetadataRepository, SearchRepository, Tag, TagRepository, VolumeId,
-    VolumeRecord,
+    AppEvent, BatchHandle, BatchId, BlakeHash, CollisionGroup, CoreError, DeviceId, EventBus,
+    FileEvent, FileLocationRecord, FileUuid, LocationStatus, MetadataExtractor, MetadataRepository,
+    SearchRepository, Tag, TagRepository, VolumeId, VolumeRecord,
 };
 use perima_db::{ReadPool, SqliteFileRepository, SqliteVolumeRepository, SqliteWriter};
 use perima_fs::{DebouncedWatcher, WalkdirScanner};
@@ -63,6 +63,14 @@ fn parse_volume_id(s: &str) -> Result<VolumeId, CoreError> {
 /// rationale.
 fn parse_tag_id(s: &str) -> Result<uuid::Uuid, CoreError> {
     uuid::Uuid::parse_str(s).map_err(|e| CoreError::Internal(format!("bad tag UUID: {e}")))
+}
+
+/// Parses a string into a `FileUuid`, wrapping a parse failure as
+/// `CoreError::Internal`.
+fn parse_file_uuid_str(s: &str) -> Result<FileUuid, CoreError> {
+    uuid::Uuid::parse_str(s)
+        .map(FileUuid)
+        .map_err(|e| CoreError::Internal(format!("bad file UUID: {e}")))
 }
 
 /// Maximum time `scan` waits for the metadata worker to drain after
@@ -168,7 +176,7 @@ impl DbEventHandler {
                 );
                 Ok(())
             }
-            FileEvent::Modified { path, volume } => {
+            FileEvent::Modified { path, volume, .. } => {
                 let n = self.repo.update_location_status(
                     *volume,
                     path,
@@ -178,7 +186,7 @@ impl DbEventHandler {
                 tracing::debug!(path = path.as_str(), rows_affected = n, "marked stale");
                 Ok(())
             }
-            FileEvent::Deleted { path, volume } => {
+            FileEvent::Deleted { path, volume, .. } => {
                 let n = self.repo.update_location_status(
                     *volume,
                     path,
@@ -188,7 +196,9 @@ impl DbEventHandler {
                 tracing::debug!(path = path.as_str(), rows_affected = n, "marked missing");
                 Ok(())
             }
-            FileEvent::Renamed { from, to, volume } => {
+            FileEvent::Renamed {
+                from, to, volume, ..
+            } => {
                 let n = self
                     .repo
                     .update_location_path(*volume, from, to, self.device)?;
@@ -526,7 +536,7 @@ pub async fn list_files_with_metadata(
     // `list_files` for maintainability.
     let filtered: Vec<FileWithMetadataPayload> = rows
         .into_iter()
-        .filter(|(loc, _)| volume_id.is_none_or(|v| loc.volume_id == v))
+        .filter(|(loc, _, _)| volume_id.is_none_or(|v| loc.volume_id == v))
         .map(FileWithMetadataPayload::from)
         .collect();
     Ok(filtered)
@@ -930,6 +940,121 @@ pub fn detach_tag_inner<T: TagRepository + ?Sized>(
     Ok(())
 }
 
+/// Attach a tag to a file by `file_uuid` instead of `blake3_hash`.
+///
+/// WHY (Task 11, spec §4.8): `file_uuid` is the stable surrogate present
+/// on every `files` row from V011 on. This is the uuid-keyed analogue of
+/// [`attach_tag`] — the frontend can drive tagging by the stable surrogate
+/// instead of the (eventually nullable) content hash. Internally resolves
+/// `file_uuid` → `blake3_hash` via [`perima_core::FileRepository::lookup_by_file_uuid`]
+/// and reuses the existing tag-attach SQL path.
+///
+/// **Pending-file caveat:** in v0.6.x every files row carries a
+/// `blake3_hash` value (post-Task-7 the placeholder is the row's
+/// `quick_hash` until the on-demand `compute_full_hash` promotes it).
+/// Tag attach therefore succeeds for both real-hash and placeholder-hash
+/// rows. Once a future migration relaxes `files.blake3_hash` to nullable
+/// (tracked at #161), this command will need to surface
+/// [`CoreError::FullHashUnavailable`] for the genuinely-NULL case; today
+/// that path is unreachable.
+///
+/// # Errors
+/// - [`CoreError::Internal`] if `file_uuid` cannot be parsed, or any
+///   adapter-level failure inside [`perima_core::FileRepository::lookup_by_file_uuid`].
+/// - [`CoreError::NotFound`] if no `files` row exists for `file_uuid`.
+/// - Other variants from the underlying [`TagCommand::Attach`] path.
+// WHY allow: Tauri owns the `State`, `String` params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn attach_tag_by_uuid(
+    file_uuid: String,
+    tag_name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Tag, CoreError> {
+    let parsed_uuid = parse_file_uuid_str(&file_uuid)?;
+    let (hash_opt, _path, _size) = state
+        .container
+        .files_repo
+        .lookup_by_file_uuid(parsed_uuid)?
+        .ok_or_else(|| {
+            CoreError::NotFound(format!("no files row for file_uuid={}", parsed_uuid.0))
+        })?;
+    // WHY require Some(hash): tag attach keys on blake3_hash — pending
+    // files (blake3_hash IS NULL in V011) cannot yet be tagged via this
+    // path. Surface a typed error pointing the user at `perima hash` first.
+    let hash = hash_opt.ok_or_else(|| {
+        CoreError::Unsupported(format!(
+            "file has no full_hash yet (file_uuid={}): run `perima hash` first",
+            parsed_uuid.0
+        ))
+    })?;
+    state
+        .container
+        .tag
+        .execute(TagCommand::Attach {
+            hash,
+            name: tag_name.clone(),
+            device: state.device_id,
+        })
+        .await?;
+    let tag = state.tag_repo.upsert_tag(&tag_name, state.device_id)?;
+    Ok(tag)
+}
+
+/// Detach a tag from a file by `file_uuid` instead of `blake3_hash`.
+///
+/// Symmetric to [`attach_tag_by_uuid`] (Task 11, spec §4.8).
+///
+/// # Errors
+/// Same shape as [`attach_tag_by_uuid`].
+// WHY allow: Tauri owns the `State`, `String` params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn detach_tag_by_uuid(
+    file_uuid: String,
+    tag_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CoreError> {
+    let parsed_uuid = parse_file_uuid_str(&file_uuid)?;
+    let parsed_id = parse_tag_id(&tag_id)?;
+    let (hash_opt, _path, _size) = state
+        .container
+        .files_repo
+        .lookup_by_file_uuid(parsed_uuid)?
+        .ok_or_else(|| {
+            CoreError::NotFound(format!("no files row for file_uuid={}", parsed_uuid.0))
+        })?;
+    // WHY require Some(hash): tag detach keys on blake3_hash — pending
+    // files (blake3_hash IS NULL in V011) cannot yet have tags detached via
+    // this path (they have no tags since attach also requires a hash).
+    let hash = hash_opt.ok_or_else(|| {
+        CoreError::Unsupported(format!(
+            "file has no full_hash yet (file_uuid={}): run `perima hash` first",
+            parsed_uuid.0
+        ))
+    })?;
+
+    let tags = state.tag_repo.list_tags()?;
+    let tag_name = tags
+        .into_iter()
+        .find(|t| t.id == parsed_id)
+        .map(|t| t.name)
+        .ok_or_else(|| CoreError::Internal(format!("tag not found: {parsed_id}")))?;
+
+    state
+        .container
+        .tag
+        .execute(TagCommand::Detach {
+            hash,
+            name: tag_name,
+            device: state.device_id,
+        })
+        .await?;
+    Ok(())
+}
+
 /// List files with their metadata and any attached tags.
 ///
 /// Returns up to `limit` [`FileWithTagsPayload`] rows. Tags are fetched
@@ -967,7 +1092,7 @@ pub async fn list_files_with_tags(
     Ok(files
         .into_iter()
         .map(|fwt| FileWithTagsPayload {
-            file: FileWithMetadataPayload::from((fwt.location, fwt.metadata)),
+            file: FileWithMetadataPayload::from((fwt.location, fwt.metadata, fwt.quick_hash)),
             tags: fwt.tags,
         })
         .collect())
@@ -996,14 +1121,20 @@ where
     T: TagRepository + ?Sized,
 {
     let rows = metadata_repo.list_with_metadata(limit as usize, volume)?;
-    let hashes: Vec<perima_core::BlakeHash> = rows.iter().map(|(loc, _)| loc.hash).collect();
+    // WHY filter_map: post-Task-11 `loc.hash` is `Option<BlakeHash>`. Pending
+    // files (no full_hash yet) cannot match the tag-by-hash lookup; their tags
+    // surface as the empty Vec below. To attach tags to pending files use the
+    // `attach_tag_by_uuid` IPC command.
+    let hashes: Vec<perima_core::BlakeHash> =
+        rows.iter().filter_map(|(loc, _, _)| loc.hash).collect();
     let tag_map = tag_repo.tags_for_hashes(&hashes)?;
     Ok(rows
         .into_iter()
-        .map(|(loc, meta)| {
-            let hash = loc.hash;
-            let file = FileWithMetadataPayload::from((loc, meta));
-            let tags = tag_map.get(&hash).cloned().unwrap_or_default();
+        .map(|(loc, meta, quick_hash)| {
+            let tags = loc
+                .hash
+                .map_or_else(Vec::new, |h| tag_map.get(&h).cloned().unwrap_or_default());
+            let file = FileWithMetadataPayload::from((loc, meta, quick_hash));
             FileWithTagsPayload { file, tags }
         })
         .collect())
@@ -1351,4 +1482,122 @@ pub async fn search_rebuild(state: tauri::State<'_, AppState>) -> Result<(), Cor
         .execute(SearchCommand::Rebuild)
         .await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Dedup commands (Task 9)
+// ---------------------------------------------------------------------------
+
+/// Compute and persist the full BLAKE3 hash for a single file (by `file_uuid`).
+///
+/// Reads the active mounted location for the file, computes the full hash via
+/// the `HashService` dispatch matrix, and promotes it onto the `files` row.
+///
+/// # Errors
+/// - [`CoreError::FullHashUnavailable`] when no mounted location exists for
+///   the given `file_uuid` or when the hash compute fails with an I/O error.
+/// - Other [`CoreError`] variants from the underlying repository.
+// WHY allow: Tauri owns `State` and value params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn compute_full_hash(
+    file_uuid: FileUuid,
+    state: tauri::State<'_, AppState>,
+) -> Result<BlakeHash, CoreError> {
+    state
+        .container
+        .compute_full_hash
+        .execute_single(file_uuid)
+        .await
+}
+
+/// Spawn a background batch that computes `full_hash` for every uuid in
+/// `file_uuids`, returning a [`BatchHandle`] immediately.
+///
+/// Per-file progress events are emitted on the `app-event` channel as
+/// [`AppEvent::VerifyProgress`]; the batch emits [`AppEvent::VerifyComplete`]
+/// when the last file finishes (or cancellation fires).
+///
+/// # Errors
+/// Currently infallible — per-file failures are routed through events
+/// rather than aborting the batch.
+// WHY allow: Tauri owns `State` and value params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn compute_full_hash_batch(
+    file_uuids: Vec<FileUuid>,
+    state: tauri::State<'_, AppState>,
+) -> Result<BatchHandle, CoreError> {
+    state
+        .container
+        .compute_full_hash
+        .execute_batch(file_uuids)
+        .await
+}
+
+/// Cancel an in-flight `compute_full_hash_batch` by `batch_id`.
+///
+/// # Errors
+/// Returns [`CoreError::NotFound`] when no batch is currently running with
+/// that id (already finished, never started, or already cancelled).
+// WHY allow: Tauri owns `State` and value params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn cancel_verify_batch(
+    batch_id: BatchId,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CoreError> {
+    state
+        .container
+        .compute_full_hash
+        .cancel_batch(batch_id)
+        .await
+}
+
+/// List every group of files whose `quick_hash` matches one or more other
+/// rows AND that have not been marked `verified_distinct`.
+///
+/// Cheap query — groups by `quick_hash` and joins to active `file_locations`
+/// rows. Empty result means there are no candidate duplicates today.
+///
+/// # Errors
+/// Returns a [`CoreError`] on database failures.
+// WHY allow: Tauri owns `State`.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn list_quick_hash_collisions(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<CollisionGroup>, CoreError> {
+    // WHY blocking call wrapped in async fn: `DedupUseCase::list_collisions`
+    // is sync (the underlying SELECT is fast). The Tauri command surface is
+    // async-by-convention; we keep the signature uniform with the rest of
+    // the dedup commands.
+    state.container.dedup.list_collisions()
+}
+
+/// Mark the given `file_uuids` as `verified_distinct = 1`.
+///
+/// Memorises that these files share a `quick_hash` but were verified to
+/// have distinct `full_hash` values. They will be excluded from subsequent
+/// [`list_quick_hash_collisions`] results. Single transaction —
+/// all-or-nothing.
+///
+/// # Errors
+/// Returns a [`CoreError`] on database failures.
+// WHY allow: Tauri owns `State` and value params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn mark_verified_distinct(
+    file_uuids: Vec<FileUuid>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CoreError> {
+    state
+        .container
+        .dedup
+        .mark_verified_distinct(file_uuids, state.device_id)
 }

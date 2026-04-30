@@ -58,6 +58,11 @@ pub struct FileWithTags {
     pub metadata: Option<MediaMetadata>,
     /// Active tags for this content hash.
     pub tags: Vec<Tag>,
+    /// Quick-hash value as a lowercase hex string, or `None` if the backfill
+    /// worker has not yet run for this row. Used by the frontend to detect
+    /// placeholder rows (`hash == quick_hash`). See
+    /// [`MetadataRepository::list_with_metadata`] for the contract.
+    pub quick_hash: Option<String>,
 }
 
 /// Filter parameters for [`TagCommand::ListFilesWithTags`].
@@ -267,17 +272,28 @@ impl TagUseCase {
                 let rows = self
                     .metadata
                     .list_with_metadata(f.limit as usize, f.volume)?;
-                let hashes: Vec<BlakeHash> = rows.iter().map(|(loc, _)| loc.hash).collect();
+                // WHY `flat_map` + `Option::iter`: post-Task-11 `loc.hash` is
+                // `Option<BlakeHash>` because pending files (no `full_hash`
+                // yet) carry no content address. Tag attachment in v0.6.x is
+                // still keyed on `blake3_hash` (the schema pivot to
+                // `file_uuid` is a follow-up — #161); rows with `None` hash
+                // contribute zero tag-lookup keys and surface with empty
+                // tags below. The desktop attach_tag_by_uuid command lets
+                // pending files acquire tags by `file_uuid` regardless.
+                let hashes: Vec<BlakeHash> =
+                    rows.iter().filter_map(|(loc, _, _)| loc.hash).collect();
                 let tag_map = self.tags.tags_for_hashes(&hashes)?;
                 let files = rows
                     .into_iter()
-                    .map(|(loc, meta)| {
-                        let hash = loc.hash;
-                        let tags = tag_map.get(&hash).cloned().unwrap_or_default();
+                    .map(|(loc, meta, quick_hash)| {
+                        let tags = loc.hash.map_or_else(Vec::new, |h| {
+                            tag_map.get(&h).cloned().unwrap_or_default()
+                        });
                         FileWithTags {
                             location: loc,
                             metadata: meta,
                             tags,
+                            quick_hash,
                         }
                     })
                     .collect();

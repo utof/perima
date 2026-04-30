@@ -74,15 +74,17 @@ pub(crate) async fn run(container: &AppContainer, args: &SearchArgs) -> Result<(
     }
 
     // Plain table output: HASH(8) | PATH | RANK
+    // WHY map+default: post-Task-11 `SearchHit.blake3_hash` is `Option<String>`
+    // because pending files (no full_hash) can still hit the FTS index.
+    // Render an 8-char "pending" sigil so columns align.
     println!("{:<8}  {:<60}  RANK", "HASH", "PATH");
     println!("{}", "-".repeat(80));
     for h in &hits {
-        println!(
-            "{:<8}  {:<60}  {:.4}",
-            &h.blake3_hash[..8.min(h.blake3_hash.len())],
-            h.relative_path,
-            h.rank
-        );
+        let hash_short: String = h
+            .blake3_hash
+            .as_deref()
+            .map_or_else(|| "pending ".to_owned(), |s| s[..8.min(s.len())].to_owned());
+        println!("{:<8}  {:<60}  {:.4}", hash_short, h.relative_path, h.rank);
     }
     Ok(())
 }

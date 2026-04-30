@@ -98,7 +98,16 @@ pub(crate) async fn run(
             absolute_path.display(),
         )));
     };
-    let hash = record.hash;
+    // WHY require Some(hash): `perima metadata <path>` works on the
+    // content-hash key. Pending files (no full_hash) cannot be re-extracted
+    // until `perima verify` populates the hash. Surface a typed error pointing
+    // the user at the right next step.
+    let hash = record.hash.ok_or_else(|| {
+        CoreError::Unsupported(format!(
+            "file has no full_hash yet: {} (run `perima verify` first)",
+            absolute_path.display(),
+        ))
+    })?;
 
     // Spawn queue + enqueue. A fresh `CancellationToken` is fine here:
     // `perima metadata` is interactive and short-lived; Ctrl-C during
@@ -259,11 +268,12 @@ fn print_table(meta: &MediaMetadata, record: &FileLocationRecord) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use perima_core::{BlakeHash, FileSize, LocationStatus, MediaPath, VolumeId};
+    use perima_core::{BlakeHash, FileSize, FileUuid, LocationStatus, MediaPath, VolumeId};
 
     fn rec(p: &str) -> FileLocationRecord {
         FileLocationRecord {
-            hash: BlakeHash::from_bytes([0u8; 32]),
+            file_uuid: FileUuid::new(),
+            hash: Some(BlakeHash::from_bytes([0u8; 32])),
             size: FileSize(0),
             volume_id: VolumeId(uuid::Uuid::nil()),
             relative_path: MediaPath::new(p),

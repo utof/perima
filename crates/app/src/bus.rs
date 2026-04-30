@@ -116,5 +116,7 @@ const fn event_kind(e: &AppEvent) -> &'static str {
         AppEvent::File(_) => "File",
         AppEvent::ScanCompleted { .. } => "ScanCompleted",
         AppEvent::IndexInvalidated { .. } => "IndexInvalidated",
+        AppEvent::VerifyProgress { .. } => "VerifyProgress",
+        AppEvent::VerifyComplete { .. } => "VerifyComplete",
     }
 }

@@ -30,9 +30,17 @@ fn legacy_trigger_names_are_dropped() {
     // WHY: DROP TRIGGER matches by name only — the body just has to be
     // syntactically valid SQLite, not a faithful copy of the original V007
     // body. Keeping it minimal keeps the test resilient to schema drift.
+    //
+    // WHY DROP IF EXISTS first: some legacy names (e.g.
+    // `search_after_location_hash_change_retire` post-Task-3) are still
+    // created by an older migration (V008). The pre-seed CREATE would
+    // collide; explicit DROP first guarantees the test exercises a
+    // freshly-recreated minimal trigger so the install_fts_triggers DROP
+    // is the assertion under test.
     for name in LEGACY_TRIGGER_NAMES {
         conn.execute_batch(&format!(
-            "CREATE TRIGGER {name} \
+            "DROP TRIGGER IF EXISTS {name}; \
+             CREATE TRIGGER {name} \
              AFTER UPDATE OF blake3_hash ON file_locations \
              WHEN OLD.blake3_hash != NEW.blake3_hash \
              BEGIN \

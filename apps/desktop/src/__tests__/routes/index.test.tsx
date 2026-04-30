@@ -69,8 +69,13 @@ describe("IndexRoute composition", () => {
     });
 
     // Both vacation + sunset rows visible in mode=all.
-    expect(screen.getByRole("button", { name: /vacation/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /sunset/i })).toBeInTheDocument();
+    // WHY anchored regex (added 2026-04-25): TagChip now also renders an X
+    // button with aria-label "Remove vacation" for inline detach, so plain
+    // /vacation/i matches multiple buttons. Anchor at start to scope to
+    // the sidebar facet button whose accessible name begins with the tag
+    // name itself.
+    expect(screen.getByRole("button", { name: /^vacation/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^sunset/i })).toBeInTheDocument();
   });
 
   it("case 2: tag filter only → narrowed; sidebar All count remains full set", async () => {
@@ -84,8 +89,9 @@ describe("IndexRoute composition", () => {
       expect(allBtn.textContent).toContain("4");
     });
 
-    // vacation count chip = 2 (files a + b).
-    const vacationBtn = screen.getByRole("button", { name: /vacation/i });
+    // vacation count chip = 2 (files a + b). Anchored to skip TagChip's
+    // "Remove vacation" detach buttons in the table cells.
+    const vacationBtn = screen.getByRole("button", { name: /^vacation/i });
     expect(vacationBtn.textContent).toContain("2");
   });
 
@@ -93,9 +99,9 @@ describe("IndexRoute composition", () => {
     // Three hits in rank order b > c > a — sortByRank inverts (most negative wins).
     mockSearch.mockReturnValue(
       okAsync<SearchHit[]>([
-        { blake3_hash: "a", volume_id: "vol", relative_path: "a.jpg", rank: -1.0 },
-        { blake3_hash: "b", volume_id: "vol", relative_path: "b.jpg", rank: -2.5 },
-        { blake3_hash: "c", volume_id: "vol", relative_path: "c.jpg", rank: -1.5 },
+        { file_uuid: "uuid-a", blake3_hash: "a", volume_id: "vol", relative_path: "a.jpg", rank: -1.0 },
+        { file_uuid: "uuid-b", blake3_hash: "b", volume_id: "vol", relative_path: "b.jpg", rank: -2.5 },
+        { file_uuid: "uuid-c", blake3_hash: "c", volume_id: "vol", relative_path: "c.jpg", rank: -1.5 },
       ]),
     );
 
@@ -113,9 +119,9 @@ describe("IndexRoute composition", () => {
   it("case 4: search + tag → INTERSECTED, mode=facets, All count = intersection size (#25 pin)", async () => {
     mockSearch.mockReturnValue(
       okAsync<SearchHit[]>([
-        { blake3_hash: "a", volume_id: "vol", relative_path: "a.jpg", rank: -1.0 },
-        { blake3_hash: "b", volume_id: "vol", relative_path: "b.jpg", rank: -2.5 },
-        { blake3_hash: "c", volume_id: "vol", relative_path: "c.jpg", rank: -1.5 },
+        { file_uuid: "uuid-a", blake3_hash: "a", volume_id: "vol", relative_path: "a.jpg", rank: -1.0 },
+        { file_uuid: "uuid-b", blake3_hash: "b", volume_id: "vol", relative_path: "b.jpg", rank: -2.5 },
+        { file_uuid: "uuid-c", blake3_hash: "c", volume_id: "vol", relative_path: "c.jpg", rank: -1.5 },
       ]),
     );
 

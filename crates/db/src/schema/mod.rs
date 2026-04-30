@@ -99,7 +99,6 @@ const fn body_kind_name(b: spec::BodyKind) -> &'static str {
         spec::BodyKind::SearchContentAfterUpdate => "SearchContentAfterUpdate",
         spec::BodyKind::SearchContentAfterDelete => "SearchContentAfterDelete",
         spec::BodyKind::FileLocationsInsert => "FileLocationsInsert",
-        spec::BodyKind::LocationHashChangeRetire => "LocationHashChangeRetire",
         spec::BodyKind::LocationHashChangeSeed => "LocationHashChangeSeed",
         spec::BodyKind::RenameRepresentative => "RenameRepresentative",
         spec::BodyKind::LocationSoftDelete => "LocationSoftDelete",

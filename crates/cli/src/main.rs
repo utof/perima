@@ -21,14 +21,17 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use perima_app::{AppContainer, AppDeps, EventHandler};
+use perima_app::{
+    AppContainer, AppDeps, BackfillRate, EventHandler, QuickHashBackfillWorker,
+    backfill::{BACKFILL_QUERY_LIMIT, choose_backfill_rate},
+};
 use perima_core::{
-    FileRepository, HashService, MetadataRepository, Scanner, SearchRepository, TagRepository,
-    VolumeRepository,
+    FileRepository, HashService, IdentityCacheRepository, MetadataRepository, Scanner,
+    SearchRepository, TagRepository, VolumeRepository,
 };
 use perima_db::{
-    ReadPool, SqliteFileRepository, SqliteMetadataRepository, SqliteSearchRepository,
-    SqliteTagRepository, SqliteVolumeRepository, SqliteWriter,
+    ReadPool, SqliteFileRepository, SqliteIdentityCacheRepository, SqliteMetadataRepository,
+    SqliteSearchRepository, SqliteTagRepository, SqliteVolumeRepository, SqliteWriter,
 };
 use perima_fs::WalkdirScanner;
 use perima_hash::Blake3Service;
@@ -107,6 +110,19 @@ enum Command {
     /// Tag management: add, remove, and list tags.
     Tag(cmd::tag::TagArgs),
 
+    /// Compute the full BLAKE3 hash for one or more indexed files.
+    ///
+    /// Use `perima hash <path>` for a single file, `--all` to hash every
+    /// indexed file, or `--pending` to hash only files whose full hash has
+    /// not yet been computed.
+    Hash(cmd::hash::HashArgs),
+
+    /// Inspect and resolve quick-hash duplicate candidates.
+    ///
+    /// Use `--check` to list groups, `--verify` to compute full hashes on
+    /// candidates, or `mark-distinct <uuid>...` to memorise false positives.
+    Dedup(cmd::dedup::DedupArgs),
+
     /// Full-text search over indexed file metadata and tags.
     Search(cmd::search::SearchArgs),
 
@@ -138,6 +154,11 @@ enum Command {
         #[arg(long, default_value_t = 2)]
         include_rotated: usize,
     },
+
+    /// Move legacy CLI data (`~/.local/share/perima/`) to the canonical
+    /// desktop-shared path. Only needed if you used perima CLI before v0.7.0
+    /// (GH #154). Safe to run repeatedly — refuses to overwrite an existing DB.
+    MigrateDataDir(cmd::migrate_data_dir::MigrateDataDirArgs),
 }
 
 /// Entry point.
@@ -211,6 +232,10 @@ async fn main() -> ExitCode {
 
         Command::Tag(args) => dispatch_tag(&args, &config).await,
 
+        Command::Hash(args) => dispatch_hash(&args, &config).await,
+
+        Command::Dedup(args) => dispatch_dedup(&args, &config).await,
+
         Command::Search(args) => dispatch_search(&args, &config).await,
 
         Command::Volumes => dispatch_volumes(&config).await,
@@ -223,6 +248,8 @@ async fn main() -> ExitCode {
             path,
             include_rotated,
         } => dispatch_debug_report(path, include_rotated),
+
+        Command::MigrateDataDir(args) => dispatch_migrate_data_dir(&args),
     }
 }
 
@@ -234,6 +261,20 @@ async fn main() -> ExitCode {
 /// from inside an `async fn`.
 fn dispatch_debug_report(path: Option<PathBuf>, include_rotated: usize) -> ExitCode {
     match cmd::debug_report::run(path, include_rotated) {
+        Ok(()) => ExitCode::from(0),
+        Err(e) => {
+            eprintln!("perima: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Run the `migrate-data-dir` subcommand.
+///
+/// WHY sync (no `async`): migration is pure filesystem rename — no DB or
+/// async port involved.
+fn dispatch_migrate_data_dir(args: &cmd::migrate_data_dir::MigrateDataDirArgs) -> ExitCode {
+    match cmd::migrate_data_dir::run(args) {
         Ok(()) => ExitCode::from(0),
         Err(e) => {
             eprintln!("perima: {e}");
@@ -287,7 +328,9 @@ fn build_container(
         reads.clone(),
     ));
     let search: Arc<dyn SearchRepository> =
-        Arc::new(SqliteSearchRepository::new(writer.sender(), reads));
+        Arc::new(SqliteSearchRepository::new(writer.sender(), reads.clone()));
+    let identity_cache: Arc<dyn IdentityCacheRepository> =
+        Arc::new(SqliteIdentityCacheRepository::new(writer.sender(), reads));
     let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
     let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());
     // WHY no explicit `writer` keep-alive: every adapter above holds a
@@ -316,6 +359,7 @@ fn build_container(
         tags,
         metadata,
         search,
+        identity_cache,
         hasher,
         scanner,
         thumbnailer,
@@ -467,7 +511,85 @@ async fn dispatch_scan(
         ) as perima_app::OnPersist)
     };
 
+    // Spawn the quick_hash backfill worker in the background (spec §4.1.5).
+    // WHY here (not in main): this is the primary command that reads the DB
+    // regularly; spawning here ensures the backfill runs alongside the scan
+    // without blocking the user's foreground operation.
+    spawn_backfill(&container, config.device_id, cancel.token());
+
     map_scan_result(cmd::scan::run(&container, config.device_id, cancel, on_persist, &args).await)
+}
+
+/// Spawn the `quick_hash` backfill worker in the background.
+///
+/// Queries the database for `files.quick_hash IS NULL` rows via
+/// [`FileRepository::list_files_needing_backfill`], selects an appropriate
+/// rate (spec §4.1.5: more than 10k rows → 50/s, otherwise unlimited), and
+/// `tokio::spawn`s the worker. The `JoinHandle` is intentionally dropped —
+/// the task runs to completion independently.
+///
+/// WHY `device_id` arg: `upsert_file_with_quick_hash` needs the device id for
+/// the `updated_at + device_id` per-row CRDT columns (CLAUDE.md schema rules).
+fn spawn_backfill(
+    container: &AppContainer,
+    device_id: perima_core::DeviceId,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let rows = match container
+        .files_repo
+        .list_files_needing_backfill(BACKFILL_QUERY_LIMIT)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "backfill: could not query null quick_hash rows");
+            return;
+        }
+    };
+
+    if rows.is_empty() {
+        return; // Nothing to backfill — common path on healthy installs.
+    }
+
+    let null_count = rows.len() as u64;
+    let rate = choose_backfill_rate(null_count);
+    tracing::info!(
+        null_count,
+        rate = ?rate,
+        "spawning quick_hash backfill worker"
+    );
+
+    // Convert BackfillFileRow (core type) to BackfillRow (app type).
+    let backfill_rows: Vec<_> = rows
+        .into_iter()
+        .filter_map(|r| {
+            r.active_path.map(|path| perima_app::BackfillRow {
+                hash: r.hash,
+                size_bytes: r.size_bytes,
+                path,
+            })
+        })
+        .collect();
+
+    let null_count_after_filter = backfill_rows.len() as u64;
+    let rate: BackfillRate = if null_count_after_filter == null_count {
+        rate
+    } else {
+        // Some rows had no active path; re-evaluate rate with actual count.
+        choose_backfill_rate(null_count_after_filter)
+    };
+
+    let _handle = QuickHashBackfillWorker::spawn(
+        Box::new(backfill_rows.into_iter()),
+        Arc::clone(&container.hasher),
+        Arc::clone(&container.files_repo),
+        device_id,
+        rate,
+        Arc::clone(&container.events),
+        cancel,
+    );
+    // WHY handle dropped: task runs independently; process exits naturally
+    // when the CLI command completes, which cancels the token automatically
+    // (caller holds the Cancellation which wraps the token).
 }
 
 /// Convert a scan result to a process `ExitCode`.
@@ -550,6 +672,48 @@ async fn dispatch_tag(args: &cmd::tag::TagArgs, config: &Config) -> ExitCode {
         }
     };
     match cmd::tag::run(&container, &config.data_dir, config.device_id, args).await {
+        Ok(()) => ExitCode::from(0),
+        Err(e) => {
+            eprintln!("perima: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Run the `hash` subcommand.
+async fn dispatch_hash(args: &cmd::hash::HashArgs, config: &Config) -> ExitCode {
+    let db_path = config.data_dir.join("perima.db");
+    let container = match build_container(&db_path, vec![]) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("perima: database: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match cmd::hash::run(&container, &config.data_dir, config.device_id, args).await {
+        Ok(()) => ExitCode::from(0),
+        Err(perima_core::CoreError::InvalidPath(msg)) => {
+            eprintln!("perima: {msg}");
+            ExitCode::from(2)
+        }
+        Err(e) => {
+            eprintln!("perima: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Run the `dedup` subcommand.
+async fn dispatch_dedup(args: &cmd::dedup::DedupArgs, config: &Config) -> ExitCode {
+    let db_path = config.data_dir.join("perima.db");
+    let container = match build_container(&db_path, vec![]) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("perima: database: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match cmd::dedup::run(&container, &config.data_dir, config.device_id, args).await {
         Ok(()) => ExitCode::from(0),
         Err(e) => {
             eprintln!("perima: {e}");

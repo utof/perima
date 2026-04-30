@@ -14,6 +14,16 @@ publish = false  # WHY: intra-workspace only; not published to crates.io
 crate-type = ["staticlib", "cdylib", "rlib"]
 name = "perima_desktop"
 
+# WHY [[bin]] (added 2026-04-25): `tauri build` invokes
+# `cargo build --bins` to produce the desktop executable. Without this entry
+# the build silently no-ops with `target filter 'bins' specified, but no
+# targets matched`, leaving `target/release/perima-desktop` absent and the
+# bundler with nothing to package. The lib stays unchanged for the
+# future mobile/UniFFI shells.
+[[bin]]
+name = "perima-desktop"
+path = "src/main.rs"
+
 [dependencies]
 perima-app   = { workspace = true, features = ["specta"] }
 perima-core  = { path = "../core", features = ["specta"] }
