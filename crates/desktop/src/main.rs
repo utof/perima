@@ -27,7 +27,13 @@ fn main() {
     let _guard = runtime.enter();
 
     if let Err(err) = perima_desktop::run() {
-        eprintln!("perima-desktop exited with error: {err:#}");
+        // WHY allow(clippy::print_stderr): this is the terminal error path in a
+        // binary entry point — writing to stderr before exit is the correct UX.
+        // The CLI crate suppresses the same lint with the same rationale.
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("perima-desktop exited with error: {err:#}");
+        }
         std::process::exit(1);
     }
 }
