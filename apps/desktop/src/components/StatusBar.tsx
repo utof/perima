@@ -19,6 +19,7 @@
 import { useShallow } from "zustand/shallow";
 import { useUiStore } from "../stores/ui";
 import { useCollisions } from "../queries/dedup";
+import { useBackupDatabase } from "../queries/backup";
 import CollisionPill from "./CollisionPill";
 import type { BackupFailureReason, CoreError, FullHashUnavailableReason } from "../bindings";
 
@@ -110,6 +111,7 @@ export default function StatusBar() {
   // so CollisionPill renders the neutral "no candidate duplicates" state
   // rather than crashing on undefined.
   const { data: collisions = [] } = useCollisions();
+  const backupMutation = useBackupDatabase();
 
   let summary: string;
   if (status === "scanning") {
@@ -121,9 +123,21 @@ export default function StatusBar() {
   }
 
   return (
-    <div className="px-6 py-2 bg-gray-800 text-xs text-gray-400 border-t border-gray-700 flex justify-between">
+    <div className="px-6 py-2 bg-gray-800 text-xs text-gray-400 border-t border-gray-700 flex justify-between items-center">
       <span>{summary}</span>
-      <CollisionPill groups={collisions} />
+      <div className="flex items-center gap-3">
+        {/* WHY type="button": prevents form submission if StatusBar is ever
+            rendered inside a form element. */}
+        <button
+          type="button"
+          onClick={() => { backupMutation.mutate({}); }}
+          disabled={backupMutation.isPending}
+          className="px-2 py-0.5 text-xs rounded bg-slate-700 text-slate-100 hover:bg-slate-600 disabled:opacity-50"
+        >
+          {backupMutation.isPending ? "Backing up…" : "Backup"}
+        </button>
+        <CollisionPill groups={collisions} />
+      </div>
     </div>
   );
 }
