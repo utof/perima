@@ -24,19 +24,19 @@ interface FileGridProps {
 export default function FileGrid({ files, loading = false }: FileGridProps) {
   if (loading) {
     return (
-      <div className="p-6 text-center text-gray-400" role="status">
+      <div className="p-6 text-center text-muted-foreground" role="status">
         Loading...
       </div>
     );
   }
   if (files.length === 0) {
     return (
-      <div className="p-6 text-center text-gray-500">No files indexed yet</div>
+      <div className="p-6 text-center text-muted-foreground">No files indexed yet</div>
     );
   }
   return (
     <div
-      className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-2 p-2"
+      className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-4 p-6"
       role="list"
     >
       {files.map((f) => (
@@ -55,10 +55,10 @@ function FileGridTile({ file }: { file: FileWithTagsPayload }) {
   const filename = file.relative_path.split("/").pop() ?? file.relative_path;
   return (
     <div
-      className="aspect-square bg-gray-800 rounded overflow-hidden flex flex-col"
+      className="bg-card rounded-md shadow-e1 hover:shadow-e2 hover:bg-popover transition-colors duration-micro ease-perima cursor-pointer overflow-hidden flex flex-col"
       role="listitem"
     >
-      <div className="flex-1 flex items-center justify-center min-h-0">
+      <div className="aspect-square bg-muted flex items-center justify-center">
         {ready ? (
           // WHY convertFileSrc: Tauri's asset protocol maps absolute
           // disk paths to a custom URL scheme the WebView can load
@@ -72,16 +72,16 @@ function FileGridTile({ file }: { file: FileWithTagsPayload }) {
           <PlaceholderIcon status={file.thumbnail_status} />
         )}
       </div>
-      <div className="p-1 text-xs truncate text-gray-200" title={filename}>
+      <div className="px-3 py-2 text-sm text-foreground truncate" title={filename}>
         {filename}
       </div>
       {file.tags.length > 0 && (
-        <div className="px-1 pb-1 flex flex-wrap gap-0.5">
+        <div className="px-3 pb-2 flex flex-wrap gap-1">
           {file.tags.slice(0, 3).map((t) => (
             <TagChip key={t.id} tag={t} />
           ))}
           {file.tags.length > 3 && (
-            <span className="text-xs text-gray-400 ml-1">
+            <span className="text-xs text-muted-foreground ml-1">
               +{file.tags.length - 3}
             </span>
           )}
@@ -109,7 +109,7 @@ function PlaceholderIcon({ status }: { status: string | null | undefined }) {
         : "no thumbnail";
   return (
     <div
-      className="text-gray-400 text-2xl"
+      className="text-muted-foreground text-2xl"
       role="img"
       aria-label={label}
       data-testid={`placeholder-${status ?? "unknown"}`}

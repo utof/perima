@@ -24,6 +24,7 @@
  * a small UX win. We keep it to a one-line click handler; no third-party
  * clipboard lib needed.
  */
+import { XIcon } from "@phosphor-icons/react";
 import type { FileWithTagsPayload } from "../bindings";
 import { useComputeFullHash } from "../queries/dedup";
 
@@ -62,28 +63,28 @@ export default function FileSidebar({ file, onClose }: FileSidebarProps) {
 
   return (
     <aside
-      className="w-72 flex-shrink-0 bg-gray-800 border-l border-gray-700 p-4 overflow-y-auto flex flex-col gap-4"
+      className="w-96 flex-shrink-0 bg-popover border-l border-border p-6 overflow-y-auto flex flex-col gap-4"
       aria-label="File detail"
     >
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-gray-200">File detail</h2>
+        <h2 className="text-lg font-semibold text-foreground">File detail</h2>
         <button
           onClick={onClose}
           aria-label="Close file detail"
-          className="text-gray-400 hover:text-gray-100 text-lg leading-none"
+          className="inline-flex items-center justify-center rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors duration-micro ease-perima focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          ×
+          <XIcon size={14} weight="bold" />
         </button>
       </div>
 
       {/* UUID */}
       <section>
-        <p className="text-xs text-gray-400 uppercase tracking-wider mb-1">
+        <p className="eyebrow text-muted-foreground mb-1">
           UUID
         </p>
         <code
-          className="font-mono text-xs text-gray-200 break-all"
+          className="mono-metadata text-foreground break-all"
           data-testid="file-uuid"
         >
           {file.file_uuid.slice(0, 8)}…
@@ -93,11 +94,11 @@ export default function FileSidebar({ file, onClose }: FileSidebarProps) {
       {/* Quick hash */}
       {file.quick_hash !== null && (
         <section>
-          <p className="text-xs text-gray-400 uppercase tracking-wider mb-1">
+          <p className="eyebrow text-muted-foreground mb-1">
             Quick hash
           </p>
           <code
-            className="font-mono text-xs text-gray-500 break-all"
+            className="mono-metadata text-muted-foreground break-all"
             data-testid="quick-hash"
           >
             {file.quick_hash}
@@ -107,14 +108,14 @@ export default function FileSidebar({ file, onClose }: FileSidebarProps) {
 
       {/* Full hash */}
       <section>
-        <p className="text-xs text-gray-400 uppercase tracking-wider mb-1">
+        <p className="eyebrow text-muted-foreground mb-1">
           Full hash
         </p>
         {!isPlaceholder && file.hash !== null ? (
           // WHY click-to-copy on the <code> element: spec §4.6.3 UX win,
           // ≤10 LOC so we land it inline rather than deferring.
           <code
-            className="font-mono text-xs text-gray-200 break-all cursor-copy hover:text-blue-300"
+            className="mono-metadata text-foreground break-all cursor-copy hover:text-primary transition-colors duration-micro"
             title="Click to copy"
             onClick={handleCopyHash}
             data-testid="full-hash"
@@ -122,7 +123,7 @@ export default function FileSidebar({ file, onClose }: FileSidebarProps) {
             {file.hash}
           </code>
         ) : (
-          <span className="text-xs text-gray-500 italic" data-testid="hash-pending">
+          <span className="mono-metadata text-muted-foreground italic" data-testid="hash-pending">
             pending
           </span>
         )}
@@ -135,7 +136,7 @@ export default function FileSidebar({ file, onClose }: FileSidebarProps) {
           disabled={compute.isPending}
           aria-label="Compute canonical hash"
           data-testid="compute-hash-btn"
-          className="mt-auto bg-blue-600 hover:bg-blue-500 disabled:bg-gray-600 text-white text-xs font-medium rounded px-3 py-2 transition-colors"
+          className="mt-auto inline-flex items-center justify-center gap-2 rounded-full px-5 py-2 text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors duration-micro ease-perima focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:opacity-40 disabled:pointer-events-none"
         >
           {compute.isPending ? "Computing…" : "Compute canonical hash"}
         </button>

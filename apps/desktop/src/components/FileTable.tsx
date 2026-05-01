@@ -81,7 +81,7 @@ function RowTagsCell({
         placeholder="+ tag"
         aria-label={`Add tag to file ${labelKey.slice(0, 8)}`}
         disabled={isPending}
-        className="w-20 bg-gray-700 text-white text-xs rounded px-1.5 py-0.5 placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
+        className="w-20 bg-input text-foreground text-xs rounded-md border border-border px-2 py-0.5 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       />
     </div>
   );
@@ -148,7 +148,7 @@ export default function FileTable({ files, loading }: FileTableProps) {
   });
 
   const thCls =
-    "px-3 py-2 text-left text-xs font-semibold uppercase tracking-wider text-gray-400 cursor-pointer select-none hover:text-gray-100";
+    "px-4 py-2 text-left eyebrow text-muted-foreground cursor-pointer select-none hover:text-foreground";
 
   function arrow(col: SortColumn) {
     if (sortBy !== col) return null;
@@ -157,8 +157,8 @@ export default function FileTable({ files, loading }: FileTableProps) {
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm text-gray-200">
-        <thead className="bg-gray-800">
+      <table className="w-full text-sm">
+        <thead className="border-b border-border">
           <tr>
             <th className={thCls} onClick={() => { handleSort("hash"); }}>
               HASH{arrow("hash")}
@@ -181,13 +181,13 @@ export default function FileTable({ files, loading }: FileTableProps) {
         <tbody>
           {loading ? (
             <tr>
-              <td colSpan={6} className="px-3 py-6 text-center text-gray-400">
+              <td colSpan={6} className="px-4 py-6 text-center text-muted-foreground">
                 Loading...
               </td>
             </tr>
           ) : sorted.length === 0 ? (
             <tr>
-              <td colSpan={6} className="px-3 py-6 text-center text-gray-500">
+              <td colSpan={6} className="px-4 py-6 text-center text-muted-foreground">
                 No files indexed yet
               </td>
             </tr>
@@ -208,14 +208,14 @@ export default function FileTable({ files, loading }: FileTableProps) {
                     selectedFileUuid === f.file_uuid ? null : f.file_uuid,
                   );
                 }}
-                className={`border-t border-gray-700 cursor-pointer ${
+                className={`border-b border-border cursor-pointer transition-colors duration-micro ${
                   selectedFileUuid === f.file_uuid
-                    ? "bg-blue-900"
-                    : "odd:bg-gray-900 even:bg-gray-800 hover:bg-gray-700"
+                    ? "bg-accent text-accent-foreground"
+                    : "hover:bg-muted"
                 }`}
                 aria-selected={selectedFileUuid === f.file_uuid}
               >
-                <td className="px-3 py-2 font-mono text-xs">
+                <td className="px-4 py-2 mono-metadata text-muted-foreground">
                   {/* WHY isPlaceholder check: pre-V012 blake3_hash is NOT NULL —
                     * quick_hash is stored there until compute_full_hash promotes
                     * the real hash. f.hash === null never fires today; equality
@@ -224,15 +224,15 @@ export default function FileTable({ files, loading }: FileTableProps) {
                     ? "pending"
                     : f.hash.slice(0, 8)}
                 </td>
-                <td className="px-3 py-2">{humanSize(f.size)}</td>
-                <td className="px-3 py-2 font-mono text-xs">
+                <td className="px-4 py-2">{humanSize(f.size)}</td>
+                <td className="px-4 py-2 mono-metadata text-muted-foreground">
                   {f.volume_id.slice(0, 8)}
                 </td>
-                <td className="px-3 py-2 font-mono text-xs max-w-xs truncate">
+                <td className="px-4 py-2 mono-metadata text-muted-foreground max-w-xs truncate">
                   {f.relative_path}
                 </td>
-                <td className="px-3 py-2">{f.status}</td>
-                <td className="px-3 py-2">
+                <td className="px-4 py-2">{f.status}</td>
+                <td className="px-4 py-2">
                   <RowTagsCell
                     fileUuid={f.file_uuid}
                     hash={f.hash}
