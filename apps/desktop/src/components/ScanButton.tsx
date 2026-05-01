@@ -4,6 +4,7 @@
  */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
+import { DownloadSimpleIcon } from "@phosphor-icons/react";
 import * as api from "../api";
 import { filesKeys } from "../queries/files";
 import { tagsKeys } from "../queries/tags";
@@ -67,8 +68,14 @@ export default function ScanButton() {
       type="button"
       onClick={() => { void onClick(); }}
       disabled={busy}
-      className="px-3 py-1.5 text-sm font-medium rounded bg-emerald-600 text-white hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed"
+      className="inline-flex items-center gap-2 rounded-full px-5 py-2 text-sm font-medium
+                 bg-primary text-primary-foreground hover:bg-primary/90
+                 transition-colors duration-micro ease-perima
+                 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
+                 focus-visible:ring-offset-2 focus-visible:ring-offset-background
+                 disabled:opacity-40 disabled:pointer-events-none"
     >
+      <DownloadSimpleIcon size={18} weight="regular" />
       {busy ? "Scanning…" : "Scan folder"}
     </button>
   );
