@@ -92,6 +92,8 @@ clap         = { version = "4", features = ["derive"] }
 tempfile     = "3"
 insta        = { version = "1", features = ["yaml", "filters"] }
 proptest     = "1"
+assert_cmd   = "2"
+predicates   = "3"
 rayon        = "1"
 ctrlc        = { version = "3", features = ["termination"] }
 chrono       = { version = "0.4", features = ["serde"] }
