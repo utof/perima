@@ -1,55 +1,23 @@
+import { XIcon } from "@phosphor-icons/react";
 import type { Tag } from "../bindings";
 
 /** Props for {@link TagChip}. */
 interface TagChipProps {
   /** Tag to render. */
   tag: Tag;
-  /** Optional callback to remove the tag; when provided, renders an x button. */
+  /** Optional callback to remove the tag; when provided, renders an X button. */
   onRemove?: () => void;
 }
 
 /**
- * Compute a procedural color index (0..11) from a tag name.
- *
- * WHY byte-sum mod 12 (not spec's blake3[0] % 12): blake3 isn't available
- * in the TS bundle without a WASM dependency. The byte-sum is a deliberate
- * intentional deviation from the spec for cosmetic coloring only — collisions
- * (two tags sharing a chip color) are harmless. If a native/backend shell
- * ever needs to agree on chip color, revisit with a shared WASM blake3.
- */
-function colorIndexFor(name: string): number {
-  const bytes = new TextEncoder().encode(name);
-  let sum = 0;
-  for (const b of bytes) sum = (sum + b) % 256;
-  return sum % 12;
-}
-
-const CHIP_COLORS = [
-  "bg-red-700",
-  "bg-orange-700",
-  "bg-amber-700",
-  "bg-yellow-700",
-  "bg-lime-700",
-  "bg-green-700",
-  "bg-emerald-700",
-  "bg-teal-700",
-  "bg-cyan-700",
-  "bg-sky-700",
-  "bg-blue-700",
-  "bg-indigo-700",
-] as const;
-
-/**
- * A colored pill displaying a tag name, with optional remove button.
+ * A muted-background pill displaying a tag name, with an optional X icon
+ * for removal. Tag identity is conveyed by the name text — chip color is
+ * uniform across all tags by design (design-system-v1).
  */
 export default function TagChip({ tag, onRemove }: TagChipProps) {
-  // WHY fallback to bg-blue-700: colorIndexFor is bounded to 0..11 which
-  // matches CHIP_COLORS.length exactly; the fallback satisfies strict-type-checked
-  // (noUncheckedIndexedAccess sees the index as `number`, not a literal).
-  const bg = CHIP_COLORS[colorIndexFor(tag.name)] ?? "bg-blue-700";
   return (
     <span
-      className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full ${bg} text-white`}
+      className="inline-flex items-center gap-1 rounded-full bg-muted text-foreground px-3 py-0.5 text-sm"
       data-testid="tag-chip"
     >
       <span>{tag.name}</span>
@@ -58,9 +26,9 @@ export default function TagChip({ tag, onRemove }: TagChipProps) {
           type="button"
           onClick={onRemove}
           aria-label={`Remove ${tag.name}`}
-          className="ml-0.5 text-white/80 hover:text-white"
+          className="inline-flex items-center justify-center rounded-full text-muted-foreground hover:text-foreground transition-colors duration-micro ease-perima focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          &times;
+          <XIcon size={12} weight="bold" />
         </button>
       )}
     </span>
