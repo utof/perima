@@ -78,7 +78,7 @@ export default function IndexRoute() {
     : null;
 
   return (
-    <div className="flex-1 flex overflow-hidden">
+    <div className="flex h-full overflow-hidden bg-background">
       {tags.length > 0 && (
         <TagSidebar
           tags={tags}
@@ -87,11 +87,11 @@ export default function IndexRoute() {
           mode={searchActive ? "facets" : "all"}
         />
       )}
-      <main className="flex-1 overflow-auto p-4">
+      <section className="flex-1 min-w-0 overflow-y-auto">
         {viewMode === "table"
           ? <FileTable files={visibleFiles} loading={filesLoading} />
           : <FileGrid files={visibleFiles} loading={filesLoading} />}
-      </main>
+      </section>
       {selectedFile !== null && (
         <FileSidebar
           file={selectedFile}
