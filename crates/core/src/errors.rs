@@ -76,6 +76,24 @@ pub enum CoreError {
         /// The specific reason the full hash is not available.
         reason: FullHashUnavailableReason,
     },
+
+    /// Database backup failed. The `reason` enum carries a typed cause;
+    /// frontend pattern-matches on `reason.kind` for targeted UX.
+    ///
+    /// WHY a dedicated variant (not reusing `Io`): backup failures need
+    /// targeted UX. `TargetExists` says "pass --force"; `Io` would say
+    /// "something went wrong" — much worse.
+    ///
+    /// WHY `{reason}` not `{reason:?}` in `#[error]`: `BackupFailureReason`
+    /// itself derives `thiserror::Error`, so its per-variant `#[error]`
+    /// produces the human-friendly message via Display. Debug printing
+    /// (`{reason:?}`) would emit `TargetExists { path: "..." }` which is
+    /// uglier and not user-facing.
+    #[error("backup failed: {reason}")]
+    BackupFailed {
+        /// The specific reason the backup failed.
+        reason: BackupFailureReason,
+    },
 }
 
 /// Why a `full_hash` could not be produced.
@@ -120,4 +138,57 @@ impl From<std::io::Error> for CoreError {
             message: e.to_string(),
         }
     }
+}
+
+/// Typed reasons a `BackupDatabaseUseCase::execute` call can fail.
+///
+/// WHY `path: String` (not `PathBuf`): specta serialises both as TS
+/// `string`, but `String` avoids the `PathBuf -> Display -> serialize`
+/// step where a non-UTF8 path would become `"<path with bad utf8>"`.
+/// Backups are user-facing artifacts; we only care about display, and
+/// `String` is the cleaner type at the IPC seam.
+#[derive(thiserror::Error, Debug, Clone, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(tag = "kind", content = "data")]
+pub enum BackupFailureReason {
+    /// `--to <path>` was supplied AND the target already exists, AND
+    /// `--force` was not passed.
+    #[error("target already exists: {path}; pass --force to overwrite")]
+    TargetExists {
+        /// The path that already exists.
+        path: String,
+    },
+
+    /// Filesystem refused the write — permissions, read-only mount,
+    /// missing parent dir we couldn't create, broken symlink whose
+    /// target is gone, etc.
+    #[error("target unwritable: {path}: {message}")]
+    TargetUnwritable {
+        /// The path that could not be written.
+        path: String,
+        /// The underlying error message.
+        message: String,
+    },
+
+    /// Disk full / out of space.
+    #[error("disk full while writing {path}")]
+    DiskFull {
+        /// The path being written when the disk filled.
+        path: String,
+    },
+
+    /// A backup is already running on this `BackupDatabaseUseCase` instance;
+    /// concurrent attempts are refused. Try again when the in-flight backup
+    /// completes.
+    #[error("a backup is already in progress")]
+    AlreadyInProgress,
+
+    /// Wrapped `SQLite` or unexpected-state error message that doesn't fit
+    /// any of the typed buckets above.
+    ///
+    /// WHY a catch-all: `SQLite` returns dozens of distinct error codes;
+    /// only the four above are user-actionable in slice 1. Future
+    /// telemetry can mine `Internal(...)` messages to add typed reasons.
+    #[error("internal backup error: {0}")]
+    Internal(String),
 }

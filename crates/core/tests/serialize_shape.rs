@@ -490,3 +490,73 @@ fn invalidation_reason_collisions_changed_serializes_as_string() {
     assert_eq!(v["kind"], "IndexInvalidated");
     assert_eq!(v["data"]["reason"], "CollisionsChanged");
 }
+
+// ── Task 1 wire-shape pins (backup-slice-1) ────────────────────────────────
+// WHY: CoreError::BackupFailed + BackupFailureReason cross the IPC boundary.
+// Pinning the wire shape here ensures the frontend's `parseCoreError` +
+// `switch (err.kind)` / `switch (reason.kind)` blocks stay in sync with
+// any future enum changes. Five variants = five tests, one each.
+
+#[test]
+fn serialize_backup_failed_target_exists() {
+    use perima_core::errors::BackupFailureReason;
+    let err = perima_core::CoreError::BackupFailed {
+        reason: BackupFailureReason::TargetExists {
+            path: "/tmp/backup.sqlite".to_string(),
+        },
+    };
+    let json = serde_json::to_value(&err).expect("serialize");
+    assert_eq!(json["kind"], "BackupFailed");
+    assert_eq!(json["data"]["reason"]["kind"], "TargetExists");
+    assert_eq!(json["data"]["reason"]["data"]["path"], "/tmp/backup.sqlite");
+}
+
+#[test]
+fn serialize_backup_failed_target_unwritable() {
+    use perima_core::errors::BackupFailureReason;
+    let err = perima_core::CoreError::BackupFailed {
+        reason: BackupFailureReason::TargetUnwritable {
+            path: "/ro/backup.sqlite".to_string(),
+            message: "permission denied".to_string(),
+        },
+    };
+    let json = serde_json::to_value(&err).expect("serialize");
+    assert_eq!(json["data"]["reason"]["kind"], "TargetUnwritable");
+    assert_eq!(json["data"]["reason"]["data"]["path"], "/ro/backup.sqlite");
+    assert_eq!(
+        json["data"]["reason"]["data"]["message"],
+        "permission denied"
+    );
+}
+
+#[test]
+fn serialize_backup_failed_disk_full() {
+    use perima_core::errors::BackupFailureReason;
+    let err = perima_core::CoreError::BackupFailed {
+        reason: BackupFailureReason::DiskFull {
+            path: "/full/backup.sqlite".to_string(),
+        },
+    };
+    let json = serde_json::to_value(&err).expect("serialize");
+    assert_eq!(json["data"]["reason"]["kind"], "DiskFull");
+}
+
+#[test]
+fn serialize_backup_failed_already_in_progress() {
+    use perima_core::errors::BackupFailureReason;
+    let err = perima_core::CoreError::BackupFailed {
+        reason: BackupFailureReason::AlreadyInProgress,
+    };
+    let json = serde_json::to_value(&err).expect("serialize");
+    assert_eq!(json["data"]["reason"]["kind"], "AlreadyInProgress");
+}
+
+#[test]
+fn serialize_backup_failed_internal() {
+    use perima_core::errors::BackupFailureReason;
+    let err = perima_core::CoreError::BackupFailed {
+        reason: BackupFailureReason::Internal("sqlite said no".to_string()),
+    };
+    let json = serde_json::to_value(&err).expect("serialize");
+    assert_eq!(json["data"]["reason"]["kind"], "Internal");
+}

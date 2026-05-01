@@ -12,6 +12,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ResultAsync } from "neverthrow";
 import type {
   AppEvent,
+  BackupOutput,
   BatchHandle,
   BatchId,
   BlakeHash,
@@ -44,6 +45,7 @@ const KNOWN_KINDS: ReadonlySet<CoreError["kind"]> = new Set([
   "Unsupported",
   "Internal",
   "FullHashUnavailable",
+  "BackupFailed",
 ]);
 
 /**
@@ -330,4 +332,28 @@ export function markVerifiedDistinct(
   fileUuids: FileUuid[],
 ): ResultAsync<void, CoreError> {
   return fromInvoke("mark_verified_distinct", { fileUuids });
+}
+
+/**
+ * Backup the SQLite database to `target` (absolute path).
+ *
+ * When `target` is omitted, the backend chooses a timestamped path under
+ * `<data_dir>/backups/`. When `force` is true, an existing file at `target`
+ * is silently overwritten (otherwise `CoreError::BackupFailed` with reason
+ * `TargetExists` is returned).
+ *
+ * WHY `target?: string` (not required): callers that only want a safe
+ * one-click backup need not know or construct a path.
+ *
+ * @param target - Optional absolute path for the backup file.
+ * @param force  - Overwrite an existing file at `target`. Default false.
+ */
+export function backupDatabase(
+  target?: string,
+  force = false,
+): ResultAsync<BackupOutput, CoreError> {
+  return fromInvoke<BackupOutput>("backup_database", {
+    target: target ?? null,
+    force,
+  });
 }

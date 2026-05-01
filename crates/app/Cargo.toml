@@ -39,6 +39,11 @@ serde.workspace = true
 rayon.workspace    = true
 # WHY uuid: VolumeId fallback in dry-run path uses `Uuid::nil()`.
 uuid.workspace     = true
+# WHY chrono: BackupDatabaseUseCase formats default-target ISO 8601 UTC
+# timestamps in the backup filename (`perima-<UTC>.sqlite`). chrono is
+# already a transitive workspace dep; pulling it in as a direct dep
+# documents the intent at the use-case layer.
+chrono.workspace   = true
 # WHY optional specta: see [features] above. Not a hard dep — normal
 # `cargo build` of `perima-app` (CLI, tests) does not pull in specta.
 specta = { workspace = true, optional = true }

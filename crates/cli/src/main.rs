@@ -30,8 +30,9 @@ use perima_core::{
     SearchRepository, TagRepository, VolumeRepository,
 };
 use perima_db::{
-    ReadPool, SqliteFileRepository, SqliteIdentityCacheRepository, SqliteMetadataRepository,
-    SqliteSearchRepository, SqliteTagRepository, SqliteVolumeRepository, SqliteWriter,
+    ReadPool, SqliteDatabaseAdmin, SqliteFileRepository, SqliteIdentityCacheRepository,
+    SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository, SqliteVolumeRepository,
+    SqliteWriter,
 };
 use perima_fs::WalkdirScanner;
 use perima_hash::Blake3Service;
@@ -106,6 +107,9 @@ enum Command {
         #[arg(long)]
         tag: Option<String>,
     },
+
+    /// Produce a single-file `SQLite` snapshot of the database via `VACUUM INTO`.
+    Backup(cmd::backup::BackupArgs),
 
     /// Tag management: add, remove, and list tags.
     Tag(cmd::tag::TagArgs),
@@ -230,6 +234,8 @@ async fn main() -> ExitCode {
             tag,
         } => dispatch_ls(volume, limit, json, with_metadata, tag, &config).await,
 
+        Command::Backup(args) => dispatch_backup(&args, &config).await,
+
         Command::Tag(args) => dispatch_tag(&args, &config).await,
 
         Command::Hash(args) => dispatch_hash(&args, &config).await,
@@ -276,6 +282,35 @@ fn dispatch_debug_report(path: Option<PathBuf>, include_rotated: usize) -> ExitC
 fn dispatch_migrate_data_dir(args: &cmd::migrate_data_dir::MigrateDataDirArgs) -> ExitCode {
     match cmd::migrate_data_dir::run(args) {
         Ok(()) => ExitCode::from(0),
+        Err(e) => {
+            eprintln!("perima: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Run the `backup` subcommand.
+async fn dispatch_backup(args: &cmd::backup::BackupArgs, config: &Config) -> ExitCode {
+    let db_path = config.data_dir.join("perima.db");
+    let container = match build_container(&db_path, vec![]) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("perima: database: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match cmd::backup::run(&container, args).await {
+        Ok(()) => ExitCode::from(0),
+        Err(perima_core::CoreError::BackupFailed { reason }) => {
+            eprintln!("perima backup: {reason}");
+            if matches!(
+                reason,
+                perima_core::errors::BackupFailureReason::TargetExists { .. }
+            ) {
+                eprintln!("Pass --force to overwrite.");
+            }
+            ExitCode::from(1)
+        }
         Err(e) => {
             eprintln!("perima: {e}");
             ExitCode::from(1)
@@ -353,7 +388,16 @@ fn build_container(
             .to_path_buf(),
     ));
 
+    let admin: Arc<dyn perima_core::ports::DatabaseAdmin> =
+        Arc::new(SqliteDatabaseAdmin::new(writer.sender()));
+    let data_dir = db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+
     let deps = AppDeps {
+        admin,
+        data_dir,
         files,
         volumes,
         tags,
