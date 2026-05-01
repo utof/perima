@@ -123,7 +123,7 @@ export default function StatusBar() {
   }
 
   return (
-    <div className="px-6 py-2 bg-gray-800 text-xs text-gray-400 border-t border-gray-700 flex justify-between items-center">
+    <div className="px-6 py-2 bg-card text-muted-foreground text-xs border-t border-border flex justify-between items-center">
       <span>{summary}</span>
       <div className="flex items-center gap-3">
         {/* WHY type="button": prevents form submission if StatusBar is ever
@@ -132,7 +132,11 @@ export default function StatusBar() {
           type="button"
           onClick={() => { backupMutation.mutate({}); }}
           disabled={backupMutation.isPending}
-          className="px-2 py-0.5 text-xs rounded bg-slate-700 text-slate-100 hover:bg-slate-600 disabled:opacity-50"
+          className="rounded-full px-3 py-1 text-sm font-medium bg-secondary text-secondary-foreground
+                     hover:bg-popover transition-colors duration-micro ease-perima
+                     focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
+                     focus-visible:ring-offset-2 focus-visible:ring-offset-background
+                     disabled:opacity-40 disabled:pointer-events-none"
         >
           {backupMutation.isPending ? "Backing up…" : "Backup"}
         </button>
