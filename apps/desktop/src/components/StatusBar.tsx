@@ -20,7 +20,7 @@ import { useShallow } from "zustand/shallow";
 import { useUiStore } from "../stores/ui";
 import { useCollisions } from "../queries/dedup";
 import CollisionPill from "./CollisionPill";
-import type { CoreError, FullHashUnavailableReason } from "../bindings";
+import type { BackupFailureReason, CoreError, FullHashUnavailableReason } from "../bindings";
 
 /**
  * Returns a short human-readable label for a {@link CoreError}, branching on
@@ -50,12 +50,36 @@ export function errorKindLabel(err: CoreError): string {
       return `Internal error: ${err.data}`;
     case "FullHashUnavailable":
       return `Full hash unavailable: ${fullHashUnavailableReasonLabel(err.data.reason)}`;
+    case "BackupFailed":
+      return `Backup failed: ${backupFailureReasonLabel(err.data.reason)}`;
     default: {
       // WHY never: TypeScript exhaustiveness check. If a new CoreError variant
       // is added to bindings.ts without a matching case above, this line
       // becomes a type error at compile time (not at runtime).
       const _exhaustive: never = err;
       return `Unknown error: ${String(_exhaustive)}`;
+    }
+  }
+}
+
+/**
+ * Returns a short label for a {@link BackupFailureReason}.
+ */
+function backupFailureReasonLabel(reason: BackupFailureReason): string {
+  switch (reason.kind) {
+    case "TargetExists":
+      return `file already exists at ${reason.data.path}`;
+    case "TargetUnwritable":
+      return `cannot write to ${reason.data.path}: ${reason.data.message}`;
+    case "DiskFull":
+      return `disk full at ${reason.data.path}`;
+    case "AlreadyInProgress":
+      return "already in progress";
+    case "Internal":
+      return reason.data;
+    default: {
+      const _exhaustive: never = reason;
+      return String(_exhaustive);
     }
   }
 }
