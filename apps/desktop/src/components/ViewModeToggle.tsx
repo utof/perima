@@ -25,6 +25,8 @@ export default function ViewModeToggle() {
         aria-label="Grid view"
         className={`inline-flex items-center justify-center rounded-full px-3 py-1
                     transition-colors duration-micro ease-perima
+                    focus-visible:outline-none focus-visible:ring-2
+                    focus-visible:ring-ring focus-visible:ring-offset-0
                     ${viewMode === "grid"
                       ? "bg-accent text-accent-foreground"
                       : "text-muted-foreground hover:text-foreground"}`}
@@ -38,6 +40,8 @@ export default function ViewModeToggle() {
         aria-label="Table view"
         className={`inline-flex items-center justify-center rounded-full px-3 py-1
                     transition-colors duration-micro ease-perima
+                    focus-visible:outline-none focus-visible:ring-2
+                    focus-visible:ring-ring focus-visible:ring-offset-0
                     ${viewMode === "table"
                       ? "bg-accent text-accent-foreground"
                       : "text-muted-foreground hover:text-foreground"}`}
