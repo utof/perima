@@ -1601,3 +1601,44 @@ pub async fn mark_verified_distinct(
         .dedup
         .mark_verified_distinct(file_uuids, state.device_id)
 }
+
+// ---------------------------------------------------------------------------
+// Backup commands (slice 1, GH #168)
+// ---------------------------------------------------------------------------
+
+/// Produce a single-file consistent `SQLite` snapshot of the database.
+///
+/// Delegates to [`perima_app::BackupDatabaseUseCase`], which resolves the
+/// target path (`<data_dir>/backups/perima-<ISO 8601>.sqlite` when `target`
+/// is `None`), enforces single-flight via an `AtomicBool` guard,
+/// pre-removes when `force` is `true`, and dispatches the actual copy
+/// through [`perima_core::ports::DatabaseAdmin`] (writer-actor `VACUUM INTO`).
+///
+/// Returns a [`perima_app::BackupOutput`] carrying the absolute path
+/// written to plus the size in bytes of the freshly written file.
+///
+/// # Errors
+/// Returns [`CoreError::BackupFailed`] with a typed
+/// [`perima_core::errors::BackupFailureReason`]:
+/// - `TargetExists` — `target` already exists and `force` was not passed.
+/// - `TargetUnwritable` — parent directory could not be created or
+///   pre-existing file could not be removed.
+/// - `AlreadyInProgress` — another backup is currently running on this
+///   process.
+/// - `DiskFull` / `Internal(...)` — propagated from the writer-actor
+///   adapter on lower-level `SQLite` failures.
+// WHY allow: Tauri owns `State` and value params (Option<PathBuf> + bool).
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn backup_database(
+    state: tauri::State<'_, AppState>,
+    target: Option<PathBuf>,
+    force: bool,
+) -> Result<perima_app::BackupOutput, CoreError> {
+    state
+        .container
+        .backup
+        .execute(perima_app::BackupCommand { target, force })
+        .await
+}

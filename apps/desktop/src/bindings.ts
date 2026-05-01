@@ -148,7 +148,8 @@ export type CoreError =
   | { kind: "Io"; data: { kind: string; message: string } }
   | { kind: "Unsupported"; data: string }
   | { kind: "Internal"; data: string }
-  | { kind: "FullHashUnavailable"; data: { reason: FullHashUnavailableReason } };
+  | { kind: "FullHashUnavailable"; data: { reason: FullHashUnavailableReason } }
+  | { kind: "BackupFailed"; data: { reason: BackupFailureReason } };
 
 // ── Structs ──────────────────────────────────────────────────────────
 
@@ -343,4 +344,30 @@ export type CollisionGroup = {
   quick_hash: BlakeHash;
   files: FileLocationRecord[];
   verified_state: VerifiedState;
+};
+
+// ── Backup types (slice 1, GH #168) ──────────────────────────────────
+
+/**
+ * Typed reasons a `BackupDatabaseUseCase::execute` call can fail.
+ * Inner payload of `CoreError::BackupFailed`.
+ * Rust: `BackupFailureReason` with `#[serde(tag = "kind", content = "data")]`
+ * (per `crates/core/src/errors.rs`).
+ */
+export type BackupFailureReason =
+  | { kind: "TargetExists"; data: { path: string } }
+  | { kind: "TargetUnwritable"; data: { path: string; message: string } }
+  | { kind: "DiskFull"; data: { path: string } }
+  | { kind: "AlreadyInProgress" }
+  | { kind: "Internal"; data: string };
+
+/**
+ * Successful output of `backup_database` / `BackupDatabaseUseCase::execute`.
+ * Rust: `BackupOutput` in `crates/app/src/backup.rs`.
+ */
+export type BackupOutput = {
+  /** Absolute path to the freshly written backup file. */
+  absolute_path: string;
+  /** Size in bytes of the freshly written backup file. */
+  size_bytes: number;
 };

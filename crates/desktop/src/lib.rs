@@ -117,6 +117,7 @@ pub fn run() -> Result<(), RunError> {
         commands::cancel_verify_batch,
         commands::list_quick_hash_collisions,
         commands::mark_verified_distinct,
+        commands::backup_database,
     ]);
 
     // Export TypeScript bindings when the `specta-export` feature is

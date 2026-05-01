@@ -34,8 +34,9 @@ use tauri_specta::{Builder, collect_commands};
 
 use perima_desktop::commands;
 
-/// Builds the same 13-command tauri-specta `Builder` that `lib.rs::run`
-/// constructs. Centralised so future handler renames or additions are
+/// Builds the same tauri-specta `Builder` that `lib.rs::run`
+/// constructs (subset of the production command set, kept in sync
+/// manually). Centralised so future handler renames or additions are
 /// caught loudly at compile time in exactly one place.
 fn build_test_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new().commands(collect_commands![
@@ -52,20 +53,21 @@ fn build_test_builder() -> Builder<tauri::Wry> {
         commands::list_files_with_tags,
         commands::search,
         commands::search_rebuild,
+        commands::backup_database,
     ])
 }
 
-/// Verifies that the tauri-specta builder accepts all 13 IPC commands
-/// and produces a non-empty TypeScript file containing every core
-/// domain type that crosses the IPC boundary as a command argument or
-/// return value.
+/// Verifies that the tauri-specta builder accepts the registered IPC
+/// commands and produces a non-empty TypeScript file containing every
+/// core domain type that crosses the IPC boundary as a command argument
+/// or return value.
 ///
 /// Coverage rationale: `CoreError` (Result error on every handler);
 /// `ScanReport` (scan handler return); `FileLocationRecord` /
 /// `VolumeRecord` / `Tag` / `SearchHit` (handler returns); `BlakeHash`
 /// (transitive field of `FileLocationRecord`); composite payloads
 /// `FileWithMetadataPayload` + `FileWithTagsPayload` (retained per
-/// spec §8 #6).
+/// spec §8 #6); `BackupOutput` (`backup_database` return, slice 1).
 ///
 /// WHY `AppEvent` / `FileEvent` / `InvalidationReason` are NOT asserted
 /// here: those types cross the IPC boundary via the `"app-event"` Tauri
@@ -101,6 +103,7 @@ fn tauri_specta_builder_exports_full_ipc_type_graph() {
         "VolumeRecord",
         "SearchHit",
         "BlakeHash",
+        "BackupOutput",
     ] {
         assert!(ts.contains(ty), "{ty} missing from bindings");
     }
@@ -118,4 +121,14 @@ fn tauri_specta_builder_exports_full_ipc_type_graph() {
     for ty in ["FileWithMetadataPayload", "FileWithTagsPayload"] {
         assert!(ts.contains(ty), "{ty} missing from bindings");
     }
+
+    // BackupFailureReason appears as inline payload of CoreError::BackupFailed,
+    // not as a top-level type. tauri-specta emits double-quoted TS literals
+    // for #[serde(tag = "kind", content = "data")] string discriminants;
+    // assert one variant tag substring (quote style is stable per the
+    // committed bindings.ts; accept either form for forward-compat).
+    assert!(
+        ts.contains(r#"kind: "TargetExists""#) || ts.contains("kind: \"TargetExists\""),
+        "BackupFailureReason::TargetExists variant missing from bindings"
+    );
 }
