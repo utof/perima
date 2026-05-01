@@ -1,12 +1,12 @@
 /**
- * CollisionPill — color-state pill per spec §4.6.1.
+ * CollisionPill — design-token pill per spec §4.6.1.
  *
  * Branches under test:
- * - 0 groups: gray, "no candidate duplicates"
- * - N groups, 0 verified: blue, "N candidate group(s)"
- * - 1 group, 0 verified: blue, "1 candidate group" (singular)
- * - N groups, 0 less than M less than N verified: blue, "N candidate (M ✓)"
- * - all verified: green, "all verified ✓"
+ * - 0 groups: muted-foreground span, "no candidate duplicates"
+ * - N groups, 0 verified: warning pill, "N duplicate(s)"
+ * - 1 group, 0 verified: warning pill, "1 duplicate" (singular)
+ * - N groups, 0 less than M less than N verified: warning pill, "N duplicates (M verified)"
+ * - all verified: success pill, "all verified"
  *
  * WHY mock `@tanstack/react-router`: CollisionPill renders a Link to="/dedup"
  * which requires a router context. Unit tests for a leaf pill component do not
@@ -55,16 +55,16 @@ function makeGroup(
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe("CollisionPill", () => {
-  it("renders gray 'no candidate duplicates' when groups is empty", () => {
+  it("renders muted 'no candidate duplicates' span when groups is empty", () => {
     renderWithProviders(<CollisionPill groups={[]} />);
     const el = screen.getByText(/no candidate duplicates/i);
     expect(el).toBeInTheDocument();
-    // WHY check class presence: gray state = text-gray-500, not a link.
+    // 0-groups state = plain span (not a link), text-muted-foreground.
     expect(el.tagName).toBe("SPAN");
-    expect(el.className).toContain("text-gray-500");
+    expect(el.className).toContain("text-muted-foreground");
   });
 
-  it("renders blue pill for N unverified groups (plural)", () => {
+  it("renders warning pill for N unverified groups (plural)", () => {
     const groups = [
       makeGroup("aaa", "Unverified"),
       makeGroup("bbb", "Unverified"),
@@ -73,20 +73,20 @@ describe("CollisionPill", () => {
     renderWithProviders(<CollisionPill groups={groups} />);
     const link = screen.getByRole("link");
     expect(link).toBeInTheDocument();
-    expect(link.textContent).toMatch(/3 candidate groups/i);
-    expect(link.className).toContain("text-blue-400");
+    expect(link.textContent).toMatch(/3 duplicates/i);
+    expect(link.className).toContain("bg-warning");
   });
 
-  it("renders blue pill with singular 'group' label for 1 unverified group", () => {
+  it("renders warning pill with singular 'duplicate' label for 1 unverified group", () => {
     renderWithProviders(<CollisionPill groups={[makeGroup("aaa", "Unverified")]} />);
     const link = screen.getByRole("link");
-    expect(link.textContent).toMatch(/1 candidate group$/i);
+    expect(link.textContent).toMatch(/1 duplicate$/i);
     // Must NOT be plural.
-    expect(link.textContent).not.toMatch(/1 candidate groups/i);
-    expect(link.className).toContain("text-blue-400");
+    expect(link.textContent).not.toMatch(/1 duplicates/i);
+    expect(link.className).toContain("bg-warning");
   });
 
-  it("renders blue pill with verified count when 0 < M < N verified", () => {
+  it("renders warning pill with verified count when 0 < M < N verified", () => {
     const groups = [
       makeGroup("aaa", "VerifiedDuplicate"),
       makeGroup("bbb", "Unverified"),
@@ -95,19 +95,19 @@ describe("CollisionPill", () => {
     renderWithProviders(<CollisionPill groups={groups} />);
     const link = screen.getByRole("link");
     // 3 total, 2 verified (VerifiedDuplicate + VerifiedDistinct both count).
-    expect(link.textContent).toMatch(/3 candidates \(2 ✓\)/i);
-    expect(link.className).toContain("text-blue-400");
+    expect(link.textContent).toMatch(/3 duplicates \(2 verified\)/i);
+    expect(link.className).toContain("bg-warning");
   });
 
-  it("renders green pill when all groups are verified", () => {
+  it("renders success pill when all groups are verified", () => {
     const groups = [
       makeGroup("aaa", "VerifiedDuplicate"),
       makeGroup("bbb", "VerifiedDistinct"),
     ];
     renderWithProviders(<CollisionPill groups={groups} />);
     const link = screen.getByRole("link");
-    expect(link.textContent).toMatch(/all verified ✓/i);
-    expect(link.className).toContain("text-green-400");
+    expect(link.textContent).toMatch(/all verified/i);
+    expect(link.className).toContain("bg-success");
   });
 
   it("link points to /dedup", () => {
@@ -121,8 +121,8 @@ describe("CollisionPill", () => {
     renderWithProviders(<CollisionPill groups={groups} />);
     const link = screen.getByRole("link");
     // Mixed is not VerifiedDuplicate or VerifiedDistinct → not in verified count.
-    // With 0 verified, label = "1 candidate group".
-    expect(link.textContent).toMatch(/1 candidate group$/i);
-    expect(link.className).toContain("text-blue-400");
+    // With 0 verified, label = "1 duplicate".
+    expect(link.textContent).toMatch(/1 duplicate$/i);
+    expect(link.className).toContain("bg-warning");
   });
 });

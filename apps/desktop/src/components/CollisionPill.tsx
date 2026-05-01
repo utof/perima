@@ -1,25 +1,19 @@
 /**
  * Collision-group status pill for the StatusBar.
  *
- * Color states per spec §4.6.1:
- * - 0 groups: gray, "no candidate duplicates"
- * - N groups, 0 verified: blue, "N candidate group(s)"
- * - N groups, 0 less than M less than N verified: blue, "N candidate (M ✓)"
- * - all verified: green, "all verified ✓"
- * - errored greater than 0: yellow, "verify error" (reserved for future batch)
+ * WHY warning/success encoding: unverified groups are actionable (they need
+ * a human or batch verify); verified groups are informational. Color encodes
+ * urgency, not just count. Warning = unverified present, success = all clear.
  *
- * WHY gray-by-default for 0 groups: collisions are expected to be
- * absent in a well-managed library; green "all clear" would be noisy
- * and draws attention away from actionable states.
- *
- * WHY Link to="/dedup": clicking navigates to the dedup management
- * route (Task 13). The route is registered in router.tsx; TS validates
- * the `to` prop via TanStack Router's `Register` augmentation.
+ * WHY Link to="/dedup": clicking navigates to the dedup management route.
+ * The route is registered in router.tsx; TS validates the `to` prop via
+ * TanStack Router's `Register` augmentation.
  *
  * WHY VerifiedState is a plain string union (not discriminated object):
  * Rust emits unit enum variants as bare strings under the default serde
  * config (no `#[serde(tag)]`). Pattern-match via ===, not `.kind`.
  */
+import { CopyIcon } from "@phosphor-icons/react";
 import { Link } from "@tanstack/react-router";
 import type { CollisionGroup } from "../bindings";
 
@@ -36,8 +30,8 @@ export default function CollisionPill({ groups }: Props) {
 
   if (total === 0) {
     return (
-      <span className="text-gray-500" title="No candidate duplicates found">
-        ⊜ no candidate duplicates
+      <span className="text-xs text-muted-foreground" title="No candidate duplicates found">
+        no candidate duplicates
       </span>
     );
   }
@@ -51,24 +45,31 @@ export default function CollisionPill({ groups }: Props) {
       g.verified_state === "VerifiedDistinct",
   ).length;
 
-  let colorClass = "text-blue-400";
   let label: string;
-
   if (verified === total) {
-    colorClass = "text-green-400";
-    label = "⊜ all verified ✓";
+    label = "all verified";
   } else if (verified > 0) {
-    label = `⊜ ${total} candidate${total === 1 ? "" : "s"} (${verified} ✓)`;
+    label = `${total} duplicate${total === 1 ? "" : "s"} (${verified} verified)`;
   } else {
-    label = `⊜ ${total} candidate group${total === 1 ? "" : "s"}`;
+    label = `${total} duplicate${total === 1 ? "" : "s"}`;
   }
+
+  // WHY bg-warning when there are unverified groups, bg-success when all verified:
+  // unverified groups are actionable (they need a human or batch verify); verified
+  // groups are informational. Color encodes urgency, not just count.
+  const bgClass =
+    verified === total ? "bg-success text-success-foreground" : "bg-warning text-warning-foreground";
 
   return (
     <Link
       to="/dedup"
-      className={`${colorClass} hover:underline`}
+      className={`inline-flex items-center gap-1.5 rounded-full px-3 py-0.5 text-xs font-medium
+                  ${bgClass} hover:opacity-90 transition-opacity duration-micro
+                  focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
+                  focus-visible:ring-offset-2 focus-visible:ring-offset-background`}
       title="View duplicate groups"
     >
+      <CopyIcon size={12} weight="regular" />
       {label}
     </Link>
   );

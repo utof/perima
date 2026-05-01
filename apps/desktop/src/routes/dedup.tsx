@@ -84,13 +84,13 @@ function GroupRow({ group, onVerify, isVerifying }: GroupRowProps) {
 
   return (
     <div
-      className="border border-gray-700 rounded mb-2 bg-gray-900 p-3"
+      className="bg-card rounded-md shadow-e1 p-4 mb-3 border border-border"
       data-testid="dedup-group-row"
     >
       <header className="flex items-center justify-between mb-2">
-        <div className="text-sm text-gray-200 font-medium">
+        <div className="text-sm text-foreground font-medium">
           Candidate group — {fileCount} file{fileCount === 1 ? "" : "s"}, {sizeLabel} each
-          <span className="text-xs text-gray-400 ml-2">
+          <span className="text-xs text-muted-foreground ml-2">
             {group.quick_hash.slice(0, 12)}…{stateLabel}
           </span>
         </div>
@@ -98,21 +98,21 @@ function GroupRow({ group, onVerify, isVerifying }: GroupRowProps) {
           type="button"
           onClick={onVerify}
           disabled={isVerifying}
-          className="px-2 py-1 text-xs rounded bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="inline-flex items-center justify-center rounded-full px-3 py-1 text-xs font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors duration-micro disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
         >
           {isVerifying ? "Verifying…" : "Verify this group"}
         </button>
       </header>
-      <ul className="space-y-1 pl-2 text-xs font-mono text-gray-300">
+      <ul className="space-y-1 pl-2 mono-metadata text-foreground">
         {group.files.map((f: FileLocationRecord) => (
           <li
             key={f.file_uuid}
             title={`${f.volume_id}/${f.relative_path}`}
             className="truncate"
           >
-            <span className="text-gray-500">{f.volume_id.slice(0, 6)}/</span>
+            <span className="text-muted-foreground">{f.volume_id.slice(0, 6)}/</span>
             {basename(f.relative_path)}
-            <span className="text-gray-600"> ({f.relative_path})</span>
+            <span className="text-muted-foreground"> ({f.relative_path})</span>
           </li>
         ))}
       </ul>
@@ -191,7 +191,7 @@ export default function DedupRoute() {
   // ── Render branches ────────────────────────────────────────────────────
   if (isLoading) {
     return (
-      <div className="flex-1 p-8 text-gray-400">
+      <div className="flex-1 p-8 bg-background text-muted-foreground">
         <p>Loading candidate groups…</p>
       </div>
     );
@@ -199,7 +199,7 @@ export default function DedupRoute() {
 
   if (error) {
     return (
-      <div className="flex-1 p-8 text-red-400">
+      <div className="flex-1 p-8 bg-background text-destructive">
         <p>Failed to load candidate groups: [{error.kind}]</p>
       </div>
     );
@@ -207,7 +207,7 @@ export default function DedupRoute() {
 
   if (groups.length === 0) {
     return (
-      <div className="flex-1 p-8 text-gray-400" data-testid="dedup-empty-state">
+      <div className="flex-1 p-8 bg-background text-muted-foreground" data-testid="dedup-empty-state">
         <p>No candidate duplicates.</p>
       </div>
     );
@@ -231,15 +231,15 @@ export default function DedupRoute() {
   const totalSize = virtualizer.getTotalSize();
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden p-4">
-      <header className="mb-3 flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-gray-100">
+    <div className="flex-1 flex flex-col overflow-hidden bg-background p-6">
+      <header className="mb-6 flex items-center justify-between">
+        <h1 className="text-lg font-semibold text-foreground">
           Candidate duplicate groups ({groups.length})
         </h1>
         <div className="flex items-center gap-2">
           {progressLabel && (
             <span
-              className="text-xs text-blue-300"
+              className="text-xs text-info"
               data-testid="dedup-progress-label"
             >
               {progressLabel}
@@ -250,7 +250,7 @@ export default function DedupRoute() {
               type="button"
               onClick={handleCancel}
               disabled={cancelMutation.isPending}
-              className="px-3 py-1.5 text-xs rounded bg-red-700 text-white hover:bg-red-600 disabled:opacity-50"
+              className="inline-flex items-center justify-center rounded-full px-3 py-1 text-xs font-medium bg-destructive text-destructive-foreground hover:opacity-90 transition-opacity duration-micro disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
               data-testid="dedup-cancel-button"
             >
               Cancel verify batch
@@ -260,7 +260,7 @@ export default function DedupRoute() {
             type="button"
             onClick={handleVerifyAll}
             disabled={verifyMutation.isPending || verifyBatch !== null}
-            className="px-3 py-1.5 text-xs rounded bg-amber-600 text-white hover:bg-amber-500 disabled:opacity-50"
+            className="inline-flex items-center justify-center rounded-full px-3 py-1 text-xs font-medium bg-warning text-warning-foreground hover:opacity-90 transition-opacity duration-micro disabled:opacity-40 disabled:pointer-events-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
             data-testid="dedup-verify-all-button"
             title="Slow — full hash on every candidate"
           >
@@ -270,7 +270,7 @@ export default function DedupRoute() {
       </header>
       <div
         ref={parentRef}
-        className="flex-1 overflow-auto rounded border border-gray-800"
+        className="flex-1 overflow-auto rounded-md border border-border"
         style={{ contain: "strict" }}
       >
         <div
