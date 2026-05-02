@@ -125,7 +125,7 @@ directions (soft-delete AND restore). V007→V008 bug class.
 - **Releases = semver tags** (`v0.N.x`). No fixed v1.0.0. "Phase" is
   internal vocabulary only — never in tags, commits, or CHANGELOG.
 - **Conventional Commits** with component scopes (`core`, `db`, `fs`,
-  `hash`, `cli`, `desktop`, `ci`, `deps`, `docs`, `release`).
+  `hash`, `cli`, `desktop`, `transcribe`, `ci`, `deps`, `docs`, `release`).
   `release-plz` handles bumps + CHANGELOG from v0.4.0 on.
 - Commit order: execute → tests green → reviewer green → commit.
 - `**/*.md` gitignored except `CHANGELOG.md` + `docs/superpowers/**/*.md`
