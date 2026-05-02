@@ -43,7 +43,7 @@ export default function TagSidebar({
 
   return (
     <nav
-      className="w-48 bg-gray-800 border-r border-gray-700 p-2 flex flex-col gap-1 overflow-y-auto"
+      className="w-64 bg-card border-r border-border p-4 flex flex-col gap-1 overflow-y-auto"
       aria-label="Tag filter"
     >
       <SidebarRow
@@ -53,7 +53,7 @@ export default function TagSidebar({
         onClick={() => { setSelectedTagId(null); }}
       />
       {mode === "facets" && visibleTags.length === 0 && (
-        <p className="px-2 py-1.5 text-xs text-gray-500 italic">
+        <p className="px-3 py-1.5 caption text-muted-foreground italic">
           No tags in current results
         </p>
       )}
@@ -82,10 +82,10 @@ function SidebarRow({
   onClick: () => void;
 }) {
   const base =
-    "flex items-center justify-between px-2 py-1.5 text-sm rounded cursor-pointer transition-colors";
-  const activeCls = "bg-blue-600 text-white";
-  const inactiveCls = "text-gray-300 hover:bg-gray-700";
-  const countCls = active ? "text-blue-200" : "text-gray-400";
+    "flex items-center justify-between w-full rounded-md px-3 py-1.5 text-sm cursor-pointer transition-colors duration-micro ease-perima focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+  const activeCls = "bg-accent text-accent-foreground";
+  const inactiveCls = "text-foreground hover:bg-muted";
+  const countCls = active ? "text-accent-foreground" : "text-muted-foreground";
   return (
     <button
       type="button"
@@ -95,7 +95,7 @@ function SidebarRow({
     >
       <span className="truncate">{label}</span>
       {count !== undefined && (
-        <span className={`text-xs ml-2 ${countCls}`}>{count}</span>
+        <span className={`text-xs ml-2 tabular-nums ${countCls}`}>{count}</span>
       )}
     </button>
   );

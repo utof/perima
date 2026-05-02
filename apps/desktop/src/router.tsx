@@ -20,6 +20,7 @@ import {
 import App from "./App";
 import IndexRoute from "./routes/index";
 import DedupRoute from "./routes/dedup";
+import TypeRoute from "./routes/type";
 
 const rootRoute = createRootRoute({
   component: () => <App><Outlet /></App>,
@@ -40,7 +41,13 @@ const dedupRoute = createRoute({
   component: DedupRoute,
 });
 
-const routeTree = rootRoute.addChildren([indexRoute, dedupRoute]);
+const typeRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/type",
+  component: TypeRoute,
+});
+
+const routeTree = rootRoute.addChildren([indexRoute, dedupRoute, typeRoute]);
 
 export const router = createRouter({
   routeTree,

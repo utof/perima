@@ -23,16 +23,19 @@ function NotificationItem({ notification }: { notification: Notification }) {
     return () => { clearTimeout(timer); };
   }, [id, kind, dismiss]);
 
-  const bg = kind === "error" ? "bg-red-700" : "bg-blue-700";
+  const variantClasses =
+    kind === "error"
+      ? "border-destructive bg-destructive/10 text-destructive-foreground"
+      : "border-info bg-popover text-popover-foreground";
   return (
     <div
       role={kind === "error" ? "alert" : "status"}
-      className={`${bg} text-white text-sm px-4 py-2 rounded shadow flex items-start gap-3 max-w-md`}
+      className={`pointer-events-auto rounded-md border ${variantClasses} shadow-e2 px-4 py-3 max-w-sm flex items-start gap-3`}
     >
-      <span className="flex-1">{message}</span>
+      <span className="flex-1 text-sm">{message}</span>
       <button
         type="button"
-        className="text-white/80 hover:text-white focus:outline-none"
+        className="inline-flex items-center justify-center rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors duration-micro ease-perima focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         aria-label="Dismiss notification"
         onClick={() => { dismiss(id); }}
       >
@@ -46,7 +49,7 @@ export default function NotificationStack() {
   const notifications = useUiStore((s) => s.notifications);
   if (notifications.length === 0) return null;
   return (
-    <div className="fixed bottom-4 right-4 flex flex-col gap-2 z-50">
+    <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
       {notifications.map((n) => (
         <NotificationItem key={n.id} notification={n} />
       ))}

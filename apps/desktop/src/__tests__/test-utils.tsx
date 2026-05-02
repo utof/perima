@@ -19,7 +19,36 @@
 import type { ReactElement } from "react";
 import { render, type RenderResult } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { vi } from "vitest";
 import { useUiStore, type UiStore } from "../stores/ui";
+import { ThemeProvider } from "../lib/theme-provider";
+
+// WHY install matchMedia mock at module-load time: jsdom does not implement
+// window.matchMedia. ThemeProvider's getSystemTheme() reads it at mount, and
+// renderWithProviders wraps in ThemeProvider — so every test using the helper
+// would crash without this mock. Installing it here (vs in each test's
+// beforeEach) is a one-shot fix and avoids per-test boilerplate. Tests that
+// need to override matchMedia (e.g. simulate prefers-color-scheme: light)
+// can re-define it in their own beforeEach — last assignment wins.
+// WHY cast to unknown: TypeScript types window.matchMedia as always-defined
+// (lib.dom.d.ts), but jsdom doesn't implement it. The `as unknown` cast lets
+// the runtime truthiness check bypass the TS type system so the guard works.
+if (typeof window !== "undefined" && !(window as unknown as Record<string, unknown>)["matchMedia"]) {
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    configurable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+}
 
 /**
  * Default UI-store state matching slice initial values.
@@ -79,8 +108,15 @@ export function renderWithProviders(
   if (opts.initialStoreState) {
     useUiStore.setState(opts.initialStoreState);
   }
+  // WHY ThemeProvider wrap: any tested component that calls useTheme()
+  // needs a provider. Defaults to "system" mode → "dark" effective theme
+  // in jsdom (matchMedia mock returns matches: false). Tests that need a
+  // specific theme should set localStorage["perima-theme"] in beforeEach
+  // (e.g. ThemeToggle.test.tsx).
   const result = render(
-    <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>,
+    <ThemeProvider>
+      <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>
+    </ThemeProvider>,
   );
   return Object.assign(result, { queryClient });
 }

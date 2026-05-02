@@ -1,3 +1,4 @@
+import { GridFourIcon, ListIcon } from "@phosphor-icons/react";
 import { useUiStore } from "../stores/ui";
 
 /**
@@ -5,37 +6,47 @@ import { useUiStore } from "../stores/ui";
  * Reads + dispatches viewMode via the Zustand store.
  *
  * WHY segmented control (not a single button that flips): two explicit
- * labels make the inactive option discoverable at a glance and match
+ * options make the inactive choice discoverable at a glance and match
  * desktop convention (Finder/Files-style switchers).
  */
 export default function ViewModeToggle() {
   const viewMode = useUiStore((s) => s.viewMode);
   const setViewMode = useUiStore((s) => s.setViewMode);
-  const base =
-    "px-3 py-1.5 text-sm font-medium rounded transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500";
-  const active = "bg-blue-600 text-white";
-  const inactive = "bg-gray-700 text-gray-200 hover:bg-gray-600";
   return (
     <div
-      className="inline-flex items-center gap-1 bg-gray-900 rounded p-0.5"
+      className="inline-flex items-center rounded-full bg-secondary p-0.5"
       role="group"
       aria-label="View mode"
     >
       <button
         type="button"
-        className={`${base} ${viewMode === "table" ? active : inactive}`}
-        aria-pressed={viewMode === "table"}
-        onClick={() => { setViewMode("table"); }}
+        onClick={() => { setViewMode("grid"); }}
+        aria-pressed={viewMode === "grid"}
+        aria-label="Grid view"
+        className={`inline-flex items-center justify-center rounded-full px-3 py-1
+                    transition-colors duration-micro ease-perima
+                    focus-visible:outline-none focus-visible:ring-2
+                    focus-visible:ring-ring focus-visible:ring-offset-0
+                    ${viewMode === "grid"
+                      ? "bg-accent text-accent-foreground"
+                      : "text-muted-foreground hover:text-foreground"}`}
       >
-        Table
+        <GridFourIcon size={16} weight="regular" />
       </button>
       <button
         type="button"
-        className={`${base} ${viewMode === "grid" ? active : inactive}`}
-        aria-pressed={viewMode === "grid"}
-        onClick={() => { setViewMode("grid"); }}
+        onClick={() => { setViewMode("table"); }}
+        aria-pressed={viewMode === "table"}
+        aria-label="Table view"
+        className={`inline-flex items-center justify-center rounded-full px-3 py-1
+                    transition-colors duration-micro ease-perima
+                    focus-visible:outline-none focus-visible:ring-2
+                    focus-visible:ring-ring focus-visible:ring-offset-0
+                    ${viewMode === "table"
+                      ? "bg-accent text-accent-foreground"
+                      : "text-muted-foreground hover:text-foreground"}`}
       >
-        Grid
+        <ListIcon size={16} weight="regular" />
       </button>
     </div>
   );

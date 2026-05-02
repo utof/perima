@@ -1,0 +1,197 @@
+/* WHY @theme inline: Tailwind v4 utility-class values resolve at runtime
+ * via var(--*); bare @theme bakes literal values at build time and ignores
+ * [data-theme="light"] overrides. This is the canonical shadcn-tailwind-v4
+ * pattern (https://ui.shadcn.com/docs/tailwind-v4). */
+
+@import "tailwindcss";
+
+/* === Raw CSS variables — perima dark (default) === */
+:root {
+  --background: #0A0C0F;
+  --foreground: #F5F1EC;
+  --card: #12151A;
+  --card-foreground: #F5F1EC;
+  --popover: #191D24;
+  --popover-foreground: #F5F1EC;
+  --muted: #22272F;
+  --muted-foreground: rgba(245, 241, 236, 0.72);
+  --primary: #F26A4F;
+  --primary-foreground: #0A0C0F;
+  --secondary: #191D24;
+  --secondary-foreground: #F5F1EC;
+  --accent: rgba(242, 106, 79, 0.16);
+  --accent-foreground: #F5F1EC;
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.08);
+  --ring: #F26A4F;
+  --destructive: #F26A4F;
+  --destructive-foreground: #0A0C0F;
+  --success: #4EC28B;
+  --success-foreground: #0A0C0F;
+  --warning: #F5B945;
+  --warning-foreground: #0A0C0F;
+  --info: #4A8BF5;
+  --info-foreground: #0A0C0F;
+
+  --shadow-e1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-e2: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-e3: 0 24px 64px rgba(0, 0, 0, 0.55);
+
+  /* Identity layer — referenced via var() directly, not utility-generated */
+  --perima-spectrum-blue:  #4A8BF5;
+  --perima-spectrum-aqua:  #5BE2C2;
+  --perima-spectrum-amber: #F5B945;
+  --perima-spectrum-coral: #F26A4F;
+  --perima-spectrum: linear-gradient(
+    135deg,
+    var(--perima-spectrum-blue)  0%,
+    var(--perima-spectrum-aqua)  35%,
+    var(--perima-spectrum-amber) 65%,
+    var(--perima-spectrum-coral) 100%
+  );
+}
+
+/* === Light theme overrides — color + shadow only === */
+/* Fonts/radii/motion are theme-invariant; spectrum is identity-invariant. */
+[data-theme="light"] {
+  --background: #FBF8F3;
+  --foreground: #141618;
+  --card: #FFFFFF;
+  --card-foreground: #141618;
+  --popover: #F5F1EC;
+  --popover-foreground: #141618;
+  --muted: #EAE4DA;
+  --muted-foreground: rgba(20, 22, 24, 0.72);
+  --primary: #F26A4F;
+  --primary-foreground: #FFFFFF;
+  --secondary: #EAE4DA;
+  --secondary-foreground: #141618;
+  --accent: rgba(242, 106, 79, 0.12);
+  --accent-foreground: #141618;
+  --border: rgba(20, 22, 24, 0.08);
+  --input: rgba(20, 22, 24, 0.08);
+  --ring: #F26A4F;
+  --destructive: #D8573E;
+  --destructive-foreground: #FFFFFF;
+  --shadow-e1: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-e2: 0 8px 24px rgba(0, 0, 0, 0.08);
+  --shadow-e3: 0 24px 64px rgba(0, 0, 0, 0.12);
+}
+
+/* === Tailwind v4 utility-class aliases === */
+@theme inline {
+  --color-background:           var(--background);
+  --color-foreground:           var(--foreground);
+  --color-card:                 var(--card);
+  --color-card-foreground:      var(--card-foreground);
+  --color-popover:              var(--popover);
+  --color-popover-foreground:   var(--popover-foreground);
+  --color-muted:                var(--muted);
+  --color-muted-foreground:     var(--muted-foreground);
+  --color-primary:              var(--primary);
+  --color-primary-foreground:   var(--primary-foreground);
+  --color-secondary:            var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-accent:               var(--accent);
+  --color-accent-foreground:    var(--accent-foreground);
+  --color-border:               var(--border);
+  --color-input:                var(--input);
+  --color-ring:                 var(--ring);
+  --color-destructive:          var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success:              var(--success);
+  --color-success-foreground:   var(--success-foreground);
+  --color-warning:              var(--warning);
+  --color-warning-foreground:   var(--warning-foreground);
+  --color-info:                 var(--info);
+  --color-info-foreground:      var(--info-foreground);
+
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-xl: 28px;
+
+  --shadow-e1: var(--shadow-e1);
+  --shadow-e2: var(--shadow-e2);
+  --shadow-e3: var(--shadow-e3);
+
+  --ease-perima:    cubic-bezier(0.22, 0.61, 0.36, 1);
+  --duration-micro: 180ms;
+  --duration-panel: 280ms;
+  --duration-page:  420ms;
+
+  --font-display: "Fraunces Variable", "Times New Roman", Georgia, serif;
+  --font-sans:    "Inter Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono:    "JetBrains Mono Variable", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+/* === Spectrum helpers — identity layer, not utility-generated === */
+.bg-spectrum   { background: var(--perima-spectrum); }
+.text-spectrum {
+  background: var(--perima-spectrum);
+  -webkit-background-clip: text;
+          background-clip: text;
+  color: transparent;
+}
+
+/* === Typography — semantic classes (Tailwind has no font-variation-settings utility) === */
+.display-xl {
+  font-family: var(--font-display);
+  font-size: 4.5rem;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+  font-variation-settings: "opsz" 144;
+  margin: 0;
+}
+.h1 {
+  font-family: var(--font-display);
+  font-size: 3.5rem;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+  font-variation-settings: "opsz" 96;
+  margin: 0;
+}
+.h2 {
+  font-family: var(--font-display);
+  font-size: 2.5rem;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+  font-variation-settings: "opsz" 48;
+  margin: 0;
+}
+.h3 {
+  font-family: var(--font-display);
+  font-size: 1.75rem;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  font-weight: 600;
+  font-variation-settings: "opsz" 36;
+  margin: 0;
+}
+.h4 {
+  font-family: var(--font-sans);
+  font-size: 1.25rem;
+  line-height: 1.2;
+  font-weight: 600;
+  margin: 0;
+}
+.eyebrow {
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.caption {
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
+.mono-metadata {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
