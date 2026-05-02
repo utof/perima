@@ -93,22 +93,26 @@ impl OpenAICompatibleTranscriber {
 
         // Per AuthScheme:
         // - Bearer: async-openai's default; pass api_key through.
+        // - XApiKey { header }: emit `<header>: <api_key>` via with_header.
+        //   async-openai 0.36 still emits an `Authorization: Bearer ` line
+        //   with an empty key alongside, but custom-header-using providers
+        //   (Azure, LiteLLM) ignore the unrecognized auth.
         // - None: pass an empty key (some local servers ignore the header).
-        // - XApiKey: 0.36 has no first-class custom-header API on
-        //   `OpenAIConfig`. For v1 we still pass the key as Bearer so
-        //   providers that accept either form (most do) keep working;
-        //   true custom-header support is tracked as future work.
-        // WHY: async-openai 0.36 names this differently than spec/plan
-        //   (and `OpenAIConfig::with_api_key` is the only knob exposed
-        //   without dropping down to a custom `Config` impl).
-        let api_key_for_client = match preset.auth_scheme {
-            AuthScheme::Bearer | AuthScheme::XApiKey { .. } => api_key,
-            AuthScheme::None => String::new(),
-        };
-
-        let config = OpenAIConfig::new()
-            .with_api_base(preset.base_url)
-            .with_api_key(api_key_for_client);
+        let mut config = OpenAIConfig::new().with_api_base(preset.base_url);
+        match preset.auth_scheme {
+            AuthScheme::Bearer => {
+                config = config.with_api_key(api_key);
+            }
+            AuthScheme::XApiKey { header } => {
+                config = config.with_header(header, api_key).map_err(|e| {
+                    CoreError::Transcription(TranscriptionError::Internal(format!(
+                        "invalid XApiKey header value for provider {}: {e}",
+                        preset.name
+                    )))
+                })?;
+            }
+            AuthScheme::None => {}
+        }
 
         let client = Client::with_config(config);
         Ok(Self {
@@ -224,8 +228,16 @@ impl Transcriber for OpenAICompatibleTranscriber {
             let temp = self
                 .audio
                 .remux_for_upload(&req.source, &req.cancel)
-                .map_err(|e| {
-                    CoreError::Transcription(TranscriptionError::AudioDecode(format!("remux: {e}")))
+                .map_err(|e| match e {
+                    // Preserve the cancel signal end-to-end — folding it into
+                    // AudioDecode would surface as a confusing decode error in
+                    // the UI even though the user just hit Cancel.
+                    crate::audio::AudioError::Cancelled => {
+                        CoreError::Transcription(TranscriptionError::Cancelled)
+                    }
+                    other => CoreError::Transcription(TranscriptionError::AudioDecode(format!(
+                        "remux: {other}"
+                    ))),
                 })?;
             (temp.path().to_owned(), Some(temp))
         } else {
