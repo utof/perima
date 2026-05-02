@@ -182,6 +182,11 @@ impl FfmpegInvoker for CliFfmpegInvoker {
 /// [`AudioPipeline`] impl built on a generic [`FfmpegInvoker`].
 #[derive(Debug)]
 pub struct FfmpegAudioPipeline<I: FfmpegInvoker> {
+    // WHY Arc not owned: the use-case may construct one invoker at app
+    // startup and share it across multiple pipeline instances (per-job
+    // pipelines + a future health-check probe). Owning `I` would force
+    // one invoker per pipeline instance and duplicate the binary-path
+    // resolution. Cheap clone on dispatch is the right tradeoff.
     invoker: Arc<I>,
 }
 

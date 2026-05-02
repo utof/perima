@@ -1,5 +1,11 @@
 //! Mock-ffmpeg unit tests for the audio pipeline.
-
+//!
+//! WHY `#![cfg(unix)]`: the mock invokers spawn POSIX coreutils (`true`,
+//! `false`, `sleep 30`) to simulate ffmpeg success / failure / hang. A
+//! Windows port would need to spawn equivalents (`cmd /c exit 0`,
+//! `cmd /c exit 1`, `timeout /t 30 /nobreak`) — deferred until the
+//! Windows ffmpeg-sidecar bundling slice (tracked in ASR v2 milestone).
+#![cfg(unix)]
 #![allow(clippy::unwrap_used)] // WHY: test code; panics are acceptable assertions.
 
 use std::sync::{Arc, Mutex};
@@ -18,7 +24,7 @@ struct MockFfmpeg {
 }
 
 impl MockFfmpeg {
-    fn new(fail_with_status: Option<i32>) -> Self {
+    const fn new(fail_with_status: Option<i32>) -> Self {
         Self {
             captured_args: Mutex::new(Vec::new()),
             fail_with_status,

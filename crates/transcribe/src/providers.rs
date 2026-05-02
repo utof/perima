@@ -31,10 +31,13 @@ pub struct ProviderPreset {
     pub auth_scheme: AuthScheme,
 }
 
-/// All bundled providers. Adding a new provider = one entry here.
+/// All bundled providers. See spec § "The cloud adapter" for the rationale
+/// (one OpenAI-compat adapter + `base_url` covers all known servers in 2026).
 ///
-/// See spec § "The cloud adapter" for the rationale (one OpenAI-compat
-/// adapter + `base_url` covers all known servers in 2026).
+/// **Adding a new provider:** insert a new entry BEFORE the `"custom"`
+/// entry (which must remain last so callers can rely on
+/// `KNOWN_PROVIDERS.last()` being the user-customisable template).
+/// `find_preset` is O(N); fine for N≈3-10 providers.
 pub const KNOWN_PROVIDERS: &[ProviderPreset] = &[
     ProviderPreset {
         name: "groq",
@@ -54,9 +57,12 @@ pub const KNOWN_PROVIDERS: &[ProviderPreset] = &[
         auth_scheme: AuthScheme::Bearer,
     },
     ProviderPreset {
+        // WHY empty base_url + default_model: this is a TEMPLATE entry. The T5
+        // config loader MUST overlay user-supplied values before this preset is
+        // used to construct an adapter. Direct use will fail at the HTTP layer.
         name: "custom",
-        base_url: "",      // user supplies
-        default_model: "", // user supplies
+        base_url: "",
+        default_model: "",
         file_size_limit_bytes: 24 * 1024 * 1024,
         auth_scheme: AuthScheme::Bearer,
     },
