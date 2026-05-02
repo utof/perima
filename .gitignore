@@ -1,12 +1,18 @@
+# =============================================================================
+# DO NOT RE-ENABLE TRACKING FOR CLAUDE.md OR docs/.
+#
+# CLAUDE.md and docs/ are LOCAL-ONLY by intentional decision (autonomous-mode
+# user preference). Both files have been `git rm --cached` and remain on disk
+# for local agent state. Do not add `!CLAUDE.md` or `!docs/...` exception
+# lines below. Do not "helpfully" re-track these so cloud agents can read
+# them. The user has reverted that pattern repeatedly. This rule is final.
+# =============================================================================
+
 **/*.md
 !CHANGELOG.md
-!CLAUDE.md
-# WHY exception for docs/superpowers + CLAUDE.md: cloud agents
-# (scheduled remote triggers) clone the repo fresh and need spec/plan
-# artifacts + binding rules to continue autonomous work across
-# sessions. Local WIP .md files elsewhere in the repo remain gitignored.
-!docs/superpowers/**/*.md
-!docs/routines/**/*.md
+CLAUDE.md
+docs/
+.claude
 !.claude/**/*.md
 # WHY: issue templates (.yml) and any future workflow docs live under
 # .github/; the blanket **/*.md rule would otherwise exclude markdown
