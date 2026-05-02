@@ -1,0 +1,34 @@
+[package]
+name = "perima-transcribe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-openai  = { workspace = true }
+flume         = { workspace = true }
+keyring       = { workspace = true }
+mime_guess    = { workspace = true }
+perima-core   = { path = "../core" }
+# WHY no direct reqwest dep: comes transitively via async-openai.
+serde         = { workspace = true }
+serde_json    = { workspace = true }
+tempfile      = { workspace = true }
+thiserror     = { workspace = true }
+tokio         = { workspace = true, features = ["rt-multi-thread", "process", "macros", "fs", "io-util"] }
+# WHY no features = ["sync"] on tokio-util: CancellationToken is
+# unconditionally available in 0.7.18+ (the "sync" feature does not exist).
+# T1 confirmed this; T3 applies the same fix.
+tokio-util    = { workspace = true }
+tracing       = { workspace = true }
+which         = { workspace = true }
+
+[dev-dependencies]
+hound         = { workspace = true }
+proptest      = { workspace = true }
+serde_json    = { workspace = true }
+tokio         = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+wiremock      = { workspace = true }
+
+[lints]
+workspace = true
