@@ -1,11 +1,14 @@
-//! FTS5 trigger codegen — single source of truth for the 16 sync triggers.
+//! FTS5 trigger codegen — single source of truth for the 18 sync triggers.
 //!
 //! See `docs/superpowers/specs/2026-04-23-arch-audit-batch-F-fts-codegen-design.md`
 //! for the design rationale + the V006→V007→V008 bug class this closes.
+//! Transcription v1 (`docs/superpowers/specs/2026-05-02-transcription-v1-design.md`)
+//! added 3 `transcript_search` maintenance triggers on top of the post-Task-3
+//! baseline of 15.
 //!
 //! Public surface:
 //! - [`spec::FtsAggregation`] — one trigger entry.
-//! - [`spec::FTS_AGGREGATIONS`] — the 16 entries.
+//! - [`spec::FTS_AGGREGATIONS`] — the 18 entries.
 //! - [`spec::LEGACY_TRIGGER_NAMES`] — historical names dropped but no longer created.
 //! - [`render_fts_triggers`] — render the install body to a `String`.
 //! - [`install_fts_triggers`] — execute the rendered SQL on a `Connection`.
@@ -110,6 +113,9 @@ const fn body_kind_name(b: spec::BodyKind) -> &'static str {
         spec::BodyKind::TagsNameUpdate => "TagsNameUpdate",
         spec::BodyKind::TagsSoftDeleteOrRestore => "TagsSoftDeleteOrRestore",
         spec::BodyKind::TagsDelete => "TagsDelete",
+        spec::BodyKind::TranscriptSegmentAfterInsert => "TranscriptSegmentAfterInsert",
+        spec::BodyKind::TranscriptSegmentAfterDelete => "TranscriptSegmentAfterDelete",
+        spec::BodyKind::TranscriptSegmentAfterUpdate => "TranscriptSegmentAfterUpdate",
     }
 }
 
@@ -159,6 +165,14 @@ mod tests {
     #[test]
     fn snapshot_tags_triggers() {
         insta::assert_snapshot!("fts_tags", render_for_source("tags"));
+    }
+
+    #[test]
+    fn snapshot_transcript_segment_triggers() {
+        insta::assert_snapshot!(
+            "fts_transcript_segment",
+            render_for_source("transcript_segment")
+        );
     }
 
     #[test]

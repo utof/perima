@@ -26,6 +26,11 @@ flume.workspace     = true
 minijinja.workspace = true
 r2d2.workspace      = true
 r2d2_sqlite.workspace = true
+# WHY tokio-util in prod deps: TranscriptWriteCmd::Insert carries an
+# Option<CancellationToken> threaded from the use-case so the writer
+# can roll back mid-transaction if the caller cancels (closes the
+# cancel-after-adapter-success window per the transcription v1 spec).
+tokio-util.workspace = true
 
 [features]
 default = []

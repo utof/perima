@@ -8,9 +8,14 @@ use perima_db::schema::install_fts_triggers;
 use perima_db::{open_and_migrate, schema::FTS_AGGREGATIONS};
 
 fn fts_triggers(conn: &rusqlite::Connection) -> Vec<(String, String)> {
+    // WHY include `transcript_search_after_%`: transcription v1
+    // (2026-05-02 spec) added 3 maintenance triggers under that prefix
+    // alongside the existing `sc_*` + `search_after_%` set. Missing the
+    // glob would have under-counted post-bump.
     conn.prepare(
         "SELECT name, sql FROM sqlite_master \
-         WHERE type='trigger' AND (name LIKE 'sc_%' OR name LIKE 'search_after_%') \
+         WHERE type='trigger' AND (name LIKE 'sc_%' OR name LIKE 'search_after_%' \
+                                   OR name LIKE 'transcript_search_after_%') \
          ORDER BY name",
     )
     .unwrap()
