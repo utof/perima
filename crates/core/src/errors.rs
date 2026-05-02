@@ -62,6 +62,10 @@ pub enum CoreError {
     #[error("unsupported in this phase: {0}")]
     Unsupported(String),
 
+    /// Transcription failure (cloud or local STT backend).
+    #[error("transcription failed: {0}")]
+    Transcription(#[from] crate::transcription::TranscriptionError),
+
     /// Any adapter-level failure that didn't map to a typed variant.
     #[error("internal: {0}")]
     Internal(String),

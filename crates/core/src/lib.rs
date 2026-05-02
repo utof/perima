@@ -12,6 +12,7 @@ pub mod ids;
 pub mod metadata;
 pub mod search;
 pub mod tag;
+pub mod transcription;
 pub mod types;
 
 pub use dedup::{BatchHandle, BatchId, CollisionGroup, DeviceKind, FullHashOutcome, VerifiedState};

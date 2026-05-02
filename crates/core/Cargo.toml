@@ -11,6 +11,7 @@ publish = false  # WHY: intra-workspace only; not published to crates.io
 thiserror.workspace = true
 serde.workspace     = true
 uuid.workspace      = true
+tokio-util.workspace = true
 unicode-normalization.workspace = true
 # WHY features = ["derive", "uuid"]: specta::Type proc-macro lives behind
 # the "derive" feature. The "uuid" feature adds specta::Type impl for
