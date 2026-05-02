@@ -85,7 +85,13 @@ pub struct TranscribeRequest {
 
     /// Per-segment / heartbeat progress hook. Called from arbitrary
     /// threads; must be `Send + Sync`. `Arc<dyn Fn>` keeps the trait
-    /// object-safe.
+    /// object-safe AND lets `TranscribeRequest: Clone` share one closure
+    /// across clones (cloning the request shares — does NOT duplicate —
+    /// the callback).
+    // WHY Arc<dyn Fn> over channel/Box: long-lived progress hook needs both
+    // Send + Sync + trait-object safety; a channel would force the request
+    // struct to own a tx and entangle cancellation; Box<dyn Fn> would block
+    // Clone of TranscribeRequest, which the queue needs to dispatch jobs.
     pub on_progress: Arc<dyn Fn(TranscriptionProgress) + Send + Sync>,
 
     /// Soft timeout for HTTP-backed adapters. Local adapters ignore.
@@ -138,16 +144,17 @@ pub enum TranscriptionProgress {
 
 /// All transcription failure modes.
 ///
-/// `#[non_exhaustive]` so we can add variants in patch releases without
-/// breaking downstream `match` arms. Inside this crate, every match
-/// SHOULD be exhaustive (clippy `wildcard_enum_match_arm` is in the
-/// `restriction` group and is NOT enabled workspace-wide today —
-/// enabling it across the workspace is its own slice; for THIS crate
-/// the match-without-wildcard discipline is documented + reviewer-enforced).
+/// `#[non_exhaustive]` so new variants can land in patch releases without
+/// breaking downstream `match` arms. Downstream code should either match
+/// every variant explicitly or use a wildcard arm and re-audit on bumps.
 ///
 /// `Serialize` only (NOT `Deserialize`) — matches the [`CoreError`]
 /// shape. The frontend parses the JSON via the typed-IPC contract;
 /// Rust never deserializes its own errors.
+// WHY no workspace-wide wildcard_enum_match_arm clippy lint: the lint is
+// in the restriction group (not enabled today). Enabling it across the
+// workspace is tracked as its own slice. In this crate the no-wildcard
+// discipline is reviewer-enforced.
 #[derive(Debug, Clone, Error, Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(tag = "kind", content = "data")]
@@ -277,7 +284,9 @@ mod tests {
         let err = TranscriptionError::Auth;
         let json = serde_json::to_string(&err).expect("serialize");
         assert!(json.contains("\"kind\":\"Auth\""), "got {json}");
-        // Auth has no payload; `data` should be absent or null per serde tag/content rules.
+        // Auth carries no payload — verify `data` key is genuinely absent so a
+        // future refactor that adds a field to Auth doesn't silently slip past.
+        assert!(!json.contains("\"data\""), "got {json}");
     }
 
     #[test]
@@ -293,6 +302,9 @@ mod tests {
         let json = serde_json::to_string(&seg).expect("serialize");
         let de: TranscriptSegment = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(seg.id, de.id);
+        assert_eq!(seg.start_ms, de.start_ms);
+        assert_eq!(seg.end_ms, de.end_ms);
         assert_eq!(seg.text, de.text);
+        assert_eq!(seg.confidence, de.confidence);
     }
 }
