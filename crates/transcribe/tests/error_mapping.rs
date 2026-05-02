@@ -116,3 +116,20 @@ fn unauthorized_code_also_maps_to_auth() {
         CoreError::Transcription(TranscriptionError::Auth)
     ));
 }
+
+#[test]
+fn invalid_argument_with_size_maps_to_file_too_large() {
+    // Heuristic: async-openai surfaces upstream "request body too large"
+    // as InvalidArgument with the substring "size" — map to FileTooLarge
+    // so the UI can surface a concrete byte ceiling rather than a generic
+    // adapter error.
+    let err =
+        OpenAIError::InvalidArgument("request body too large: SIZE limit exceeded".to_owned());
+    let mapped = map_async_openai_error(err, &backend(), "model-x", FILE_LIMIT_BYTES);
+    match mapped {
+        CoreError::Transcription(TranscriptionError::FileTooLarge { limit_bytes }) => {
+            assert_eq!(limit_bytes, FILE_LIMIT_BYTES);
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+}

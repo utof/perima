@@ -125,7 +125,7 @@ impl OpenAICompatibleTranscriber {
         })
     }
 
-    async fn do_transcribe(
+    async fn transcribe_inner(
         &self,
         upload_path: PathBuf,
         language_hint: Option<String>,
@@ -175,7 +175,7 @@ impl OpenAICompatibleTranscriber {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let end_ms = (s.end * 1000.0) as u32;
                 TranscriptSegment {
-                    id: Uuid::nil(), // use-case stamps real UUIDv7
+                    id: Uuid::nil(), // TODO(T5): use-case stamps real UUIDv7 over this placeholder
                     start_ms,
                     end_ms,
                     text: s.text,
@@ -254,7 +254,7 @@ impl Transcriber for OpenAICompatibleTranscriber {
         //    check guards that.
         let result = tokio::task::block_in_place(|| {
             self.runtime
-                .block_on(self.do_transcribe(upload_path, req.language_hint.clone()))
+                .block_on(self.transcribe_inner(upload_path, req.language_hint.clone()))
         });
 
         (req.on_progress)(TranscriptionProgress::Finished);
@@ -264,7 +264,8 @@ impl Transcriber for OpenAICompatibleTranscriber {
 
 /// Map `async-openai` errors to typed [`TranscriptionError`] variants.
 ///
-/// Snapshot-tested in `crates/transcribe/tests/error_mapping.rs`.
+/// Covered by `crates/transcribe/tests/error_mapping.rs` (variant +
+/// field assertions, not insta snapshots).
 ///
 /// The match covers every concrete `OpenAIError` variant in 0.36 (no
 /// wildcard arm), so adding a new variant in a future bump becomes a
@@ -323,41 +324,5 @@ fn map_api_error(
         _ => TranscriptionError::BackendUnavailable {
             reason: format!("API error: {} ({:?})", api.message, api.code),
         },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn unknown_code_maps_to_backend_unavailable_with_message() {
-        let api = async_openai::error::ApiError {
-            message: "boom".to_owned(),
-            r#type: None,
-            param: None,
-            code: Some("unknown_code".to_owned()),
-        };
-        let mapped = map_api_error(&api, &BackendId("p:m".to_owned()), "m");
-        match mapped {
-            TranscriptionError::BackendUnavailable { reason } => {
-                assert!(reason.contains("boom"), "got {reason}");
-                assert!(reason.contains("unknown_code"), "got {reason}");
-            }
-            other => panic!("wrong variant: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn invalid_argument_with_size_maps_to_file_too_large() {
-        let err =
-            OpenAIError::InvalidArgument("request body too large: SIZE limit exceeded".to_owned());
-        let mapped = map_async_openai_error(err, &BackendId("p:m".to_owned()), "m", 12345);
-        match mapped {
-            CoreError::Transcription(TranscriptionError::FileTooLarge { limit_bytes }) => {
-                assert_eq!(limit_bytes, 12345);
-            }
-            other => panic!("wrong variant: {other:?}"),
-        }
     }
 }
