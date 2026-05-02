@@ -64,6 +64,10 @@ fn make_segment(start_ms: u32, end_ms: u32, text: &str) -> TranscriptSegmentRow 
     }
 }
 
+/// Happy path: header + 3 segments commit together; the codegen FTS5
+/// trigger fires on each segment INSERT (verified by `MATCH 'hello'`).
+/// Atomicity-under-fault is verified by the cancel-rollback test below
+/// and by `transcript_proptests::transcript_search_matches_ground_truth_under_soft_delete_churn`.
 #[test]
 fn insert_persists_transcript_and_segments_atomically() {
     let (_td, db_path, writer) = scratch_writer();

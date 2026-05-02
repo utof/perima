@@ -1,23 +1,14 @@
-//! Writer-side handler for [`crate::cmd::TranscriptWriteCmd`].
-//!
-//! Mirrors the [`crate::writer::metadata`] handler shape:
+//! Writer-side handler for [`crate::cmd::TranscriptWriteCmd`]. Mirrors
+//! the [`crate::writer::metadata`] handler shape:
 //! `(conn: &mut Connection, cmd: TranscriptWriteCmd, bus: &Arc<dyn EventBus>)`.
 //!
-//! Atomic transaction structure (per spec § "Writer-cmd handler shape"):
-//! 1. `BEGIN IMMEDIATE`.
-//! 2. Cancel-token check — if fired, ROLLBACK + reply `Cancelled`.
-//! 3. Compute one HLC value via `Hlc::now()` (one HLC per command).
-//! 4. INSERT into `transcript` with `device, hlc, now`.
-//! 5. For each segment: cancel check; if fired ROLLBACK; else INSERT
-//!    with the same `device, hlc, now`.
-//! 6. FTS5 maintenance triggers (codegen-installed) fire automatically.
-//! 7. COMMIT.
-//! 8. Send `Ok(transcript.id)` via `reply`.
-//! 9. Emit `AppEvent::IndexInvalidated { reason: SearchIndexRebuilt }`
-//!    via `bus.emit`. (T5 will introduce a richer
-//!    `AppEvent::TranscriptionCompleted` variant; today we use the
-//!    closest existing v1 invalidation reason so query-cache consumers
-//!    refresh transcript-search hits.)
+//! Shape: `BEGIN IMMEDIATE` → cancel-aware insert (header + N segments,
+//! one HLC value per command) → `COMMIT` → reply → emit. FTS5 maintenance
+//! triggers fire automatically inside the transaction; see codegen
+//! template macros `body_transcript_segment_after_*`.
+//!
+//! Emits `AppEvent::IndexInvalidated { SearchIndexRebuilt }` until T5
+//! introduces a richer `AppEvent::TranscriptionCompleted` variant.
 //!
 //! # Cancellation race
 //!
@@ -101,9 +92,8 @@ fn insert_impl(
     if let Some(token) = cancel
         && token.is_cancelled()
     {
-        // Drop the transaction without commit (rollback on Drop is
-        // safe; explicit rollback would also work but Drop is the
-        // sibling-handler convention).
+        // Drop the transaction without commit; rusqlite's Transaction
+        // Drop is documented to roll back when the tx is unconsumed.
         drop(tx);
         return Err(CoreError::Transcription(TranscriptionError::Cancelled));
     }

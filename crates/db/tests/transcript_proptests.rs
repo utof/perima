@@ -245,11 +245,14 @@ enum TranscriptOp {
 // ---------------------------------------------------------------------------
 
 proptest::proptest! {
-    // WHY cases=64: matches the FTS5 proptest cap from CLAUDE.md (#124).
-    // Each case spawns a writer thread + opens 2 raw connections + runs
-    // up to 25 ops with a per-op ground-truth comparison.
+    // WHY cases=32: matches the soft-delete-churn sibling
+    // `fts_matches_ground_truth_under_soft_delete_churn` cap (#124).
+    // Per-case work is similar shape (writer thread + 2 raw connections
+    // + up to 25 ops + per-op ground-truth comparison) so we use the
+    // same tighter cap rather than the 64-cap of the lighter
+    // `fts_consistent_under_tag_churn` proptest.
     #![proptest_config(proptest::test_runner::Config {
-        cases: 64,
+        cases: 32,
         ..proptest::test_runner::Config::default()
     })]
 

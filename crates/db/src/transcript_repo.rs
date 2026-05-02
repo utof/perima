@@ -64,6 +64,10 @@ pub struct TranscriptRow {
 }
 
 /// Row payload for inserting a `transcript_segment` row.
+// WHY id: TranscriptId (not a separate TranscriptSegmentId): same UUIDv7-hex
+// shape as the parent's id, single newtype keeps the SQL boundary simple. A
+// future slice may split into a dedicated `TranscriptSegmentId` newtype if the
+// type-confusion at construction sites starts biting.
 #[derive(Debug, Clone)]
 pub struct TranscriptSegmentRow {
     /// `UUIDv7`.
