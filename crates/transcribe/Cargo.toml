@@ -3,6 +3,7 @@ name = "perima-transcribe"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false  # WHY: intra-workspace only; not published to crates.io
 
 [dependencies]
 async-openai  = { workspace = true }
