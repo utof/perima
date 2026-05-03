@@ -29,3 +29,11 @@ node_modules/
 apps/desktop/dist/
 apps/desktop/dist-types/
 .codex
+# WHY: Tauri externalBin sidecar binaries (ffmpeg + future helpers) are
+# fetched at CI build time, named per-target-triple (e.g.
+# `ffmpeg-x86_64-unknown-linux-gnu`), and can be 50-100 MB. Never commit
+# them — they are platform-specific, large, and CI provisions them
+# fresh each run. The `.gitkeep` is preserved so the directory exists
+# at clone time (Tauri's externalBin resolver expects the path).
+crates/desktop/binaries/*
+!crates/desktop/binaries/.gitkeep

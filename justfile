@@ -64,6 +64,14 @@ bindings:
     cargo build -p perima-desktop --features specta-export
     git diff --exit-code apps/desktop/src/bindings.ts
 
+# Fetch the ffmpeg static binary used by perima-desktop's externalBin
+# sidecar slot. Required before any `cargo build/clippy/test` of
+# `perima-desktop`: tauri-build validates externalBin paths during every
+# compile (issue tauri-apps/tauri#14602). Linux ships the real binary;
+# macOS + Windows write a stub until T12 follow-up issues land.
+sidecar:
+    ./scripts/fetch-ffmpeg-sidecar.sh
+
 deny:
     cargo deny check
 

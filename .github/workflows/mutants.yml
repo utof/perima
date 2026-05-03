@@ -65,6 +65,18 @@ jobs:
             librsvg2-dev \
             patchelf
 
+      # WHY (T12): cargo-mutants' baseline-build pass compiles the
+      # WHOLE workspace including perima-desktop (exclude_globs only
+      # filters mutation generation, not baseline compile). tauri-build
+      # validates `bundle.externalBin` paths during compile (issue
+      # tauri-apps/tauri#14602), so the binary must exist on disk
+      # before any cargo invocation.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Fetch ffmpeg sidecar
+        run: just sidecar
+
       # WHY `| tee git.diff` (vs `> git.diff`): tee echoes the diff into
       # the CI log so reviewers can see what cargo-mutants will operate
       # on without downloading the artifact. Matches the canonical
