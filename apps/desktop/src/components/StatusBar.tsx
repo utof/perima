@@ -21,6 +21,7 @@ import { useUiStore } from "../stores/ui";
 import { useCollisions } from "../queries/dedup";
 import { useBackupDatabase } from "../queries/backup";
 import CollisionPill from "./CollisionPill";
+import { TranscriptionPill } from "./TranscriptionPill";
 import { coreErrorMessage } from "../lib/coreError";
 import type { BackupFailureReason, CoreError, FullHashUnavailableReason } from "../bindings";
 
@@ -147,6 +148,7 @@ export default function StatusBar() {
           {backupMutation.isPending ? "Backing up…" : "Backup"}
         </button>
         <CollisionPill groups={collisions} />
+        <TranscriptionPill />
       </div>
     </div>
   );
