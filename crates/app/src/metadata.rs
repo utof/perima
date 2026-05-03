@@ -38,8 +38,7 @@
 use std::sync::Arc;
 
 use perima_core::{
-    CoreError, DeviceId, EventBus, FileLocationRecord, FileRepository, MediaMetadata,
-    MetadataRepository,
+    CoreError, DeviceId, EventBus, FileLocationRecord, FileRepository, MetadataRepository,
 };
 
 /// Default page size when `limit` is `None`.
@@ -98,7 +97,8 @@ pub enum MetadataOutput {
     Files(Vec<FileLocationRecord>),
 
     /// Response to [`MetadataCommand::ListFilesWithMetadata`] — each record
-    /// paired with its optional metadata and the raw `quick_hash` hex string.
+    /// paired with its optional metadata, the raw `quick_hash` hex string,
+    /// and the volume's current `mount_path` on this machine.
     ///
     /// `None` metadata means extraction is pending or failed; callers
     /// MUST NOT treat `None` as "file has no metadata" for display
@@ -108,7 +108,13 @@ pub enum MetadataOutput {
     /// `None` if the backfill worker has not yet run. See
     /// [`MetadataRepository::list_with_metadata`] for the placeholder
     /// detection contract.
-    FilesWithMetadata(Vec<(FileLocationRecord, Option<MediaMetadata>, Option<String>)>),
+    ///
+    /// The fourth element is `volume_mounts.mount_path` for the file's
+    /// volume, or `None` when the volume is not currently mounted on this
+    /// machine. The desktop shell joins it with `relative_path` to
+    /// materialise an absolute path for ffmpeg / OS open-file actions
+    /// (T9 review fix).
+    FilesWithMetadata(Vec<perima_core::FileWithMetadataRow>),
 }
 
 /// Orchestrator: file-location listing and metadata join.
@@ -422,11 +428,11 @@ mod tests {
         // Find each row by path.
         let with_meta = rows
             .iter()
-            .find(|(r, _, _)| r.relative_path.as_str() == "media/has_meta.jpg")
+            .find(|(r, _, _, _)| r.relative_path.as_str() == "media/has_meta.jpg")
             .expect("file with metadata should appear");
         let without_meta = rows
             .iter()
-            .find(|(r, _, _)| r.relative_path.as_str() == "media/no_meta.jpg")
+            .find(|(r, _, _, _)| r.relative_path.as_str() == "media/no_meta.jpg")
             .expect("file without metadata should appear");
 
         assert!(

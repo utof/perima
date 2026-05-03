@@ -350,6 +350,18 @@ export type FileWithMetadataPayload = {
   mime_type: string | null;
   thumbnail_path: string | null;
   thumbnail_status: string | null;
+  /**
+   * Absolute on-disk path joining the volume's current mount root with
+   * `relative_path`. `null` when the volume is not currently mounted on
+   * this machine — UI controls that need an on-disk path (transcribe,
+   * open-file, preview) must be disabled in that case.
+   *
+   * T9 review fix: pre-fix the frontend passed `relative_path` to the
+   * backend `transcribe` command, which forwards untouched to ffmpeg.
+   * ffmpeg resolves relative paths against the desktop process cwd,
+   * producing silent ENOENT in any normal install.
+   */
+  absolute_path: string | null;
 };
 
 /**

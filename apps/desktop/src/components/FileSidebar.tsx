@@ -87,7 +87,7 @@ export default function FileSidebar({ file, onClose }: FileSidebarProps) {
         <TranscribeButton
           fileUuid={file.file_uuid}
           fileName={file.relative_path.split("/").pop() ?? file.relative_path}
-          source={file.relative_path}
+          source={file.absolute_path}
         />
         {/* TODO(T10): replace stub onClick with settings modal open */}
         <button

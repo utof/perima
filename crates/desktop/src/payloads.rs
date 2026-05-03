@@ -148,6 +148,22 @@ pub struct FileWithMetadataPayload {
     /// Thumbnail lifecycle: `"pending"`, `"ready"`, `"failed"`, or
     /// `None` if the metadata row predates v0.4.1.
     pub thumbnail_status: Option<String>,
+    /// Absolute on-disk path joining the volume's current mount root
+    /// with [`Self::relative_path`]. `None` when the volume is not
+    /// currently mounted on this machine.
+    ///
+    /// WHY exposed here (T9 review fix): the desktop transcribe
+    /// command (and any future open-file / preview / export action)
+    /// must hand ffmpeg / the OS an absolute path — relative paths
+    /// resolve against the desktop process cwd, which is rarely the
+    /// volume root, producing silent ENOENT. Pre-fix the frontend was
+    /// passing `relative_path` to `transcribe`, which forwards to
+    /// ffmpeg unchanged.
+    ///
+    /// WHY `Option<String>`: a volume that is currently unmounted has
+    /// no `volume_mounts` row → SQL produces NULL → frontend disables
+    /// the dependent action with a "Volume not mounted" tooltip.
+    pub absolute_path: Option<String>,
 }
 
 /// File-with-metadata plus its attached tags.
@@ -169,9 +185,21 @@ pub struct FileWithTagsPayload {
     pub tags: Vec<Tag>,
 }
 
-impl From<(FileLocationRecord, Option<MediaMetadata>, Option<String>)> for FileWithMetadataPayload {
+impl
+    From<(
+        FileLocationRecord,
+        Option<MediaMetadata>,
+        Option<String>,
+        Option<String>,
+    )> for FileWithMetadataPayload
+{
     fn from(
-        (loc, meta, quick_hash): (FileLocationRecord, Option<MediaMetadata>, Option<String>),
+        (loc, meta, quick_hash, mount_path): (
+            FileLocationRecord,
+            Option<MediaMetadata>,
+            Option<String>,
+            Option<String>,
+        ),
     ) -> Self {
         // WHY unzip via `meta.map(...)`: the nine optional metadata
         // fields each need independent `None` defaults when the
@@ -209,6 +237,18 @@ impl From<(FileLocationRecord, Option<MediaMetadata>, Option<String>)> for FileW
                 None, None, None, None, None, None, None, None, None, None, None,
             ),
         };
+        // WHY compute absolute_path here (not in SQL): the join already
+        // produces `mount_path`; combining with `relative_path` is a
+        // platform-sensitive `PathBuf::push` that belongs in Rust (SQL
+        // string concatenation would produce a forward-slash string on
+        // Windows, breaking ffmpeg + the OS open-file APIs). When
+        // `mount_path` is None the volume is unmounted — the frontend
+        // disables the dependent UI control.
+        let absolute_path = mount_path.as_ref().map(|mp| {
+            let mut p = std::path::PathBuf::from(mp);
+            p.push(loc.relative_path.as_str());
+            p.to_string_lossy().into_owned()
+        });
         Self {
             file_uuid: loc.file_uuid,
             hash: loc.hash.map(|h| h.to_hex()),
@@ -229,6 +269,7 @@ impl From<(FileLocationRecord, Option<MediaMetadata>, Option<String>)> for FileW
             mime_type,
             thumbnail_path,
             thumbnail_status,
+            absolute_path,
         }
     }
 }

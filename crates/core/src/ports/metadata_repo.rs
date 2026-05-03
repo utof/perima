@@ -4,10 +4,10 @@ use crate::{
     BlakeHash, CoreError, DeviceId, FileLocationRecord, MediaMetadata, UpsertOutcome, VolumeId,
 };
 
-/// A `(location, metadata, quick_hash)` row returned by
+/// A `(location, metadata, quick_hash, mount_path)` row returned by
 /// [`MetadataRepository::list_with_metadata`].
 ///
-/// WHY type alias: `clippy::type_complexity` fires on the 3-tuple when it
+/// WHY type alias: `clippy::type_complexity` fires on the 4-tuple when it
 /// appears inline in the trait method signature; a named alias both satisfies
 /// the lint and documents the shape in one place.
 ///
@@ -15,7 +15,23 @@ use crate::{
 /// if the backfill worker has not yet run for this row. The frontend uses
 /// equality with `hash` to detect placeholder rows
 /// (`hash == quick_hash` → full hash not yet computed).
-pub type FileWithMetadataRow = (FileLocationRecord, Option<MediaMetadata>, Option<String>);
+///
+/// `mount_path` is the local-filesystem mount root of the file's volume, or
+/// `None` when the volume is not currently mounted on this machine. WHY a
+/// separate tuple element rather than a field on [`FileLocationRecord`]:
+/// mount paths are device-local — the core domain treats volumes as
+/// abstract identifiers. Adapters that have access to `volume_mounts` (the
+/// `SQLite` repo) populate it; mocks may leave it `None`. The desktop
+/// frontend joins it with `relative_path` to materialise an `absolute_path`
+/// in `crates/desktop/src/payloads.rs::FileWithMetadataPayload` so
+/// downstream actions (transcribe, open-file) can hand `ffmpeg` / the OS an
+/// absolute path; `None` means the action must be disabled. T9 review fix.
+pub type FileWithMetadataRow = (
+    FileLocationRecord,
+    Option<MediaMetadata>,
+    Option<String>,
+    Option<String>,
+);
 
 /// Persistence boundary for `file_metadata`.
 ///

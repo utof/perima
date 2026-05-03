@@ -86,6 +86,20 @@ beforeEach(() => {
 });
 
 describe("TranscribeButton", () => {
+  // 0. Idle render with null source — T9 review fix
+  it("Idle: source === null disables the button with a 'volume not mounted' tooltip", () => {
+    renderWithProviders(<TranscribeButton {...defaultProps} source={null} />);
+
+    const btn = screen.getByRole("button", { name: /transcribe/i });
+    expect(btn).toBeDisabled();
+    expect(btn.getAttribute("title")).toMatch(/volume not mounted/i);
+
+    // Even firing a click must not invoke the api (jsdom dispatches click on
+    // disabled buttons; the React handler is wired but guards on `source`).
+    fireEvent.click(btn);
+    expect(mockTranscribe).not.toHaveBeenCalled();
+  });
+
   // 1. Idle render
   it("Idle: shows 'Transcribe' and calls api.transcribe on click", async () => {
     const started: TranscribeStartedPayload = { request_uuid: "req-new", queue_position: 1 };

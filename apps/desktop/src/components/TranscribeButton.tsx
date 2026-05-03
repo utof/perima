@@ -21,13 +21,18 @@ export interface TranscribeButtonProps {
   /** Display name for the transcription job (shown in the TranscriptionPill). */
   fileName: string;
   /**
-   * Path to the media file passed to the backend for transcription.
+   * Absolute on-disk path passed to the backend for transcription, or `null`
+   * when the file's volume is not currently mounted.
    *
-   * WHY relative_path (not absolute_path): `FileWithTagsPayload` only exposes
-   * `relative_path`; the Rust side resolves the volume mount-point internally.
-   * When T10 or a later task adds `absolute_path` to the payload, replace here.
+   * WHY `string | null` (T9 review fix): the backend cannot resolve relative
+   * paths — it forwards `source` unchanged to ffmpeg, which resolves against
+   * the desktop process cwd (rarely the volume root → silent ENOENT).
+   * `FileWithMetadataPayload` now exposes a precomputed `absolute_path` that
+   * joins the live `volume_mounts.mount_path` with `relative_path`. `null`
+   * means the volume is unmounted — the UI disables the button to prevent a
+   * guaranteed transcription failure.
    */
-  source: string;
+  source: string | null;
 }
 
 /**
@@ -41,6 +46,12 @@ export function TranscribeButton({ fileUuid, fileName, source }: TranscribeButto
   const notifyError = useUiStore((s) => s.notifyError);
 
   function onClickStart() {
+    // WHY guard: the Idle render disables the button when source is null,
+    // but the Cancelled / Failed retry buttons share this handler and run
+    // through the same `(source, fileUuid, fileName)` closure. Guarding
+    // here keeps the contract honest — re-clicking after the volume
+    // unmounts mid-job no-ops instead of firing a guaranteed-ENOENT call.
+    if (source === null) return;
     api
       .transcribe({ fileUuid, fileName, source, languageHint: null })
       .mapErr((err) => { notifyError(err); });
@@ -67,6 +78,22 @@ export function TranscribeButton({ fileUuid, fileName, source }: TranscribeButto
 
   // ── No active job → Idle ─────────────────────────────────────────────────────
   if (!activeJob) {
+    // WHY null source = disabled with tooltip (T9 review fix): the file's
+    // volume is not currently mounted, so the backend has no absolute path
+    // to hand ffmpeg. Disabling here prevents firing a doomed IPC call.
+    if (source === null) {
+      return (
+        <button
+          type="button"
+          disabled
+          className={primaryClass}
+          title="Volume not mounted — connect the drive to enable transcription"
+          aria-label={`Transcribe ${fileName} (volume not mounted)`}
+        >
+          Transcribe
+        </button>
+      );
+    }
     return (
       <button
         type="button"

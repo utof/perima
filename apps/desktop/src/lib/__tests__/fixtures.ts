@@ -35,6 +35,10 @@ export function file(hash: string, tagIds: string[]): FileWithTagsPayload {
     mime_type: null,
     thumbnail_path: null,
     thumbnail_status: null,
+    // WHY non-null default (T9 review fix): the fixture pre-dates
+    // `absolute_path`; tests that exercise the unmounted-volume branch
+    // construct payloads inline with `absolute_path: null`.
+    absolute_path: `/mnt/test/${hash}.jpg`,
     tags: tagIds.map((id) => ({
       id,
       name: `tag-${id}`,
