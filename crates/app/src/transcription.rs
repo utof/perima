@@ -281,7 +281,13 @@ async fn worker_loop(
     device: String,
 ) {
     while let Ok(item) = rx.recv_async().await {
-        process_one(&item, &registry, &repo, &events, &device);
+        // Snapshot remaining queue depth at dequeue + this job = live queue
+        // size as observed by the worker. WHY: AppEvent::TranscriptionStarted.
+        // queue_size docstring promises "current queue size including this
+        // job"; rx.len() is jobs still waiting behind this one (post-recv).
+        #[allow(clippy::cast_possible_truncation)]
+        let queue_size = (rx.len() as u32).saturating_add(1);
+        process_one(&item, queue_size, &registry, &repo, &events, &device);
         // Always remove from cancels map after terminal state so a stale
         // Cancel for a completed id is a true no-op (instead of firing a
         // dead token uselessly).
@@ -302,6 +308,7 @@ async fn worker_loop(
 #[allow(clippy::cognitive_complexity)] // WHY: the linear pipeline reads top-to-bottom; splitting harms readability.
 fn process_one(
     item: &QueueItem,
+    queue_size: u32,
     registry: &Arc<TranscriberRegistry>,
     repo: &Arc<SqliteTranscriptRepository>,
     events: &Arc<dyn EventBus>,
@@ -314,7 +321,7 @@ fn process_one(
         request_uuid: item.request_uuid.clone(),
         file_uuid: item.file_uuid.clone(),
         file_name: item.file_name.clone(),
-        queue_size: 1,
+        queue_size,
     };
     if let Err(e) = events.emit(&started_event) {
         tracing::warn!(error = %e, "failed to emit TranscriptionStarted");
