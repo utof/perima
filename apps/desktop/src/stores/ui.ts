@@ -19,7 +19,14 @@
  */
 import { create, type StateCreator } from "zustand";
 import { coreErrorMessage } from "../lib/coreError";
-import type { BatchId, CoreError, FileUuid, FullHashOutcome, ScanReport } from "../bindings";
+import type {
+  BatchId,
+  CoreError,
+  FileUuid,
+  FullHashOutcome,
+  ScanReport,
+  TranscriptionError,
+} from "../bindings";
 
 type ViewMode = "table" | "grid";
 
@@ -92,7 +99,87 @@ interface SelectionSlice {
   setSelectedFileUuid: (uuid: FileUuid | null) => void;
 }
 
-export type UiStore = ViewSlice & SearchSlice & ScanSlice & NotificationsSlice & VerifyBatchSlice & SelectionSlice;
+/**
+ * Discriminated-union status of a single in-flight transcription job.
+ *
+ * Wire shape mirrors `AppEvent::Transcription*` payloads (see bindings.ts):
+ * each event arm folds into one status variant via `useDomainEvents`.
+ *
+ * WHY discriminated union (not flat fields): `progressPercent: number | null`
+ * + `error: TranscriptionError | null` (the spec's flat shape) loses the
+ * compile-time guarantee that "completed" jobs have a `transcript_id` and
+ * "failed" jobs have an `error`. The discriminated union lets components
+ * pattern-match without nullable-field-juggling.
+ */
+export type TranscriptionJobStatus =
+  | { kind: "queued"; queue_position: number }
+  | { kind: "running"; processed_ms: number; total_ms: number | null }
+  | {
+      kind: "completed";
+      transcript_id: string;
+      segment_count: number;
+      language: string | null;
+    }
+  | { kind: "cancelled" }
+  | { kind: "failed"; error: TranscriptionError };
+
+/**
+ * One in-flight (or recently-terminated) transcription job.
+ *
+ * Lifecycle: created on `AppEvent::TranscriptionStarted`; mutated on every
+ * `Transcription{Progress,Completed,Cancelled,Failed}` for the same
+ * `request_uuid`; auto-removed by `useDomainEvents` after a terminal-state
+ * grace period (5s for Completed, 3s for Cancelled). `failed` jobs persist
+ * until the user dismisses them via `removeJob`.
+ */
+export interface TranscriptionJob {
+  /** Per-request UUIDv7 (lowercase-hex simple form). The map key. */
+  request_uuid: string;
+  /** Stable file surrogate (FileUuid) the job is transcribing. */
+  file_uuid: string;
+  /** Display name (basename or curated label) for UI surfacing. */
+  file_name: string;
+  /** Current discriminated-union status. */
+  status: TranscriptionJobStatus;
+  /** `Date.now()` captured at `startJob` time; used for relative timestamps. */
+  started_at_ms: number;
+}
+
+/**
+ * In-flight transcription jobs, keyed by `request_uuid`.
+ *
+ * WHY a `Record` (not an array): `useDomainEvents` looks up by request_uuid
+ * on every Progress / Completed / Cancelled / Failed event; an array would
+ * force an O(n) `find` per event. The map keeps mutation O(1) and matches
+ * the natural identity of a job (its UUIDv7).
+ *
+ * WHY no Zustand `persist`: terminal jobs are intentionally lost on app
+ * restart — they're ephemeral UX, not server state. The DB owns durable
+ * `transcript` rows; this slice is the in-flight progress mirror.
+ *
+ * WHY `updateJob` and `removeJob` are no-ops on missing keys: the
+ * auto-remove timer in `useDomainEvents` (5s post-Completed, 3s post-
+ * Cancelled) can race with a user-initiated `removeJob` from the
+ * `<TranscriptionPill>` popover. Defensive no-ops collapse the race
+ * without requiring lookup-then-update at every call site.
+ */
+export interface TranscriptionSlice {
+  /** Map of in-flight + recently-terminated jobs. */
+  transcription: {
+    jobs: Record<string, TranscriptionJob>;
+    startJob: (job: TranscriptionJob) => void;
+    updateJob: (request_uuid: string, status: TranscriptionJobStatus) => void;
+    removeJob: (request_uuid: string) => void;
+  };
+}
+
+export type UiStore = ViewSlice
+  & SearchSlice
+  & ScanSlice
+  & NotificationsSlice
+  & VerifyBatchSlice
+  & SelectionSlice
+  & TranscriptionSlice;
 
 const createViewSlice: StateCreator<UiStore, [], [], ViewSlice> = (set) => ({
   viewMode: "table",
@@ -156,6 +243,43 @@ const createSelectionSlice: StateCreator<UiStore, [], [], SelectionSlice> = (set
   setSelectedFileUuid: (uuid) => { set({ selectedFileUuid: uuid }); },
 });
 
+const createTranscriptionSlice: StateCreator<UiStore, [], [], TranscriptionSlice> = (set) => ({
+  transcription: {
+    jobs: {},
+    startJob: (job) => {
+      set((s) => ({
+        transcription: {
+          ...s.transcription,
+          jobs: { ...s.transcription.jobs, [job.request_uuid]: job },
+        },
+      }));
+    },
+    updateJob: (request_uuid, status) => {
+      set((s) => {
+        const existing = s.transcription.jobs[request_uuid];
+        // WHY no-op on missing key: see TranscriptionSlice doc — auto-remove
+        // timers in `useDomainEvents` race with user-initiated removeJob.
+        if (!existing) return s;
+        return {
+          transcription: {
+            ...s.transcription,
+            jobs: { ...s.transcription.jobs, [request_uuid]: { ...existing, status } },
+          },
+        };
+      });
+    },
+    removeJob: (request_uuid) => {
+      set((s) => {
+        if (!(request_uuid in s.transcription.jobs)) return s;
+        // WHY destructure-and-discard: produces a shallow copy without the
+        // removed key; immutable update keeps Zustand subscribers happy.
+        const { [request_uuid]: _removed, ...rest } = s.transcription.jobs;
+        return { transcription: { ...s.transcription, jobs: rest } };
+      });
+    },
+  },
+});
+
 export const useUiStore = create<UiStore>()((...a) => ({
   ...createViewSlice(...a),
   ...createSearchSlice(...a),
@@ -163,4 +287,5 @@ export const useUiStore = create<UiStore>()((...a) => ({
   ...createNotificationsSlice(...a),
   ...createVerifyBatchSlice(...a),
   ...createSelectionSlice(...a),
+  ...createTranscriptionSlice(...a),
 }));

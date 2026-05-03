@@ -21,6 +21,7 @@ import { useUiStore } from "../stores/ui";
 import { useCollisions } from "../queries/dedup";
 import { useBackupDatabase } from "../queries/backup";
 import CollisionPill from "./CollisionPill";
+import { coreErrorMessage } from "../lib/coreError";
 import type { BackupFailureReason, CoreError, FullHashUnavailableReason } from "../bindings";
 
 /**
@@ -53,6 +54,11 @@ export function errorKindLabel(err: CoreError): string {
       return `Full hash unavailable: ${fullHashUnavailableReasonLabel(err.data.reason)}`;
     case "BackupFailed":
       return `Backup failed: ${backupFailureReasonLabel(err.data.reason)}`;
+    case "Transcription":
+      // WHY delegate to coreErrorMessage: the inner TranscriptionError variant
+      // switch lives in lib/coreError.ts (single source of truth). StatusBar
+      // only needs the user-facing string; per-variant rendering is a follow-up.
+      return `Transcription error: ${coreErrorMessage(err)}`;
     default: {
       // WHY never: TypeScript exhaustiveness check. If a new CoreError variant
       // is added to bindings.ts without a matching case above, this line

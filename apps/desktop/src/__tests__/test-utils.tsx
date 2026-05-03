@@ -70,9 +70,21 @@ export const defaultUiState = {
   selectedFileUuid: null,
 };
 
-/** Reset the UI store to {@link defaultUiState}. Call from `beforeEach`. */
+/**
+ * Reset the UI store to {@link defaultUiState}. Call from `beforeEach`.
+ *
+ * WHY merge with the existing transcription slice (T8): `setState` shallow-
+ * merges; we restore the leaf primitives but keep the live `transcription`
+ * sub-object (with its action closures) intact, then zero its `jobs` map.
+ * Re-spreading actions into `defaultUiState` would entangle the two layers
+ * and force every test author to remember the slice's shape.
+ */
 export function resetUiStore(): void {
   useUiStore.setState(defaultUiState);
+  // Reset the in-flight transcription jobs map without re-binding the action
+  // closures. This keeps existing slice methods callable across tests.
+  const { transcription } = useUiStore.getState();
+  useUiStore.setState({ transcription: { ...transcription, jobs: {} } });
 }
 
 /** Build a QueryClient with test-friendly defaults (no gc, no retry). */

@@ -22,9 +22,12 @@ import type {
   FileUuid,
   FileWithMetadataPayload,
   FileWithTagsPayload,
+  ListProvidersPayload,
   ScanReport,
   SearchHit,
   Tag,
+  TranscribeStartedPayload,
+  TranscriptionConfig,
   VolumeRecord,
 } from "./bindings";
 
@@ -46,6 +49,8 @@ const KNOWN_KINDS: ReadonlySet<CoreError["kind"]> = new Set([
   "Internal",
   "FullHashUnavailable",
   "BackupFailed",
+  // T8 (transcription-v1): wraps a `TranscriptionError` in `data`.
+  "Transcription",
 ]);
 
 /**
@@ -356,4 +361,108 @@ export function backupDatabase(
     target: target ?? null,
     force,
   });
+}
+
+// ── Transcription wrappers (T8) ──────────────────────────────────────
+//
+// Eight thin wrappers around the T7 Tauri commands. Tauri v2 auto-snake-
+// cases camelCase keys on the Rust side; we still pass snake_case explicitly
+// here to keep the wire shape obvious in `git grep` (matches the dedup +
+// backup wrappers above).
+
+/**
+ * Enqueue a transcription job. Returns the per-request UUIDv7 + queue
+ * position immediately — actual transcription progress arrives via the
+ * `app-event` channel as `AppEvent::Transcription{Started,Progress,...}`.
+ *
+ * @param args - Job inputs:
+ *   - `fileUuid`: stable file surrogate (FileUuid).
+ *   - `fileName`: display name for UI surfacing.
+ *   - `source`: absolute path to the media file on disk.
+ *   - `languageHint`: optional BCP-47 short code; null = autodetect.
+ */
+export function transcribe(args: {
+  fileUuid: string;
+  fileName: string;
+  source: string;
+  languageHint: string | null;
+}): ResultAsync<TranscribeStartedPayload, CoreError> {
+  return fromInvoke<TranscribeStartedPayload>("transcribe", {
+    file_uuid: args.fileUuid,
+    file_name: args.fileName,
+    source: args.source,
+    language_hint: args.languageHint,
+  });
+}
+
+/**
+ * Cancel an in-flight or queued transcription job by `request_uuid`.
+ * Idempotent — cancelling an unknown id is a no-op (returns Ok per T7).
+ */
+export function cancelTranscription(
+  requestUuid: string,
+): ResultAsync<void, CoreError> {
+  return fromInvoke("cancel_transcription", { request_uuid: requestUuid });
+}
+
+/**
+ * Store an API key under `provider` in the OS keyring (service
+ * `"perima.transcription"`). Overwrites any existing key for the provider.
+ *
+ * WHY no `password` parameter: we never echo the key back to the frontend
+ * after save; the caller is the Settings modal's write-only field.
+ */
+export function setProviderKey(
+  provider: string,
+  apiKey: string,
+): ResultAsync<void, CoreError> {
+  return fromInvoke("set_provider_key", { provider, api_key: apiKey });
+}
+
+/**
+ * Remove the keyring entry for `provider`. Idempotent — returns Ok when
+ * no entry exists.
+ */
+export function deleteProviderKey(
+  provider: string,
+): ResultAsync<void, CoreError> {
+  return fromInvoke("delete_provider_key", { provider });
+}
+
+/**
+ * Probe whether a keyring entry exists for `provider`. Drives the
+ * `••••••••` placeholder vs empty input field in the Settings modal.
+ */
+export function hasProviderKey(
+  provider: string,
+): ResultAsync<boolean, CoreError> {
+  return fromInvoke("has_provider_key", { provider });
+}
+
+/**
+ * List every configured transcription provider with its preset, optional
+ * model override, and a `has_key` flag. The returned `active` field echoes
+ * `TranscriptionConfig.active_provider`.
+ */
+export function listProviders(): ResultAsync<ListProvidersPayload, CoreError> {
+  return fromInvoke<ListProvidersPayload>("list_providers", {});
+}
+
+/**
+ * Persist the supplied `TranscriptionConfig` to disk. Hot-reload is NOT
+ * implemented in T7 — the user must restart perima for the new active
+ * provider / model to take effect. The frontend should surface a banner.
+ */
+export function updateTranscriptionConfig(
+  config: TranscriptionConfig,
+): ResultAsync<void, CoreError> {
+  return fromInvoke("update_transcription_config", { config });
+}
+
+/**
+ * Read the current `TranscriptionConfig` from disk. Returns an empty
+ * default (no providers, no active) when the config file is missing.
+ */
+export function getTranscriptionConfig(): ResultAsync<TranscriptionConfig, CoreError> {
+  return fromInvoke<TranscriptionConfig>("get_transcription_config", {});
 }

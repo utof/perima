@@ -87,7 +87,45 @@ export type AppEvent =
         latest_outcome: FullHashOutcome;
       };
     }
-  | { kind: "VerifyComplete"; data: { batch_id: BatchId } };
+  | { kind: "VerifyComplete"; data: { batch_id: BatchId } }
+  // T8 (transcription-v1): 5 channel-only variants emitted by the
+  // transcription worker. Hand-crafted (channel events bypass tauri-specta);
+  // shapes mirror crates/core/src/events.rs::AppEvent::Transcription*.
+  | {
+      kind: "TranscriptionStarted";
+      data: {
+        request_uuid: string;
+        file_uuid: string;
+        file_name: string;
+        queue_size: number;
+      };
+    }
+  | {
+      kind: "TranscriptionProgress";
+      data: {
+        request_uuid: string;
+        processed_ms: number;
+        total_ms: number | null;
+      };
+    }
+  | {
+      kind: "TranscriptionCompleted";
+      data: {
+        request_uuid: string;
+        transcript_id: string;
+        file_uuid: string;
+        segment_count: number;
+        language: string | null;
+      };
+    }
+  | { kind: "TranscriptionCancelled"; data: { request_uuid: string } }
+  | {
+      kind: "TranscriptionFailed";
+      data: {
+        request_uuid: string;
+        error: TranscriptionError;
+      };
+    };
 
 /**
  * Categorical reason an index was invalidated. Inner field of
@@ -149,7 +187,38 @@ export type CoreError =
   | { kind: "Unsupported"; data: string }
   | { kind: "Internal"; data: string }
   | { kind: "FullHashUnavailable"; data: { reason: FullHashUnavailableReason } }
-  | { kind: "BackupFailed"; data: { reason: BackupFailureReason } };
+  | { kind: "BackupFailed"; data: { reason: BackupFailureReason } }
+  /**
+   * Transcription failure (cloud or local STT backend). Inner payload is the
+   * full `TranscriptionError` with its own `kind` discriminant.
+   * Rust: `CoreError::Transcription(#[from] TranscriptionError)`.
+   */
+  | { kind: "Transcription"; data: TranscriptionError };
+
+/**
+ * All transcription-adapter failure modes.
+ *
+ * Rust: `crates/core/src/transcription.rs::TranscriptionError` with
+ * `#[serde(tag = "kind", content = "data")]` and `#[non_exhaustive]`.
+ *
+ * WHY hand-crafted: this enum is a transitive field of
+ * `CoreError::Transcription` and `AppEvent::TranscriptionFailed`. Both surfaces
+ * cross the IPC boundary; `tauri-specta` walks command-return types but not
+ * channel-only types — this enum needs to be in the committed bindings until
+ * tauri-specta gains a registered-events emitter.
+ */
+export type TranscriptionError =
+  | { kind: "Network"; data: string }
+  | { kind: "Auth" }
+  | { kind: "RateLimited"; data: { retry_after_secs: number | null } }
+  | { kind: "QuotaExceeded" }
+  | { kind: "ModelNotFound"; data: { backend: string; model: string } }
+  | { kind: "AudioDecode"; data: string }
+  | { kind: "FileTooLarge"; data: { limit_bytes: number } }
+  | { kind: "Cancelled" }
+  | { kind: "BackendUnavailable"; data: { reason: string } }
+  | { kind: "QueueFull"; data: { queued: number } }
+  | { kind: "Internal"; data: string };
 
 // ── Structs ──────────────────────────────────────────────────────────
 
