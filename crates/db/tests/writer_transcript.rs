@@ -96,6 +96,7 @@ fn insert_persists_transcript_and_segments_atomically() {
             segments,
             device: "test-device-001".to_owned(),
             cancel: None,
+            request_uuid: uuid::Uuid::now_v7().simple().to_string(),
             reply: reply_tx,
         }))
         .unwrap();
@@ -167,6 +168,7 @@ fn insert_rolls_back_when_cancel_fires_before_first_insert() {
             segments,
             device: "test-device-002".to_owned(),
             cancel: Some(cancel),
+            request_uuid: uuid::Uuid::now_v7().simple().to_string(),
             reply: reply_tx,
         }))
         .unwrap();

@@ -15,17 +15,40 @@ publish = false  # WHY: intra-workspace only; not published to crates.io
 specta = ["dep:specta", "perima-core/specta"]
 
 [dependencies]
-perima-core  = { path = "../core" }
-perima-fs    = { path = "../fs" }
-perima-hash  = { path = "../hash" }
-perima-media = { workspace = true }
+perima-core       = { path = "../core" }
+perima-fs         = { path = "../fs" }
+perima-hash       = { path = "../hash" }
+perima-media      = { workspace = true }
+# WHY perima-transcribe in app: TranscriptionUseCase composes the transcriber
+# registry + audio pipeline at AppContainer build time. The use-case lives in
+# crates/app (alongside the other UseCases); the adapter crate stays the
+# pure transcription-port impl. No reverse dep — perima-transcribe does NOT
+# depend on perima-app.
+perima-transcribe = { path = "../transcribe" }
+# WHY perima-db in (non-test) deps: TranscriptionUseCase calls
+# `SqliteTranscriptRepository::insert_with_request_uuid` directly because the
+# transcript repo is intentionally NOT a port (sole consumer is the use-case;
+# adding a port trait would be premature abstraction per the spec's
+# "transcript_repo intentionally adapter-only" note).
+perima-db         = { path = "../db" }
 async-broadcast = { workspace = true }
 async-trait     = { workspace = true }
 directories.workspace        = true
 futures         = { workspace = true }
+# WHY flume: TranscriptionUseCase owns a flume::bounded(32) job queue; the
+# producer side hands `QueueItem` to the worker task spawned at construction.
+flume.workspace      = true
+# WHY keyring: AppContainer wiring resolves per-provider API keys from the
+# OS keyring before instantiating each transcriber. Skipping a provider
+# whose key is missing is the correct first-run posture — a Tauri-side
+# settings command (T7) writes the key, then the user re-opens.
+keyring.workspace    = true
 tokio.workspace    = true
 tokio-util.workspace = true
 thiserror.workspace = true
+# WHY toml: transcription provider config is a TOML file. NOT a workspace-
+# wide dep — only crates/app reads the user's `config.toml`.
+toml.workspace       = true
 tracing.workspace        = true
 tracing-appender.workspace   = true
 tracing-subscriber.workspace = true

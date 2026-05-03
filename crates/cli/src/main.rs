@@ -41,6 +41,25 @@ use perima_media::ThumbnailGenerator;
 use crate::config::Config;
 use crate::signals::Cancellation;
 
+/// Stub [`perima_transcribe::audio::AudioPipeline`] used when ffmpeg is not on
+/// PATH at startup. Surfaces a typed `BinaryNotFound` only if a transcription
+/// job actually runs; non-transcription commands (scan, tag, search, etc.)
+/// proceed normally.
+struct MissingFfmpegPipeline;
+
+impl perima_transcribe::audio::AudioPipeline for MissingFfmpegPipeline {
+    fn remux_for_upload(
+        &self,
+        _input: &std::path::Path,
+        _cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<tempfile::NamedTempFile, perima_transcribe::audio::AudioError> {
+        Err(perima_transcribe::audio::AudioError::BinaryNotFound(
+            "ffmpeg not found on PATH at startup; install via apt/brew/winget and re-launch"
+                .to_owned(),
+        ))
+    }
+}
+
 /// Cross-platform media asset manager.
 #[derive(Parser, Debug)]
 #[command(
@@ -292,7 +311,7 @@ fn dispatch_migrate_data_dir(args: &cmd::migrate_data_dir::MigrateDataDirArgs) -
 /// Run the `backup` subcommand.
 async fn dispatch_backup(args: &cmd::backup::BackupArgs, config: &Config) -> ExitCode {
     let db_path = config.data_dir.join("perima.db");
-    let container = match build_container(&db_path, vec![]) {
+    let container = match build_container(&db_path, &config.config_dir, config.device_id, vec![]) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database: {e}");
@@ -331,6 +350,8 @@ async fn dispatch_backup(args: &cmd::backup::BackupArgs, config: &Config) -> Exi
 /// shared bus without constructing a second bus in the shell.
 fn build_container(
     db_path: &Path,
+    config_dir: &Path,
+    device_id: perima_core::DeviceId,
     extra_handlers: Vec<Box<dyn EventHandler>>,
 ) -> Result<Arc<AppContainer>, perima_core::CoreError> {
     // WHY a `NoopBus` passed to the writer: the writer's after-COMMIT
@@ -395,6 +416,27 @@ fn build_container(
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
 
+    // Transcript repo + audio pipeline for the transcription use-case.
+    // WHY a separate `ReadPool::open` for the transcript repo is NOT needed:
+    // we reuse a fresh read pool clone (same `db_path`) — every other adapter
+    // already holds a clone of the same r2d2-backed pool.
+    let transcript_repo: Arc<perima_db::SqliteTranscriptRepository> = Arc::new(
+        perima_db::SqliteTranscriptRepository::new(writer.sender(), ReadPool::open(db_path)?),
+    );
+    // WHY discover-or-skip: missing ffmpeg is fine for non-transcription
+    // commands. We construct a deferred-error pipeline that surfaces
+    // `BinaryNotFound` only if a transcription job actually runs.
+    let audio_pipeline: Arc<dyn perima_transcribe::audio::AudioPipeline> =
+        match perima_transcribe::audio::CliFfmpegInvoker::discover() {
+            Ok(invoker) => Arc::new(perima_transcribe::audio::FfmpegAudioPipeline::new(
+                Arc::new(invoker),
+            )),
+            Err(e) => {
+                tracing::info!(error = %e, "ffmpeg not on PATH; transcription will be unavailable");
+                Arc::new(MissingFfmpegPipeline)
+            }
+        };
+
     let deps = AppDeps {
         admin,
         data_dir,
@@ -407,6 +449,10 @@ fn build_container(
         hasher,
         scanner,
         thumbnailer,
+        transcript_repo,
+        audio_pipeline,
+        config_dir: config_dir.to_path_buf(),
+        device_id,
     };
 
     // WHY log handler always first: every command benefits from tracing
@@ -488,7 +534,7 @@ async fn dispatch_scan(
     // volume detection internally — no split path needed. Building the
     // container still requires migrations to have run, which is
     // harmless for a fresh dry-run against an empty data dir.
-    let container = match build_container(&db_path, vec![]) {
+    let container = match build_container(&db_path, &config.config_dir, config.device_id, vec![]) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: {e}");
@@ -678,7 +724,7 @@ async fn dispatch_ls(
         }
     };
     let db_path = config.data_dir.join("perima.db");
-    let container = match build_container(&db_path, vec![]) {
+    let container = match build_container(&db_path, &config.config_dir, config.device_id, vec![]) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database: {e}");
@@ -708,7 +754,7 @@ async fn dispatch_ls(
 /// Run the `tag` subcommand.
 async fn dispatch_tag(args: &cmd::tag::TagArgs, config: &Config) -> ExitCode {
     let db_path = config.data_dir.join("perima.db");
-    let container = match build_container(&db_path, vec![]) {
+    let container = match build_container(&db_path, &config.config_dir, config.device_id, vec![]) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database: {e}");
@@ -727,7 +773,7 @@ async fn dispatch_tag(args: &cmd::tag::TagArgs, config: &Config) -> ExitCode {
 /// Run the `hash` subcommand.
 async fn dispatch_hash(args: &cmd::hash::HashArgs, config: &Config) -> ExitCode {
     let db_path = config.data_dir.join("perima.db");
-    let container = match build_container(&db_path, vec![]) {
+    let container = match build_container(&db_path, &config.config_dir, config.device_id, vec![]) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database: {e}");
@@ -750,7 +796,7 @@ async fn dispatch_hash(args: &cmd::hash::HashArgs, config: &Config) -> ExitCode 
 /// Run the `dedup` subcommand.
 async fn dispatch_dedup(args: &cmd::dedup::DedupArgs, config: &Config) -> ExitCode {
     let db_path = config.data_dir.join("perima.db");
-    let container = match build_container(&db_path, vec![]) {
+    let container = match build_container(&db_path, &config.config_dir, config.device_id, vec![]) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database: {e}");
@@ -783,7 +829,12 @@ async fn dispatch_watch(root: PathBuf, config: &Config, cancel: &Cancellation) -
         }
     };
 
-    let container = match build_container(&db_path, vec![db_handler]) {
+    let container = match build_container(
+        &db_path,
+        &config.config_dir,
+        config.device_id,
+        vec![db_handler],
+    ) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database: {e}");
@@ -818,7 +869,7 @@ async fn dispatch_metadata(path: PathBuf, json: bool, config: &Config) -> ExitCo
     // WHY build_container here: `cmd::metadata::run` now consumes
     // `AppContainer.volumes` for `find_or_create` (Batch C Task 2).
     let db_path = config.data_dir.join("perima.db");
-    let container = match build_container(&db_path, vec![]) {
+    let container = match build_container(&db_path, &config.config_dir, config.device_id, vec![]) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database: {e}");
@@ -841,7 +892,7 @@ async fn dispatch_metadata(path: PathBuf, json: bool, config: &Config) -> ExitCo
 /// Run the `search` subcommand.
 async fn dispatch_search(args: &cmd::search::SearchArgs, config: &Config) -> ExitCode {
     let db_path = config.data_dir.join("perima.db");
-    let container = match build_container(&db_path, vec![]) {
+    let container = match build_container(&db_path, &config.config_dir, config.device_id, vec![]) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database (search): {e}");
@@ -860,7 +911,7 @@ async fn dispatch_search(args: &cmd::search::SearchArgs, config: &Config) -> Exi
 /// Run the `volumes` subcommand.
 async fn dispatch_volumes(config: &Config) -> ExitCode {
     let db_path = config.data_dir.join("perima.db");
-    let container = match build_container(&db_path, vec![]) {
+    let container = match build_container(&db_path, &config.config_dir, config.device_id, vec![]) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("perima: database: {e}");

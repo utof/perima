@@ -138,19 +138,22 @@ impl SqliteTranscriptRepository {
     /// Insert a transcript + segments atomically via the writer.
     ///
     /// One HLC value per command stamped on every row (per Batch C
-    /// "one HLC per user-visible logical event").
+    /// "one HLC per user-visible logical event"). The writer uses
+    /// `request_uuid` to populate `AppEvent::TranscriptionCompleted`'s
+    /// correlation field after a successful `COMMIT`.
     ///
     /// # Errors
     /// Returns [`CoreError::Transcription`] (`Cancelled`) if `cancel`
     /// fires before or during the writer's transaction; returns
     /// `CoreError::Internal` for I/O / channel failures and rusqlite
     /// errors propagated as `Internal` from the writer.
-    pub fn insert(
+    pub fn insert_with_request_uuid(
         &self,
         transcript: TranscriptRow,
         segments: Vec<TranscriptSegmentRow>,
         device: String,
         cancel: Option<tokio_util::sync::CancellationToken>,
+        request_uuid: String,
     ) -> Result<TranscriptId, CoreError> {
         let (reply_tx, reply_rx): (ReplyTx<TranscriptId>, _) = flume::bounded(1);
         let cmd = WriteCmd::Transcript(TranscriptWriteCmd::Insert {
@@ -158,6 +161,7 @@ impl SqliteTranscriptRepository {
             segments,
             device,
             cancel,
+            request_uuid,
             reply: reply_tx,
         });
         self.writer

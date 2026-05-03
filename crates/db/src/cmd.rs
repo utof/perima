@@ -491,6 +491,15 @@ pub enum TranscriptWriteCmd {
         /// `BEGIN IMMEDIATE` and before each segment INSERT; on fire
         /// it rolls back and returns `Cancelled`.
         cancel: Option<tokio_util::sync::CancellationToken>,
+        /// Per-request `UUIDv7` minted by the use-case.
+        ///
+        /// WHY threaded through to the writer: the post-COMMIT
+        /// `AppEvent::TranscriptionCompleted` carries `request_uuid` so the
+        /// frontend can correlate the event back to the in-flight job slot
+        /// it created from `TranscribeOutput::Started`. The writer is the
+        /// only place that knows when persistence succeeded, so it owns
+        /// the emit and therefore must receive `request_uuid` here.
+        request_uuid: String,
         /// Reply channel for the inserted transcript's UUID.
         reply: ReplyTx<crate::transcript_repo::TranscriptId>,
     },

@@ -31,6 +31,11 @@ perima-db    = { path = "../db" }
 perima-fs    = { path = "../fs" }
 perima-hash  = { path = "../hash" }
 perima-media.workspace = true
+# WHY perima-transcribe + tempfile in desktop: the placeholder
+# MissingFfmpegPipeline (in lib.rs) implements `AudioPipeline` and returns
+# `NamedTempFile`. T7 will swap in the Tauri-resolved sidecar invoker.
+perima-transcribe = { path = "../transcribe" }
+tempfile.workspace          = true
 miette.workspace            = true
 tauri.workspace             = true
 tauri-specta.workspace      = true

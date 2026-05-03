@@ -60,6 +60,23 @@ impl EventBus for LocalNoopBus {
     }
 }
 
+/// Stub `AudioPipeline` used until T7 wires the Tauri-resolved bundled
+/// ffmpeg sidecar. Surfaces a typed `BinaryNotFound` only if a transcription
+/// job actually runs; non-transcription handlers proceed normally.
+struct MissingFfmpegPipeline;
+
+impl perima_transcribe::audio::AudioPipeline for MissingFfmpegPipeline {
+    fn remux_for_upload(
+        &self,
+        _input: &Path,
+        _cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<tempfile::NamedTempFile, perima_transcribe::audio::AudioError> {
+        Err(perima_transcribe::audio::AudioError::BinaryNotFound(
+            "bundled ffmpeg sidecar not yet wired (T7); transcription will be available in a later release".to_owned(),
+        ))
+    }
+}
+
 /// Tuple returned by [`build_container`] — collapsed via type alias to
 /// satisfy `clippy::type_complexity`.
 type BuildContainerOutput = (
@@ -227,7 +244,7 @@ pub fn run() -> Result<(), RunError> {
             ];
 
             let (container, writer_handle, tag_repo, metadata_repo, search_repo) =
-                build_container(&db_path, handlers)?;
+                build_container(&db_path, &cfg.config_dir, cfg.device_id, handlers)?;
 
             // WHY `manage(writer_handle)`: the writer thread stays
             // alive as long as at least one `flume::Sender<WriteCmd>`
@@ -348,6 +365,8 @@ fn spawn_backfill_desktop(
 /// methods not exposed by the trait object.
 fn build_container(
     db_path: &Path,
+    config_dir: &Path,
+    device_id: perima_core::DeviceId,
     handlers: Vec<Box<dyn EventHandler>>,
 ) -> Result<BuildContainerOutput, perima_core::CoreError> {
     // WHY a `NoopBus` to the writer: the writer's after-COMMIT emission
@@ -406,6 +425,17 @@ fn build_container(
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
 
+    // Transcript repo for the transcription use-case.
+    let transcript_repo: Arc<perima_db::SqliteTranscriptRepository> = Arc::new(
+        perima_db::SqliteTranscriptRepository::new(writer.sender(), ReadPool::open(db_path)?),
+    );
+    // WHY MissingFfmpegPipeline (T5 placeholder): the proper Tauri-resolved
+    // sidecar path lands in T7 (`app.path().resolve("ffmpeg-{target-triple}",
+    // BaseDirectory::Resource)`). Until then, transcription jobs surface
+    // BinaryNotFound on first run; non-transcription paths are unaffected.
+    let audio_pipeline: Arc<dyn perima_transcribe::audio::AudioPipeline> =
+        Arc::new(MissingFfmpegPipeline);
+
     let deps = AppDeps {
         admin,
         data_dir,
@@ -418,6 +448,10 @@ fn build_container(
         hasher,
         scanner,
         thumbnailer,
+        transcript_repo,
+        audio_pipeline,
+        config_dir: config_dir.to_path_buf(),
+        device_id,
     };
 
     Ok((

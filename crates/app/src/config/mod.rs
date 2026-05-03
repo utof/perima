@@ -1,7 +1,13 @@
-//! Cross-shell data-directory resolution.
+//! Cross-shell data-directory resolution + per-feature config submodules.
 //!
 //! Both `perima` (CLI) and `perima-desktop` call [`resolve_data_dir`] so a
 //! tag added via one shell is visible in the other. Closes GH #154.
+//!
+//! # Submodules
+//!
+//! - [`transcription`] — TOML-backed transcription provider config.
+
+pub mod transcription;
 
 use std::path::PathBuf;
 

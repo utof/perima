@@ -175,7 +175,12 @@ impl OpenAICompatibleTranscriber {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let end_ms = (s.end * 1000.0) as u32;
                 TranscriptSegment {
-                    id: Uuid::nil(), // TODO(T5): use-case stamps real UUIDv7 over this placeholder
+                    // WHY nil placeholder: the use-case stamps a real UUIDv7
+                    // before the row is built (TranscriptionUseCase walks the
+                    // returned segments and replaces every nil id). Keeping
+                    // the adapter UUID-free avoids an extra `uuid::Uuid::now_v7()`
+                    // call per segment in the cloud hot path.
+                    id: Uuid::nil(),
                     start_ms,
                     end_ms,
                     text: s.text,

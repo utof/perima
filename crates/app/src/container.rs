@@ -22,16 +22,30 @@
 
 use std::sync::Arc;
 
+use perima_core::transcription::{BackendId, TranscriptionError};
 use perima_core::{
-    FileRepository, HashService, IdentityCacheRepository, MetadataRepository, Scanner,
-    SearchRepository, TagRepository, VolumeRepository, events::EventBus, ports::DatabaseAdmin,
+    CoreError, DeviceId, FileRepository, HashService, IdentityCacheRepository, MetadataRepository,
+    Scanner, SearchRepository, TagRepository, VolumeRepository, events::EventBus,
+    ports::DatabaseAdmin,
 };
+use perima_db::transcript_repo::SqliteTranscriptRepository;
 use perima_media::ThumbnailGenerator;
+use perima_transcribe::audio::AudioPipeline;
+use perima_transcribe::openai_compat::OpenAICompatibleTranscriber;
+use perima_transcribe::registry::TranscriberRegistry;
 
+use crate::config::transcription::TranscriptionConfig;
 use crate::{
     Bus, ComputeFullHashUseCase, DedupUseCase, MetadataUseCase, ScanUseCase, SearchUseCase,
-    TagUseCase, VolumeUseCase, events::EventHandler,
+    TagUseCase, TranscriptionUseCase, VolumeUseCase, events::EventHandler,
 };
+
+/// Keyring service name used for every transcription provider entry.
+///
+/// One entry per provider, keyed by the provider's TOML name (`groq`,
+/// `openai`, `custom-...`). Frontend (T7) writes via `set_provider_key`;
+/// the container reads here at startup.
+const KEYRING_SERVICE: &str = "perima.transcription";
 
 // ---------------------------------------------------------------------------
 // AppDeps
@@ -82,6 +96,34 @@ pub struct AppDeps {
     pub scanner: Arc<dyn Scanner>,
     /// Concrete thumbnail generator (not a port — no abstraction yet).
     pub thumbnailer: Arc<ThumbnailGenerator>,
+    /// Concrete transcript repository.
+    ///
+    /// WHY a concrete `Arc<SqliteTranscriptRepository>` (not a port): the
+    /// transcript repo is intentionally adapter-only in the v1
+    /// transcription slice — sole consumer is [`TranscriptionUseCase`] and
+    /// adding a port trait would be premature abstraction. Mirrors the
+    /// `Arc<ThumbnailGenerator>` pattern above.
+    pub transcript_repo: Arc<SqliteTranscriptRepository>,
+    /// Audio extraction pipeline (ffmpeg shim).
+    ///
+    /// WHY a port + Arc: the CLI uses `CliFfmpegInvoker` (PATH discovery),
+    /// the desktop uses `DesktopFfmpegInvoker` (Tauri sidecar resolver);
+    /// each shell wires the concrete pipeline at startup. The container
+    /// holds the abstract port so the use-case stays adapter-agnostic.
+    pub audio_pipeline: Arc<dyn AudioPipeline>,
+    /// User-config directory containing `config.toml`.
+    ///
+    /// WHY in [`AppDeps`]: [`TranscriptionConfig::load`] needs it at
+    /// container build time. CLI resolves via [`directories::ProjectDirs`];
+    /// desktop reuses the Tauri-resolved `app_data_dir`.
+    pub config_dir: std::path::PathBuf,
+    /// Stable device identifier for CRDT row stamping.
+    ///
+    /// WHY in [`AppDeps`]: every transcript row needs a `device_id`
+    /// (CRDT discipline). The CLI / desktop already resolve this at
+    /// startup via their per-shell `Config::device_id` field; the
+    /// container threads it into the use-case for writer-cmd payloads.
+    pub device_id: DeviceId,
 }
 
 impl std::fmt::Debug for AppDeps {
@@ -123,6 +165,9 @@ pub struct AppContainer {
     pub compute_full_hash: Arc<ComputeFullHashUseCase>,
     /// [`DedupUseCase`] — quick-hash collision listing + verified-distinct flips.
     pub dedup: Arc<DedupUseCase>,
+    /// [`TranscriptionUseCase`] — provider registry + queue + worker
+    /// orchestration. Owns the single `tokio::spawn`-backed worker task.
+    pub transcription: Arc<TranscriptionUseCase>,
     /// Shared event bus — same `Arc` used inside every `UseCase`.
     pub events: Arc<dyn EventBus>,
     /// Direct handle to the volume repository port.
@@ -279,6 +324,27 @@ impl AppContainer {
             deps.data_dir.clone(),
         ));
 
+        // Transcription registry + use-case wiring.
+        //
+        // WHY here (not lazily on first transcribe): the keyring lookup
+        // is fast but takes a syscall per provider; doing it once at
+        // container build time keeps the per-job hot path free of
+        // sync-blocking work and surfaces config errors at startup.
+        let transcription = build_transcription_use_case(&deps, Arc::clone(&events))
+            .unwrap_or_else(|e| {
+                // WHY non-fatal: a misconfigured provider must not block
+                // the rest of the app from starting. The use-case still
+                // exists with an empty registry; first `Start` returns
+                // BackendUnavailable which the UI can surface specifically.
+                tracing::warn!(error = %e, "transcription wiring failed; use-case will reject new jobs until fixed");
+                Arc::new(TranscriptionUseCase::new(
+                    Arc::new(TranscriberRegistry::new()),
+                    Arc::clone(&deps.transcript_repo),
+                    Arc::clone(&events),
+                    deps.device_id.0.simple().to_string(),
+                ))
+            });
+
         // WHY clone: the same `Arc<dyn VolumeRepository>` lives inside
         // `VolumeUseCase` (above) AND on the container field so shell
         // sites that need `find_or_create` can reach it without a
@@ -312,6 +378,7 @@ impl AppContainer {
             metadata,
             compute_full_hash,
             dedup,
+            transcription,
             events,
             volumes,
             tags,
@@ -320,6 +387,105 @@ impl AppContainer {
             hasher,
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Transcription wiring
+// ---------------------------------------------------------------------------
+
+/// Build the transcription [`TranscriberRegistry`] from the user's
+/// [`TranscriptionConfig`] + keyring entries, then construct the
+/// [`TranscriptionUseCase`]. See spec § "Settings + auth".
+///
+/// Providers without a keyring entry are silently skipped — registering a
+/// keyless backend would surface as a misleading `Auth` error on first
+/// transcribe.
+///
+/// # Errors
+///
+/// - Config TOML missing or malformed — propagated as
+///   [`CoreError::Internal`] from [`TranscriptionConfig::load`].
+/// - Adapter construction — [`OpenAICompatibleTranscriber::new`] returns
+///   `CoreError::Transcription` for invalid header values etc.
+/// - Active-provider lookup — if the configured `active_provider` is
+///   missing from `[transcription.providers.*]` or has no keyring entry,
+///   returns `BackendUnavailable`.
+fn build_transcription_use_case(
+    deps: &AppDeps,
+    events: Arc<dyn EventBus>,
+) -> Result<Arc<TranscriptionUseCase>, CoreError> {
+    let transcription_config = TranscriptionConfig::load(&deps.config_dir)?;
+    let mut registry = TranscriberRegistry::new();
+    let runtime = tokio::runtime::Handle::current();
+
+    for (name, entry) in &transcription_config.providers {
+        let preset = perima_transcribe::providers::find_preset(&entry.preset).ok_or_else(|| {
+            CoreError::Transcription(TranscriptionError::BackendUnavailable {
+                reason: format!("unknown preset {} for provider {name}", entry.preset),
+            })
+        })?;
+        // WHY skip on missing keyring entry: registering a keyless backend
+        // surfaces later as a misleading Auth error on the first transcribe.
+        // Silently skipping leaves the slot open for the user to set the key
+        // via the settings UI (T7) and re-launch.
+        let api_key = match keyring::Entry::new(KEYRING_SERVICE, name) {
+            Ok(entry) => match entry.get_password() {
+                Ok(k) => k,
+                Err(e) => {
+                    tracing::info!(provider = %name, error = %e, "no keyring entry; skipping provider");
+                    continue;
+                }
+            },
+            Err(e) => {
+                tracing::warn!(provider = %name, error = %e, "keyring entry construction failed; skipping provider");
+                continue;
+            }
+        };
+        let backend = OpenAICompatibleTranscriber::new(
+            preset,
+            api_key,
+            entry.model.clone(),
+            runtime.clone(),
+            Arc::clone(&deps.audio_pipeline),
+        )?;
+        registry.register(Arc::new(backend));
+    }
+
+    if let Some(active_name) = transcription_config.active_provider.as_deref() {
+        // PINNED: BackendId resolution rule from the spec — the registered
+        // BackendId is `format!("{provider_name}:{model}")`. Active-provider
+        // lookup must use the same formula.
+        let entry = transcription_config.providers.get(active_name).ok_or_else(|| {
+            CoreError::Transcription(TranscriptionError::BackendUnavailable {
+                reason: format!(
+                    "active_provider {active_name} has no [transcription.providers.{active_name}] section"
+                ),
+            })
+        })?;
+        let preset = perima_transcribe::providers::find_preset(&entry.preset).ok_or_else(|| {
+            CoreError::Transcription(TranscriptionError::BackendUnavailable {
+                reason: format!("unknown preset {} for provider {active_name}", entry.preset),
+            })
+        })?;
+        let model = entry
+            .model
+            .clone()
+            .unwrap_or_else(|| preset.default_model.to_owned());
+        let id = BackendId(format!("{active_name}:{model}"));
+        registry.set_active(id)?;
+    }
+
+    Ok(Arc::new(TranscriptionUseCase::new(
+        Arc::new(registry),
+        Arc::clone(&deps.transcript_repo),
+        events,
+        // WHY simple-hex stringification: the writer-cmd's `device` field
+        // is a String (not DeviceId) since the writer crosses a thread
+        // boundary and DeviceId is not currently part of the writer's
+        // payload schema. Mirrors the existing `DeviceId.0.simple()`
+        // pattern used by other writer-cmd construction sites.
+        deps.device_id.0.simple().to_string(),
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +499,7 @@ mod tests {
     use std::time::Duration;
 
     use perima_core::{AppEvent, FileEvent, MediaPath, VolumeId};
+    use perima_db::transcript_repo::SqliteTranscriptRepository;
     use perima_db::{
         ReadPool, SqliteDatabaseAdmin, SqliteFileRepository, SqliteIdentityCacheRepository,
         SqliteMetadataRepository, SqliteSearchRepository, SqliteTagRepository,
@@ -340,9 +507,26 @@ mod tests {
     };
     use perima_fs::WalkdirScanner;
     use perima_hash::Blake3Service;
+    use perima_transcribe::audio::{AudioError, AudioPipeline};
     use tempfile::TempDir;
 
     use super::*;
+
+    /// Stub audio pipeline that always errors. Used by container tests
+    /// that don't actually run a transcription — registry construction
+    /// only touches the pipeline if a provider has a keyring entry,
+    /// which the test environment never has.
+    struct StubAudioPipeline;
+
+    impl AudioPipeline for StubAudioPipeline {
+        fn remux_for_upload(
+            &self,
+            _input: &std::path::Path,
+            _cancel: &tokio_util::sync::CancellationToken,
+        ) -> Result<tempfile::NamedTempFile, AudioError> {
+            Err(AudioError::BinaryNotFound("test stub".into()))
+        }
+    }
 
     /// Records every event it receives. Used to assert fan-out via the
     /// new `Bus` + `EventHandler` wiring. Async `handle` matches the
@@ -405,14 +589,19 @@ mod tests {
         ));
         let search: Arc<dyn SearchRepository> =
             Arc::new(SqliteSearchRepository::new(writer.sender(), reads.clone()));
-        let identity_cache: Arc<dyn perima_core::IdentityCacheRepository> =
-            Arc::new(SqliteIdentityCacheRepository::new(writer.sender(), reads));
+        let identity_cache: Arc<dyn perima_core::IdentityCacheRepository> = Arc::new(
+            SqliteIdentityCacheRepository::new(writer.sender(), reads.clone()),
+        );
         let hasher: Arc<dyn HashService> = Arc::new(Blake3Service::new());
         let scanner: Arc<dyn Scanner> = Arc::new(WalkdirScanner::new());
         let thumbnailer: Arc<ThumbnailGenerator> = Arc::new(ThumbnailGenerator::disabled());
+        let transcript_repo: Arc<SqliteTranscriptRepository> =
+            Arc::new(SqliteTranscriptRepository::new(writer.sender(), reads));
+        let audio_pipeline: Arc<dyn AudioPipeline> = Arc::new(StubAudioPipeline);
         let admin: Arc<dyn perima_core::ports::DatabaseAdmin> =
             Arc::new(SqliteDatabaseAdmin::new(writer.sender()));
         let data_dir = db_tmp.path().to_path_buf();
+        let config_dir = db_tmp.path().to_path_buf();
 
         (
             db_tmp,
@@ -428,6 +617,10 @@ mod tests {
                 hasher,
                 scanner,
                 thumbnailer,
+                transcript_repo,
+                audio_pipeline,
+                config_dir,
+                device_id: DeviceId::new(),
             },
             writer,
         )
@@ -455,8 +648,8 @@ mod tests {
         // The container's `events` field is the single shared `Bus`;
         // each UseCase receives an `Arc::clone` of it. After construction,
         // the strong count on `container.events` reflects the shared
-        // ownership: 1 (container) + 7 (one per UseCase: scan, search, tag,
-        // volume, metadata, compute_full_hash, dedup) = 8.
+        // ownership: 1 (container) + 8 (one per UseCase: scan, search, tag,
+        // volume, metadata, compute_full_hash, dedup, transcription) = 9.
         let (_db_tmp, deps, _writer) = deps_harness();
 
         // Pass a recording handler so we can observe fan-out from the
@@ -469,7 +662,7 @@ mod tests {
 
         let events_strong = Arc::strong_count(&container.events);
         assert_eq!(
-            events_strong, 8,
+            events_strong, 9,
             "container.events should be Arc-cloned once per UseCase plus the container field"
         );
 

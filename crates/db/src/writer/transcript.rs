@@ -7,8 +7,14 @@
 //! triggers fire automatically inside the transaction; see codegen
 //! template macros `body_transcript_segment_after_*`.
 //!
-//! Emits `AppEvent::IndexInvalidated { SearchIndexRebuilt }` until T5
-//! introduces a richer `AppEvent::TranscriptionCompleted` variant.
+//! On successful COMMIT this handler emits TWO events:
+//! 1. [`AppEvent::TranscriptionCompleted`] — surfaces the use-case's
+//!    `request_uuid` plus the freshly-persisted transcript id, segment
+//!    count, language, and file id. Frontend uses this to dismiss the
+//!    in-flight job slot and refetch the transcript row.
+//! 2. [`AppEvent::IndexInvalidated`] with
+//!    [`InvalidationReason::SearchIndexRebuilt`] — keeps existing FTS
+//!    consumers refreshing without a new variant.
 //!
 //! # Cancellation race
 //!
@@ -34,9 +40,10 @@ use crate::transcript_repo::{TranscriptId, TranscriptRow, TranscriptSegmentRow};
 /// back on the caller's reply channel.
 ///
 /// After a successful `COMMIT`, emits
+/// [`AppEvent::TranscriptionCompleted`] (with the use-case's
+/// `request_uuid`) followed by
 /// [`AppEvent::IndexInvalidated`] with
-/// [`InvalidationReason::SearchIndexRebuilt`] (the v1 invalidation
-/// signal used until T5 adds `TranscriptionCompleted`).
+/// [`InvalidationReason::SearchIndexRebuilt`].
 #[allow(clippy::needless_pass_by_value)]
 pub(super) fn handle(conn: &mut Connection, cmd: TranscriptWriteCmd, bus: &Arc<dyn EventBus>) {
     match cmd {
@@ -45,9 +52,17 @@ pub(super) fn handle(conn: &mut Connection, cmd: TranscriptWriteCmd, bus: &Arc<d
             segments,
             device,
             cancel,
+            request_uuid,
             reply,
         } => {
-            let result = insert_impl(conn, &transcript, &segments, &device, cancel.as_ref());
+            let result = insert_impl(
+                conn,
+                &transcript,
+                &segments,
+                &device,
+                cancel.as_ref(),
+                &request_uuid,
+            );
             let send_id = match &result {
                 Ok((id, _events)) => Ok(id.clone()),
                 Err(e) => Err(e.clone()),
@@ -77,6 +92,7 @@ fn insert_impl(
     segments: &[TranscriptSegmentRow],
     device: &str,
     cancel: Option<&tokio_util::sync::CancellationToken>,
+    request_uuid: &str,
 ) -> Result<(TranscriptId, Vec<AppEvent>), CoreError> {
     // WHY BEGIN IMMEDIATE: writes always grab the WRITE lock at
     // statement-start to avoid a SHARED→RESERVED upgrade race under
@@ -153,14 +169,28 @@ fn insert_impl(
 
     tx.commit().map_err(Error::from)?;
 
-    // WHY SearchIndexRebuilt + not yet TranscriptionCompleted: the
-    // dedicated AppEvent variant lands in T5 (along with its
-    // bindings.ts + frontend invalidation hook). For T2, populating
-    // SearchIndexRebuilt is the closest existing query-invalidation
-    // signal that consumers of `transcript_search` rely on.
-    let events = vec![AppEvent::IndexInvalidated {
-        reason: InvalidationReason::SearchIndexRebuilt,
-    }];
+    // WHY two events: TranscriptionCompleted carries the use-case's
+    // `request_uuid` so the frontend can dismiss the in-flight slot it
+    // created from `TranscribeOutput::Started`; SearchIndexRebuilt keeps
+    // the existing FTS-consumer refresh path working without a new
+    // discriminator.
+    //
+    // WHY u32 cast for segment_count: the frontend payload field is u32
+    // (matches the AppEvent variant); transcripts in v1 cap segments at
+    // far less than u32::MAX so the saturating cast is safe.
+    let segment_count = u32::try_from(segments.len()).unwrap_or(u32::MAX);
+    let events = vec![
+        AppEvent::TranscriptionCompleted {
+            request_uuid: request_uuid.to_owned(),
+            transcript_id: transcript.id.0.clone(),
+            file_uuid: transcript.file_uuid.clone(),
+            segment_count,
+            language: transcript.language.clone(),
+        },
+        AppEvent::IndexInvalidated {
+            reason: InvalidationReason::SearchIndexRebuilt,
+        },
+    ];
 
     Ok((transcript.id.clone(), events))
 }

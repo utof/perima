@@ -69,6 +69,57 @@ impl EventHandler for LogEventHandler {
             AppEvent::VerifyComplete { batch_id } => {
                 tracing::info!(?batch_id, "verify complete");
             }
+            AppEvent::TranscriptionStarted {
+                request_uuid,
+                file_uuid,
+                file_name,
+                queue_size,
+            } => {
+                tracing::info!(
+                    %request_uuid,
+                    %file_uuid,
+                    %file_name,
+                    queue_size,
+                    "transcription started"
+                );
+            }
+            AppEvent::TranscriptionProgress {
+                request_uuid,
+                processed_ms,
+                total_ms,
+            } => {
+                tracing::debug!(
+                    %request_uuid,
+                    processed_ms,
+                    ?total_ms,
+                    "transcription progress"
+                );
+            }
+            AppEvent::TranscriptionCompleted {
+                request_uuid,
+                transcript_id,
+                file_uuid,
+                segment_count,
+                language,
+            } => {
+                tracing::info!(
+                    %request_uuid,
+                    %transcript_id,
+                    %file_uuid,
+                    segment_count,
+                    ?language,
+                    "transcription completed"
+                );
+            }
+            AppEvent::TranscriptionCancelled { request_uuid } => {
+                tracing::info!(%request_uuid, "transcription cancelled");
+            }
+            AppEvent::TranscriptionFailed {
+                request_uuid,
+                error,
+            } => {
+                tracing::warn!(%request_uuid, %error, "transcription failed");
+            }
         }
     }
 }

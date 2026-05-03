@@ -37,6 +37,7 @@ pub mod scan;
 pub mod search;
 pub mod tag;
 pub mod telemetry;
+pub mod transcription;
 pub mod volume;
 
 pub use backfill::{BackfillRate, BackfillReport, BackfillRow, QuickHashBackfillWorker};
@@ -53,4 +54,5 @@ pub use scan::{
 pub use search::{SearchCommand, SearchOutput, SearchUseCase};
 pub use tag::{FileWithTags, TagCommand, TagFilter, TagOutput, TagUseCase};
 pub use telemetry::LogEventHandler;
+pub use transcription::{TranscribeCommand, TranscribeOutput, TranscriptionUseCase};
 pub use volume::{VolumeCommand, VolumeOutput, VolumeUseCase};
