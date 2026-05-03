@@ -182,6 +182,20 @@ enum Command {
     /// desktop-shared path. Only needed if you used perima CLI before v0.7.0
     /// (GH #154). Safe to run repeatedly — refuses to overwrite an existing DB.
     MigrateDataDir(cmd::migrate_data_dir::MigrateDataDirArgs),
+
+    /// Transcribe a media file via the active provider.
+    ///
+    /// Prints the transcript text to stdout (or `--output FILE`). Streams
+    /// per-segment progress to stderr. Exits 0 on success, 2 on auth /
+    /// quota errors, 3 on queue full, 130 on Ctrl-C, 1 otherwise.
+    Transcribe(cmd::transcribe::TranscribeArgs),
+
+    /// Manage transcription-provider API keys (keyring entries).
+    ///
+    /// `set` prompts for a key with hidden input; `delete` removes an
+    /// entry idempotently; `has` exits 0 / 1; `list` prints configured
+    /// providers + key presence.
+    Auth(cmd::auth::AuthArgs),
 }
 
 /// Entry point.
@@ -193,6 +207,16 @@ enum Command {
 async fn main() -> ExitCode {
     panic::install();
     let cli = Cli::parse();
+
+    // WHY env-var-gated keyring mock: `keyring::set_default_credential_builder`
+    // is process-local (cannot cross a subprocess boundary). The integration
+    // tests under `tests/transcribe_test.rs` set this env var to keep `auth
+    // {set,delete,has,list}` in-memory so a `cargo test` run does not pollute
+    // the developer's real OS keyring. Production users never set this.
+    // The call MUST happen before any `keyring::Entry::new` call elsewhere.
+    if std::env::var_os("PERIMA_KEYRING_MOCK").is_some() {
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+    }
 
     // WHY _log_guard (not _): `tracing-appender` non-blocking writer is
     // backed by a background flush thread. Binding to `_` drops the
@@ -275,6 +299,10 @@ async fn main() -> ExitCode {
         } => dispatch_debug_report(path, include_rotated),
 
         Command::MigrateDataDir(args) => dispatch_migrate_data_dir(&args),
+
+        Command::Transcribe(args) => dispatch_transcribe(args, &config, &cancel).await,
+
+        Command::Auth(args) => dispatch_auth(&args, &config),
     }
 }
 
@@ -354,19 +382,15 @@ fn build_container(
     device_id: perima_core::DeviceId,
     extra_handlers: Vec<Box<dyn EventHandler>>,
 ) -> Result<Arc<AppContainer>, perima_core::CoreError> {
-    // WHY a `NoopBus` passed to the writer: the writer's after-COMMIT
-    // emission path is scaffolded but file-event emission is handled by
-    // the async-broadcast Bus wired into `AppContainer`. The writer bus
-    // is separate from the handler list — it receives post-COMMIT events
-    // from the writer thread (std::thread, not tokio), so it must be
-    // Arc<dyn EventBus> (sync emit). Spec §§3.3 + 4.8 (A4.8 first bullet).
-    struct NoopBus;
-    impl perima_core::events::EventBus for NoopBus {
-        fn emit(&self, _: &perima_core::AppEvent) -> Result<(), perima_core::CoreError> {
-            Ok(())
-        }
-    }
-    let writer_bus: Arc<dyn perima_core::events::EventBus> = Arc::new(NoopBus);
+    // WHY construct the Bus here (not inside AppContainer::new): the writer
+    // actor needs the SAME bus the use-cases publish to, otherwise
+    // `AppEvent::TranscriptionCompleted` (writer-side, post-COMMIT) never
+    // reaches handlers registered on the container's bus. T6 introduced
+    // `AppContainer::new_with_bus` for this — the bus stays the single
+    // construction site per process, but the construction MOVES from
+    // `AppContainer::new` into the shell.
+    let bus = perima_app::Bus::new();
+    let writer_bus: Arc<dyn perima_core::events::EventBus> = bus.clone();
 
     let writer = SqliteWriter::start(db_path, writer_bus)?;
     let reads = ReadPool::open(db_path)?;
@@ -461,7 +485,7 @@ fn build_container(
     let log_handler: Box<dyn EventHandler> = Box::new(perima_app::LogEventHandler);
     let mut handlers: Vec<Box<dyn EventHandler>> = vec![log_handler];
     handlers.extend(extra_handlers);
-    Ok(AppContainer::new(deps, handlers))
+    Ok(AppContainer::new_with_bus(deps, handlers, bus))
 }
 
 /// Build a `DbEventHandler` for the `watch` command, boxed as `Box<dyn EventHandler>`.
@@ -901,6 +925,60 @@ async fn dispatch_search(args: &cmd::search::SearchArgs, config: &Config) -> Exi
     };
     match cmd::search::run(&container, args).await {
         Ok(()) => ExitCode::from(0),
+        Err(e) => {
+            eprintln!("perima: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Run the `transcribe` subcommand.
+///
+/// Builds the container with a terminal `EventHandler`
+/// (built by [`cmd::transcribe::make_terminal_handler`]) pre-injected as
+/// an `extra_handler`. The handler funnels terminal + progress
+/// `AppEvent::Transcription*` events back into the dispatcher via a
+/// `flume` channel. The dispatcher fills in the request UUID after
+/// `Start` returns, then awaits the terminal event (or Ctrl-C).
+async fn dispatch_transcribe(
+    args: cmd::transcribe::TranscribeArgs,
+    config: &Config,
+    cancel: &Cancellation,
+) -> ExitCode {
+    let db_path = config.data_dir.join("perima.db");
+    let handle = cmd::transcribe::make_terminal_handler();
+
+    let container = match build_container(
+        &db_path,
+        &config.config_dir,
+        config.device_id,
+        vec![handle.handler],
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("perima: database: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let code = cmd::transcribe::run(
+        container,
+        &db_path,
+        args,
+        handle.rx,
+        handle.request_uuid,
+        cancel,
+    )
+    .await;
+    ExitCode::from(code)
+}
+
+/// Run the `auth` subcommand.
+///
+/// Pure synchronous keyring + config operations — no container needed.
+fn dispatch_auth(args: &cmd::auth::AuthArgs, config: &Config) -> ExitCode {
+    match cmd::auth::run(args, &config.config_dir) {
+        Ok(code) => ExitCode::from(code),
         Err(e) => {
             eprintln!("perima: {e}");
             ExitCode::from(1)

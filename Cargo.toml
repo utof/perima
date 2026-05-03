@@ -122,6 +122,10 @@ dialoguer         = { version = "0.12", features = ["password"] }
 wiremock          = "0.6"
 # WHY hound 3.5: WAV read/write used by audio fixture helpers in tests.
 hound             = "3.5"
+# WHY regex 1: BCP-47 language-code shape validation in CLI `transcribe --language`.
+# Loose validator (RFC 5646 subset); promote to `unic-langid` if/when full
+# Unicode-language-tag handling is needed.
+regex             = "1"
 # WHY toml 1 (plan spec'd 0.10; 1.1 is latest stable as of 2026-05): used by
 # transcription config loader in the adapters slice.
 toml              = "1"

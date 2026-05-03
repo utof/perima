@@ -269,8 +269,32 @@ impl AppContainer {
     // so by-value move here is cheap.
     #[allow(clippy::needless_pass_by_value)]
     pub fn new(deps: AppDeps, handlers: Vec<Box<dyn EventHandler>>) -> Arc<Self> {
-        // Single Bus construction site — spec §2.1 + Batch B/C invariant.
-        let bus: Arc<Bus> = Bus::new();
+        Self::new_with_bus(deps, handlers, Bus::new())
+    }
+
+    /// Build the container atop a pre-existing [`Bus`].
+    ///
+    /// WHY this overload (T6): the writer actor is constructed in the shell
+    /// BEFORE `AppContainer::new` runs. To make
+    /// `AppEvent::TranscriptionCompleted` (emitted from the writer post-COMMIT)
+    /// reach the same handlers as the use-case-emitted events, the shell
+    /// must construct the [`Bus`] up-front and pass it BOTH to
+    /// `SqliteWriter::start` AND to `AppContainer::new_with_bus`.
+    /// The pre-T6 single-construction-site invariant survives — the bus is
+    /// still created in exactly one place per process; the construction
+    /// site just moves from inside `AppContainer::new` into the shell.
+    ///
+    /// # Panics
+    ///
+    /// Must be called from within a tokio runtime context — `tokio::spawn`
+    /// requires it.
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn new_with_bus(
+        deps: AppDeps,
+        handlers: Vec<Box<dyn EventHandler>>,
+        bus: Arc<Bus>,
+    ) -> Arc<Self> {
         let events: Arc<dyn EventBus> = bus.clone();
 
         // Spawn one tokio task per handler. Each task owns its own
@@ -419,30 +443,69 @@ fn build_transcription_use_case(
     let runtime = tokio::runtime::Handle::current();
 
     for (name, entry) in &transcription_config.providers {
-        let preset = perima_transcribe::providers::find_preset(&entry.preset).ok_or_else(|| {
-            CoreError::Transcription(TranscriptionError::BackendUnavailable {
-                reason: format!("unknown preset {} for provider {name}", entry.preset),
-            })
-        })?;
+        let base_preset =
+            perima_transcribe::providers::find_preset(&entry.preset).ok_or_else(|| {
+                CoreError::Transcription(TranscriptionError::BackendUnavailable {
+                    reason: format!("unknown preset {} for provider {name}", entry.preset),
+                })
+            })?;
+        // WHY entry.base_url overlay (Box::leak): `ProviderPreset.base_url` is
+        // `&'static str` (the public preset table is allocation-free), but
+        // `preset = "custom"` ships an empty base_url that the user MUST
+        // override via TOML. Leaking the overlay string once at startup is
+        // the simplest path to a runtime-keyed preset; the leaked memory
+        // lives until process exit. Without this overlay, custom providers
+        // fail at the HTTP layer with an empty base URL.
+        //
+        // WHY also override `name`: the registered BackendId is
+        // `format!("{preset.name}:{model}")` (built inside
+        // `OpenAICompatibleTranscriber::new`) but `set_active` below looks up
+        // `format!("{active_name}:{model}")` where `active_name` is the
+        // user's `[transcription.providers.<name>]` key. These must match.
+        // Pre-Batch-T6 the two were the same string only by convention
+        // (e.g. provider name "groq" + preset name "groq"). For
+        // `preset = "custom"` and provider name "my-server" they diverge —
+        // so we leak the user's name and stamp it on the runtime preset.
+        let leaked_name: &'static str = Box::leak(name.clone().into_boxed_str());
+        let preset_owned = perima_transcribe::providers::ProviderPreset {
+            name: leaked_name,
+            base_url: match &entry.base_url {
+                Some(url) if !url.is_empty() => Box::leak(url.clone().into_boxed_str()),
+                _ => base_preset.base_url,
+            },
+            default_model: base_preset.default_model,
+            file_size_limit_bytes: base_preset.file_size_limit_bytes,
+            auth_scheme: base_preset.auth_scheme,
+        };
         // WHY skip on missing keyring entry: registering a keyless backend
         // surfaces later as a misleading Auth error on the first transcribe.
         // Silently skipping leaves the slot open for the user to set the key
         // via the settings UI (T7) and re-launch.
-        let api_key = match keyring::Entry::new(KEYRING_SERVICE, name) {
-            Ok(entry) => match entry.get_password() {
-                Ok(k) => k,
+        //
+        // WHY the env-var test seam: `keyring::mock` is process-local and
+        // cannot be pre-seeded across a CLI subprocess boundary. The
+        // `PERIMA_TEST_API_KEY_<provider>` env var bypasses the keyring
+        // lookup ONLY in test runs (developers should not set this); the
+        // CLI integration tests use it to drive the wiremock-backed
+        // happy-path / auth-failure flows without touching the OS keyring.
+        let api_key = match std::env::var(format!("PERIMA_TEST_API_KEY_{name}")) {
+            Ok(v) if !v.is_empty() => v,
+            _ => match keyring::Entry::new(KEYRING_SERVICE, name) {
+                Ok(entry) => match entry.get_password() {
+                    Ok(k) => k,
+                    Err(e) => {
+                        tracing::info!(provider = %name, error = %e, "no keyring entry; skipping provider");
+                        continue;
+                    }
+                },
                 Err(e) => {
-                    tracing::info!(provider = %name, error = %e, "no keyring entry; skipping provider");
+                    tracing::warn!(provider = %name, error = %e, "keyring entry construction failed; skipping provider");
                     continue;
                 }
             },
-            Err(e) => {
-                tracing::warn!(provider = %name, error = %e, "keyring entry construction failed; skipping provider");
-                continue;
-            }
         };
         let backend = OpenAICompatibleTranscriber::new(
-            preset,
+            &preset_owned,
             api_key,
             entry.model.clone(),
             runtime.clone(),

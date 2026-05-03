@@ -41,6 +41,29 @@ tokio-util.workspace         = true
 # WHY tempfile: MissingFfmpegPipeline (in main.rs) returns NamedTempFile in
 # its trait signature. Pulled into runtime deps; was previously dev-only.
 tempfile.workspace           = true
+# WHY dialoguer: hidden-input password prompt for `perima auth set <PROVIDER>`.
+# The non-TTY fallback (read from stdin) bypasses dialoguer for CI / piped input.
+dialoguer.workspace          = true
+# WHY keyring: `perima auth {set,delete,has,list}` manage entries under the
+# canonical `perima.transcription` service. Same crate the container reads
+# from at startup.
+keyring.workspace            = true
+# WHY regex: clap value_parser for BCP-47 `--language` shape validation
+# (loose RFC 5646 subset; promote to `unic-langid` for full handling).
+regex.workspace              = true
+# WHY async-broadcast: dispatch_transcribe subscribes to AppContainer.events
+# (a `Bus` backed by async-broadcast) and awaits the terminal Transcription*
+# event matching the request UUID.
+async-broadcast              = { workspace = true }
+# WHY flume in runtime deps: dispatch_transcribe uses a bounded channel to
+# funnel terminal AppEvent::Transcription* events from the EventHandler task
+# back into the dispatcher's await.
+flume                        = { workspace = true }
+# WHY rusqlite (read-only) in runtime deps: cmd::transcribe loads the freshly
+# persisted transcript text via a short-lived read-only connection. The T7
+# read-API has not landed yet; this is the v0.6.x stop-gap and will be
+# replaced when the transcript repo grows a `list_for_transcript` method.
+rusqlite                     = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace   = true
@@ -53,6 +76,11 @@ predicates.workspace = true
 # synthesises PNG/JPEG fixtures at runtime (no binary blobs in git),
 # matching the pattern already used in `crates/media/tests`.
 image.workspace      = true
+# WHY hound + wiremock in dev-deps: `transcribe_test.rs` synthesises a tiny
+# WAV via hound and stubs the OpenAI-compat HTTP endpoint via wiremock to
+# drive the `transcribe` subcommand end-to-end.
+hound.workspace      = true
+wiremock.workspace   = true
 
 [target.'cfg(unix)'.dev-dependencies]
 # WHY: nix provides POSIX signal utilities (kill/SIGTERM) without unsafe libc.
