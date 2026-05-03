@@ -24,7 +24,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { queryOptions } from "@tanstack/react-query";
 import * as api from "../api";
 import { coreErrorMessage } from "../lib/coreError";
-import type { ProviderEntry, TranscriptionConfig } from "../bindings";
+import type { CoreError, ProviderEntry, TranscriptionConfig } from "../bindings";
 
 // ── Query key + options for the provider list ────────────────────────────────
 
@@ -167,6 +167,7 @@ export function TranscribeSettingsModal({ open, onClose }: TranscribeSettingsMod
           kind: "Internal",
           data: "Existing transcription config not loaded yet — refusing to overwrite providers.",
         };
+        // eslint-disable-next-line @typescript-eslint/only-throw-error
         throw err;
       }
       const existingConfig: TranscriptionConfig = configQuery.data;
