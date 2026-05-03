@@ -21,6 +21,66 @@
 use perima_core::{FileLocationRecord, FileUuid, MediaMetadata, Tag};
 use serde::Serialize;
 
+// ---------------------------------------------------------------------------
+// Transcription wire-types (T7)
+//
+// WHY a wire-type mirror for `TranscribeStartedPayload` (not specta-derive on
+// `perima_app::TranscribeOutput`):
+//
+// 1. `TranscribeOutput` is `Debug + Clone` only — no `Serialize`. Adding
+//    `Serialize` + `specta::Type` to the entire enum would also expose the
+//    `Cancelled` variant across the IPC boundary, which the `cancel_transcription`
+//    command does not need (it returns `Result<(), CoreError>`). The
+//    transcription Tauri commands surface a tightly-scoped IPC API; the wire
+//    type captures only the fields the frontend actually needs.
+// 2. `TranscribeCommand::Start { source: PathBuf, ... }` does not cross the IPC
+//    boundary at all — the Tauri handler accepts `source: String` (Tauri
+//    serializes paths as strings) and constructs the `PathBuf` shell-side
+//    before calling the use-case. So no specta-derive on the command enum is
+//    needed.
+//
+// `ListProvidersPayload` + `ProviderListEntry` are shell-private composites:
+// they query the OS keyring at construction time to set the `has_key` flag,
+// which is a Tauri-shell concern (CLI's `auth list` does the same lookup
+// shell-side). No clean core/app analogue exists.
+// ---------------------------------------------------------------------------
+
+/// Returned by the `transcribe` Tauri command — mirror of
+/// [`perima_app::TranscribeOutput::Started`].
+#[derive(Debug, Clone, Serialize, specta::Type)]
+pub struct TranscribeStartedPayload {
+    /// Per-request `UUIDv7` (lowercase-hex simple form). Pairs with every
+    /// `AppEvent::Transcription*` variant for this job.
+    pub request_uuid: String,
+    /// 1-based position in the queue at the moment of enqueue.
+    pub queue_position: u32,
+}
+
+/// Returned by the `list_providers` Tauri command. Combines the TOML config
+/// view with a per-provider keyring lookup.
+#[derive(Debug, Clone, Serialize, specta::Type)]
+pub struct ListProvidersPayload {
+    /// Active provider name from `[transcription].active_provider`, or `None`
+    /// when the user has not selected one yet.
+    pub active: Option<String>,
+    /// One entry per provider in `[transcription.providers.*]`.
+    pub providers: Vec<ProviderListEntry>,
+}
+
+/// One row in [`ListProvidersPayload::providers`].
+#[derive(Debug, Clone, Serialize, specta::Type)]
+pub struct ProviderListEntry {
+    /// Provider name (the `[transcription.providers.<name>]` key).
+    pub name: String,
+    /// Preset name (`groq`, `openai`, `custom`, ...).
+    pub preset: String,
+    /// Optional model override; `None` falls back to the preset's default.
+    pub model: Option<String>,
+    /// Whether a keyring entry exists for this provider on this device.
+    /// Computed via [`keyring::Entry::get_password`] at command-handler time.
+    pub has_key: bool,
+}
+
 /// Flattened `(FileLocationRecord, Option<MediaMetadata>)` pair for the
 /// frontend.
 ///

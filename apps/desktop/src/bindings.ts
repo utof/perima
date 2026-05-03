@@ -371,3 +371,74 @@ export type BackupOutput = {
   /** Size in bytes of the freshly written backup file. */
   size_bytes: number;
 };
+
+// ── Transcription types (T7) ─────────────────────────────────────────
+
+/**
+ * Returned by the `transcribe` Tauri command — wire-mirror of
+ * `perima_app::TranscribeOutput::Started`.
+ * Rust: `crates/desktop/src/payloads.rs::TranscribeStartedPayload`.
+ */
+export type TranscribeStartedPayload = {
+  /** Per-request UUIDv7 (lowercase-hex simple form). Pairs with every
+   * `AppEvent::Transcription*` variant for this job. */
+  request_uuid: string;
+  /** 1-based position in the queue at the moment of enqueue. */
+  queue_position: number;
+};
+
+/**
+ * One entry in `ListProvidersPayload.providers`.
+ * Rust: `crates/desktop/src/payloads.rs::ProviderListEntry`.
+ */
+export type ProviderListEntry = {
+  /** Provider name (the `[transcription.providers.<name>]` key). */
+  name: string;
+  /** Preset name (`groq`, `openai`, `custom`, ...). */
+  preset: string;
+  /** Optional model override; null falls back to the preset's default. */
+  model: string | null;
+  /** Whether a keyring entry exists for this provider on this device. */
+  has_key: boolean;
+};
+
+/**
+ * Returned by the `list_providers` Tauri command.
+ * Rust: `crates/desktop/src/payloads.rs::ListProvidersPayload`.
+ */
+export type ListProvidersPayload = {
+  /** Active provider name from `[transcription].active_provider`, or null. */
+  active: string | null;
+  /** One entry per provider in `[transcription.providers.*]`. */
+  providers: ProviderListEntry[];
+};
+
+/**
+ * One provider's TOML entry.
+ * Rust: `perima_app::config::transcription::ProviderEntry`.
+ */
+export type ProviderEntry = {
+  /** Preset name from `KNOWN_PROVIDERS` (`groq`, `openai`, `custom`). */
+  preset: string;
+  /** Optional model override; falls back to the preset's default. */
+  model: string | null;
+  /** Optional `base_url` override (required for `preset = "custom"`). */
+  base_url: string | null;
+  /** Auth scheme override for custom providers. */
+  auth_scheme: string | null;
+};
+
+/**
+ * Top-level transcription config (one TOML table).
+ * Rust: `perima_app::config::transcription::TranscriptionConfig`.
+ *
+ * Lives at `<config_dir>/config.toml` under the `[transcription]` table.
+ * Returned by `get_transcription_config`; accepted by
+ * `update_transcription_config`.
+ */
+export type TranscriptionConfig = {
+  /** Active provider name (must match one of `providers.*` keys). */
+  active_provider: string | null;
+  /** Per-provider configuration table. Empty = no providers wired up yet. */
+  providers: { [key: string]: ProviderEntry };
+};

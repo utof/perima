@@ -54,6 +54,15 @@ fn build_test_builder() -> Builder<tauri::Wry> {
         commands::search,
         commands::search_rebuild,
         commands::backup_database,
+        // T7: transcription commands.
+        commands::transcribe,
+        commands::cancel_transcription,
+        commands::set_provider_key,
+        commands::delete_provider_key,
+        commands::has_provider_key,
+        commands::list_providers,
+        commands::update_transcription_config,
+        commands::get_transcription_config,
     ])
 }
 
@@ -131,4 +140,19 @@ fn tauri_specta_builder_exports_full_ipc_type_graph() {
         ts.contains(r#"kind: "TargetExists""#) || ts.contains("kind: \"TargetExists\""),
         "BackupFailureReason::TargetExists variant missing from bindings"
     );
+
+    // T7 transcription wire-types must appear in the export. Wire-type
+    // mirrors live in `crates/desktop/src/payloads.rs`; the
+    // `TranscriptionConfig` + `ProviderEntry` types come from
+    // `perima_app::config::transcription` (specta-derived under the
+    // `specta` feature, gated by `perima-app/specta`).
+    for ty in [
+        "TranscribeStartedPayload",
+        "ListProvidersPayload",
+        "ProviderListEntry",
+        "TranscriptionConfig",
+        "ProviderEntry",
+    ] {
+        assert!(ts.contains(ty), "{ty} missing from bindings (T7)");
+    }
 }

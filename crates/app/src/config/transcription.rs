@@ -25,7 +25,13 @@ struct Root {
 /// Top-level transcription config (one TOML table).
 ///
 /// Lives at `<config_dir>/config.toml` under the `[transcription]` table.
+///
+/// WHY `specta::Type` (T7): the desktop `update_transcription_config` Tauri
+/// command receives this struct directly (Batch D contract: derive specta on
+/// core/app types that cross IPC, no shell-side wire-type mirror unless
+/// needed). `get_transcription_config` returns it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct TranscriptionConfig {
     /// Active provider name (must match one of `providers.*` keys).
     /// Optional so first-run state (no provider configured yet) is
@@ -38,6 +44,7 @@ pub struct TranscriptionConfig {
 
 /// One provider's TOML entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ProviderEntry {
     /// Preset name from `KNOWN_PROVIDERS` (e.g. "groq", "openai", "custom").
     pub preset: String,
