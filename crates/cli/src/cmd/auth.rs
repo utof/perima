@@ -17,12 +17,9 @@ use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 
 use clap::{Args, Subcommand};
+use perima_app::KEYRING_SERVICE;
 use perima_app::config::transcription::TranscriptionConfig;
 use perima_core::CoreError;
-
-/// Keyring service name. PINNED — must match
-/// `perima_app::container::KEYRING_SERVICE`.
-pub(crate) const KEYRING_SERVICE: &str = "perima.transcription";
 
 /// Arguments for `perima auth`.
 #[derive(Args, Debug)]
@@ -180,17 +177,10 @@ fn run_list(config_dir: &Path) -> Result<u8, CoreError> {
 mod tests {
     use super::*;
 
-    /// `keyring::set_default_credential_builder` is set ONCE per process.
-    /// Tests that need the mock should run with `--test-threads 1` OR
-    /// register the mock via a `#[ctor]` — but for now we accept that
-    /// only the first test through here decides the backend. The CLI
-    /// integration tests under `tests/` use a fresh subprocess each time
-    /// so they don't conflict.
     #[test]
-    fn keyring_entry_constructs_with_canonical_service() {
-        // Doesn't actually touch the OS keyring — just builds the Entry.
-        let entry = keyring_entry("test-provider-construction").unwrap();
-        // Sanity: the builder accepted the (service, account) tuple.
-        let _ = entry; // keyring::Entry has no public accessors for these fields.
+    fn keyring_service_name_matches_app_const() {
+        // PINNED: cli auth + app container MUST use the same service
+        // string so a credential set by one is visible to the other.
+        assert_eq!(KEYRING_SERVICE, "perima.transcription");
     }
 }

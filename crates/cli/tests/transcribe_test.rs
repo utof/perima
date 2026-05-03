@@ -233,7 +233,7 @@ fn auth_has_returns_1_when_entry_missing() {
 }
 
 #[test]
-fn auth_set_then_has_then_delete_is_idempotent() {
+fn auth_set_succeeds_and_delete_is_idempotent() {
     let env_dir = tempfile::tempdir().unwrap();
 
     // `set` reads from stdin when it isn't on a TTY (assert_cmd's pipe is non-TTY).

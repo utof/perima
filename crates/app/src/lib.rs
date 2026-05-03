@@ -43,7 +43,7 @@ pub mod volume;
 pub use backfill::{BackfillRate, BackfillReport, BackfillRow, QuickHashBackfillWorker};
 pub use backup::{BackupCommand, BackupDatabaseUseCase, BackupOutput};
 pub use bus::Bus;
-pub use container::{AppContainer, AppDeps};
+pub use container::{AppContainer, AppDeps, KEYRING_SERVICE};
 pub use dedup::{ComputeFullHashUseCase, DedupUseCase};
 pub use events::EventHandler;
 pub use metadata::{MetadataCommand, MetadataOutput, MetadataUseCase};

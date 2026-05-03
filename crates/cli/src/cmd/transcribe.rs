@@ -10,8 +10,9 @@
 //! `AppEvent::Transcription{Completed,Failed,Cancelled}` events into a
 //! `flume` channel, sends `TranscribeCommand::Start`, and blocks on the
 //! channel receive. The pre-completion `AppEvent::TranscriptionProgress`
-//! frames stream as one-line `\r`-overwriting status updates on stderr
-//! (matches the spec § "CLI transcribe UX" sketch).
+//! frames stream as one-line-per-event status updates on stderr
+//! (best-effort `writeln!`; cloud adapters in v1 emit Started/Finished
+//! only, so the per-segment overwrite would be wasted complexity).
 //!
 //! # Why a synthetic `file_uuid`
 //!
@@ -145,6 +146,10 @@ impl EventHandler for TerminalEventHandler {
             Err(_) => return, // poisoned — drop the event silently.
         };
         let Some(target) = target else { return };
+        // WHY `let _ = self.tx.send(...)`: the bounded(4) channel's
+        // receiver is the dispatcher's terminal-event blocking recv; if
+        // it's already gone (caller exited via Ctrl-C), dropping the
+        // event is the correct behaviour, not surfacing a SendError.
         match event {
             AppEvent::TranscriptionCompleted {
                 request_uuid,
@@ -238,10 +243,12 @@ fn load_segments_for(
              ORDER BY start_ms ASC",
         )
         .map_err(|e| CoreError::Internal(format!("prepare segments query: {e}")))?;
-    // WHY u32::try_from(i64): SQLite stores INTEGER as i64; the schema
-    // values fit in u32 (timestamps in ms over a single media file). A
-    // failed conversion indicates DB corruption rather than a bug in
-    // this caller, so map to a typed Internal error instead of `as`-cast.
+    // WHY u32::try_from(i64).unwrap_or(u32::MAX): SQLite stores INTEGER
+    // as i64; schema values are ms timestamps that fit in u32 for any
+    // realistic media file (u32::MAX ms ≈ 49 days). Saturating on the
+    // (impossible) overflow is preferable to crashing the render — the
+    // segment is still readable and the UX degrades to "very long" rather
+    // than aborting the whole transcript print.
     let rows = stmt
         .query_map([transcript_id], |row| {
             let start = row.get::<_, i64>(0)?;

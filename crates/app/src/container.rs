@@ -44,8 +44,9 @@ use crate::{
 ///
 /// One entry per provider, keyed by the provider's TOML name (`groq`,
 /// `openai`, `custom-...`). Frontend (T7) writes via `set_provider_key`;
-/// the container reads here at startup.
-const KEYRING_SERVICE: &str = "perima.transcription";
+/// the container reads here at startup. CLI's `auth` subcommand
+/// imports this constant to guarantee both writers + reader agree.
+pub const KEYRING_SERVICE: &str = "perima.transcription";
 
 // ---------------------------------------------------------------------------
 // AppDeps
