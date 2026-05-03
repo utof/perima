@@ -530,8 +530,10 @@ fn resolve_audio_pipeline(
     // `bundle.externalBin = ["binaries/ffmpeg"]` to per-target resource files
     // named `ffmpeg-{target-triple}` (e.g. `ffmpeg-x86_64-unknown-linux-gnu`).
     // T12 will land the actual binaries; T7 only resolves the path so the
-    // wiring is in place when those binaries appear.
-    let target_triple = std::env::consts::ARCH; // best-effort suffix for tracing
+    // wiring is in place when those binaries appear. TARGET is captured at
+    // build time by build.rs (see WHY there) — std::env::consts::ARCH would
+    // give only "x86_64" and never match the sidecar filename.
+    let target_triple = env!("TARGET");
     let bundled_name = format!("binaries/ffmpeg-{target_triple}");
     if let Ok(bundled_path) = app.path().resolve(&bundled_name, BaseDirectory::Resource)
         && bundled_path.exists()

@@ -1860,8 +1860,16 @@ pub async fn list_providers(
             // raw keyring error here would block the whole settings
             // panel; the user's recovery path is to set the key
             // (which goes through `set_provider_key` and surfaces its
-            // own error if construction fails again).
-            let has_key = provider_keyring_entry(name).is_ok_and(|e| e.get_password().is_ok());
+            // own error if construction fails again). Log the
+            // construction failure so a system-keyring outage is
+            // diagnosable without piecing together other commands' errors.
+            let has_key = match provider_keyring_entry(name) {
+                Ok(entry) => entry.get_password().is_ok(),
+                Err(e) => {
+                    tracing::warn!(provider = %name, error = %e, "keyring entry construction failed in list_providers; reporting has_key=false");
+                    false
+                }
+            };
             ProviderListEntry {
                 name: name.clone(),
                 preset: entry.preset.clone(),
@@ -1904,6 +1912,10 @@ pub async fn update_transcription_config(
         .data_dir
         .parent()
         .ok_or_else(|| CoreError::Internal("data_dir has no parent (config_dir)".into()))?;
+    // WHY sync I/O on a Tauri worker thread (no spawn_blocking): TOML
+    // serialize + write of a tiny config file (<2 KiB) completes in
+    // sub-ms on every realistic disk; the runtime cost of spawn_blocking
+    // (thread handoff + cache miss) would dwarf the I/O it dispatches.
     config.save(config_dir)?;
     tracing::warn!(
         "transcription config updated; restart perima for the new provider \
