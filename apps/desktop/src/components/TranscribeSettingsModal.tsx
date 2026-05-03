@@ -313,7 +313,7 @@ export function TranscribeSettingsModal({ open, onClose }: TranscribeSettingsMod
                     <span className="ml-2 text-muted-foreground">
                       {p.preset}
                       {p.model ? ` / ${p.model}` : ""}
-                      {p.has_key ? " 🔑" : ""}
+                      {p.has_key ? " (key set)" : ""}
                       {providersQuery.data.active === p.name ? " (active)" : ""}
                     </span>
                   </button>
