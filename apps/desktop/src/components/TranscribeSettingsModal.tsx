@@ -157,10 +157,19 @@ export function TranscribeSettingsModal({ open, onClose }: TranscribeSettingsMod
       }
 
       // Step 2: build the updated TranscriptionConfig.
-      const existingConfig: TranscriptionConfig = configQuery.data ?? {
-        active_provider: null,
-        providers: {},
-      };
+      // WHY refuse on undefined: substituting `{ providers: {} }` would
+      // wipe every other configured provider on Save (the spread on the
+      // next block would write a config containing only the new entry).
+      // The Save button is also gated on configQuery.isSuccess to prevent
+      // the user reaching this branch in normal use; this is belt + braces.
+      if (configQuery.data === undefined) {
+        const err: CoreError = {
+          kind: "Internal",
+          data: "Existing transcription config not loaded yet — refusing to overwrite providers.",
+        };
+        throw err;
+      }
+      const existingConfig: TranscriptionConfig = configQuery.data;
 
       const entry: ProviderEntry = {
         preset: f.preset,
@@ -480,9 +489,25 @@ export function TranscribeSettingsModal({ open, onClose }: TranscribeSettingsMod
             >
               Cancel
             </button>
+            {/* WHY disable Save when name empty or config not loaded: an
+                empty trimmed name would write providers[""] (corrupt config
+                row); a missing config snapshot would wipe other providers
+                on the spread. Both are data-integrity hazards, not just
+                UX nits. */}
             <button
               type="submit"
-              disabled={isPending}
+              disabled={
+                isPending ||
+                form.name.trim() === "" ||
+                !configQuery.isSuccess
+              }
+              title={
+                form.name.trim() === ""
+                  ? "Provider name required"
+                  : !configQuery.isSuccess
+                    ? "Loading existing config…"
+                    : undefined
+              }
               className="inline-flex items-center justify-center gap-2 rounded-full px-5 py-2 text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors duration-micro focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 disabled:pointer-events-none"
             >
               {isPending ? "Saving…" : "Save"}

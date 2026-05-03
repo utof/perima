@@ -64,6 +64,19 @@ function setupDefaultMocks() {
   mockUpdateTranscriptionConfig.mockReturnValue(okAsync(undefined));
 }
 
+// WHY: Save is gated on (configQuery.isSuccess && form.name.trim() !== "")
+// to prevent two real data-integrity hazards (T10 review fix). Tests must
+// wait for the config query to settle (and the name field to be filled)
+// before clicking Save, otherwise the click is a no-op against a disabled
+// button. Centralised here so adding a new Save-clicking test is one line.
+async function waitForSaveEnabled(): Promise<HTMLElement> {
+  const saveBtn = screen.getByRole("button", { name: /save/i });
+  await waitFor(() => {
+    expect(saveBtn).not.toBeDisabled();
+  });
+  return saveBtn;
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 beforeEach(() => {
@@ -125,8 +138,9 @@ describe("TranscribeSettingsModal", () => {
     const keyInput = screen.getByLabelText(/api key/i);
     fireEvent.change(keyInput, { target: { value: "gsk_test_key_abc" } });
 
-    // Click Save
-    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    // Click Save (after config query settles + name validates)
+    const saveBtn = await waitForSaveEnabled();
+    fireEvent.click(saveBtn);
 
     await waitFor(() => {
       expect(mockSetProviderKey).toHaveBeenCalledOnce();
@@ -166,7 +180,8 @@ describe("TranscribeSettingsModal", () => {
     const keyInput = screen.getByLabelText(/api key/i);
     expect((keyInput as HTMLInputElement).value).toBe("");
 
-    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    const saveBtn = await waitForSaveEnabled();
+    fireEvent.click(saveBtn);
 
     await waitFor(() => {
       expect(mockUpdateTranscriptionConfig).toHaveBeenCalledOnce();
@@ -205,7 +220,8 @@ describe("TranscribeSettingsModal", () => {
     const keyInput = screen.getByLabelText(/api key/i);
     fireEvent.change(keyInput, { target: { value: "gsk_pending_key" } });
 
-    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    const saveBtnReady = await waitForSaveEnabled();
+    fireEvent.click(saveBtnReady);
 
     // After click, the mutation is pending — check disabled state
     await waitFor(() => {
@@ -239,7 +255,8 @@ describe("TranscribeSettingsModal", () => {
     const keyInput = screen.getByLabelText(/api key/i);
     fireEvent.change(keyInput, { target: { value: "bad_key" } });
 
-    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    const saveBtn = await waitForSaveEnabled();
+    fireEvent.click(saveBtn);
 
     // Banner appears with auth message from coreErrorMessage
     await waitFor(() => {
@@ -274,7 +291,8 @@ describe("TranscribeSettingsModal", () => {
     const keyInput = screen.getByLabelText(/api key/i);
     fireEvent.change(keyInput, { target: { value: "gsk_key" } });
 
-    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+    const saveBtn = await waitForSaveEnabled();
+    fireEvent.click(saveBtn);
 
     // Wait for mutation to be in-flight
     await waitFor(() => {
@@ -314,5 +332,34 @@ describe("TranscribeSettingsModal", () => {
 
     expect(screen.queryByLabelText(/base url/i)).toBeNull();
     expect(screen.queryByLabelText(/auth scheme/i)).toBeNull();
+  });
+
+  // 9. Save disabled when name is empty (data-integrity: prevents
+  //    providers[""] corrupt config row).
+  it("Save is disabled when provider name is empty", async () => {
+    renderWithProviders(
+      <TranscribeSettingsModal open={true} onClose={vi.fn()} />,
+    );
+
+    // Wait for config query to settle so the gate is purely on name.
+    await waitFor(() => {
+      expect(mockGetTranscriptionConfig).toHaveBeenCalled();
+    });
+
+    // Default name is empty (INITIAL_FORM.name === "").
+    const nameInput = screen.getByLabelText<HTMLInputElement>(/provider name/i);
+    expect(nameInput.value).toBe("");
+
+    expect(screen.getByRole("button", { name: /save/i })).toBeDisabled();
+
+    // Whitespace-only name still disabled (trim guard).
+    fireEvent.change(nameInput, { target: { value: "   " } });
+    expect(screen.getByRole("button", { name: /save/i })).toBeDisabled();
+
+    // Real name enables Save.
+    fireEvent.change(nameInput, { target: { value: "groq" } });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /save/i })).not.toBeDisabled();
+    });
   });
 });
