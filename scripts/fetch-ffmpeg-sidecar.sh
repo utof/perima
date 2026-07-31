@@ -52,11 +52,59 @@ case "$(uname -s)" in
     url="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
     tmp_dir="$(mktemp -d)"
     trap 'rm -rf "$tmp_dir"' EXIT
-    echo "Downloading ffmpeg static build from $url ..."
-    curl --fail --location --silent --show-error \
-      --output "$tmp_dir/ffmpeg.tar.xz" "$url"
-    echo "Extracting ..."
-    tar -xJf "$tmp_dir/ffmpeg.tar.xz" -C "$tmp_dir"
+    archive="$tmp_dir/ffmpeg.tar.xz"
+
+    # WHY a hand-rolled retry loop instead of just `curl --retry`:
+    # CI fetches this tarball from 4 jobs (3-platform matrix +
+    # bindings-drift). johnvansickle.com throttles bursts from a single
+    # GitHub Actions egress range, and it does so by returning a SHORT
+    # HTML notice with HTTP status 200 — not a 4xx/5xx. `curl --retry`
+    # and `--fail` both key off the status code, so curl reports success
+    # and the truncated body only explodes later inside tar as
+    # "xz: (stdin): File format not recognized" — an opaque message that
+    # reads like archive corruption rather than a throttled download.
+    # Observed 2026-08-01: the matrix ubuntu job fetched 41 MB fine while
+    # bindings-drift got a 0.3-second "download" minutes later.
+    # So: validate the payload ourselves, and treat a too-small body as a
+    # retryable condition.
+    min_bytes=10000000   # real tarball is ~41 MB; anything smaller is a server message
+    max_attempts=5
+    attempt=1
+    while true; do
+      echo "Downloading ffmpeg static build from $url (attempt $attempt/$max_attempts) ..."
+      # `|| true` so a curl-level failure falls through to the same
+      # size check + backoff path rather than tripping `set -e`.
+      curl --fail --location --silent --show-error \
+        --connect-timeout 30 --output "$archive" "$url" || true
+
+      archive_bytes=0
+      [[ -f "$archive" ]] && archive_bytes="$(wc -c < "$archive")"
+
+      if (( archive_bytes >= min_bytes )); then
+        break
+      fi
+
+      echo "WARNING: got ${archive_bytes} bytes, expected >= ${min_bytes}." >&2
+      if [[ -s "$archive" ]]; then
+        echo "         First bytes of the response:" >&2
+        head -c 200 "$archive" >&2 || true
+        echo >&2
+      fi
+
+      if (( attempt >= max_attempts )); then
+        echo "ERROR: $url did not serve the tarball after $max_attempts attempts." >&2
+        echo "       Most likely rate-limited. See GH #183 (sha256-pin + mirror)." >&2
+        exit 1
+      fi
+
+      backoff=$(( attempt * 10 ))
+      echo "         Retrying in ${backoff}s ..." >&2
+      sleep "$backoff"
+      attempt=$(( attempt + 1 ))
+    done
+
+    echo "Extracting ($archive_bytes bytes) ..."
+    tar -xJf "$archive" -C "$tmp_dir"
     extracted_bin="$(find "$tmp_dir" -maxdepth 2 -type f -name ffmpeg | head -n1)"
     if [[ -z "$extracted_bin" ]]; then
       echo "ERROR: could not find ffmpeg binary in extracted tarball" >&2
