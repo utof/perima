@@ -54,7 +54,7 @@ fn write_silent_wav(path: &Path) {
     writer.finalize().unwrap();
 }
 
-/// Verbose-JSON response body matching the OpenAI / Groq schema. One
+/// Verbose-JSON response body matching the `OpenAI` / Groq schema. One
 /// segment with the text "hello world" — the happy-path test asserts
 /// this surfaces on stdout.
 fn verbose_json_body() -> serde_json::Value {

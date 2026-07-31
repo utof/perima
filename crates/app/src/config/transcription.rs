@@ -142,8 +142,10 @@ mod tests {
     #[test]
     fn save_then_load_round_trips() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = TranscriptionConfig::default();
-        cfg.active_provider = Some("groq".to_owned());
+        let mut cfg = TranscriptionConfig {
+            active_provider: Some("groq".to_owned()),
+            ..Default::default()
+        };
         cfg.providers.insert(
             "groq".to_owned(),
             ProviderEntry {

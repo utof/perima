@@ -237,7 +237,9 @@ async fn happy_path_emits_started_then_completed() {
             assert_eq!(queue_position, 1, "first job queue_position should be 1");
             request_uuid
         }
-        other => panic!("expected Started, got {other:?}"),
+        other @ TranscribeOutput::Cancelled { .. } => {
+            panic!("expected Started, got {other:?}")
+        }
     };
 
     let started = wait_for_event(
@@ -301,7 +303,9 @@ async fn cancel_mid_flight_emits_transcription_cancelled() {
         .unwrap();
     let request_uuid = match out {
         TranscribeOutput::Started { request_uuid, .. } => request_uuid,
-        other => panic!("expected Started, got {other:?}"),
+        other @ TranscribeOutput::Cancelled { .. } => {
+            panic!("expected Started, got {other:?}")
+        }
     };
 
     // Wait for the worker to emit Started before cancelling so we know it
@@ -458,7 +462,9 @@ async fn auth_error_emits_transcription_failed_with_same_discriminant() {
         .unwrap();
     let request_uuid = match out {
         TranscribeOutput::Started { request_uuid, .. } => request_uuid,
-        other => panic!("expected Started, got {other:?}"),
+        other @ TranscribeOutput::Cancelled { .. } => {
+            panic!("expected Started, got {other:?}")
+        }
     };
 
     let failed = wait_for_event(
@@ -479,7 +485,7 @@ async fn auth_error_emits_transcription_failed_with_same_discriminant() {
     );
 }
 
-/// Smoke test: cancelling an unknown request_uuid is idempotent.
+/// Smoke test: cancelling an unknown `request_uuid` is idempotent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_unknown_request_uuid_is_idempotent() {
     let (_td, _writer, repo) = db_harness();
