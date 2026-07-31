@@ -14,6 +14,7 @@ pub mod pool;
 pub mod schema;
 pub mod search_repo;
 pub mod tag_repo;
+pub mod transcript_repo;
 pub mod volume_repo;
 pub mod writer;
 
@@ -27,6 +28,7 @@ pub use metadata_repo::SqliteMetadataRepository;
 pub use pool::ReadPool;
 pub use search_repo::SqliteSearchRepository;
 pub use tag_repo::SqliteTagRepository;
+pub use transcript_repo::SqliteTranscriptRepository;
 pub use volume_repo::SqliteVolumeRepository;
 pub use writer::{SqliteWriter, SqliteWriterHandle};
 

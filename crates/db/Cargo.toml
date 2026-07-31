@@ -26,6 +26,11 @@ flume.workspace     = true
 minijinja.workspace = true
 r2d2.workspace      = true
 r2d2_sqlite.workspace = true
+# WHY tokio-util in prod deps: TranscriptWriteCmd::Insert carries an
+# Option<CancellationToken> threaded from the use-case so the writer
+# can roll back mid-transaction if the caller cancels (closes the
+# cancel-after-adapter-success window per the transcription v1 spec).
+tokio-util.workspace = true
 
 [features]
 default = []
@@ -58,11 +63,12 @@ perima-app   = { workspace = true }
 perima-fs    = { path = "../fs" }
 perima-hash  = { path = "../hash" }
 perima-media = { workspace = true }
-# WHY tokio + tokio-util: ScanUseCase::execute is async; the rescan bench
-# drives it via `Runtime::block_on` (one runtime per binary — this bench
-# IS the binary, so no secondary-runtime violation).
+# WHY tokio: ScanUseCase::execute is async; the rescan bench drives it
+# via `Runtime::block_on` (one runtime per binary — this bench IS the
+# binary, so no secondary-runtime violation). `tokio-util` is already a
+# prod dep (CancellationToken in TranscriptWriteCmd::Insert) so it is
+# automatically visible to integration tests + benches.
 tokio.workspace     = true
-tokio-util.workspace = true
 
 [[bench]]
 name = "fts"

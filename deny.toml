@@ -86,6 +86,14 @@ ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste: GTK-rs transitive; no direct dep" },
     # proc-macro-error — unmaintained; GTK bindings transitive.
     { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: GTK-rs transitive; no direct dep" },
+    # backoff — unmaintained; pulled in transitively via async-openai 0.36's
+    # default ExponentialBackoff retry policy. Upstream replacement is `backon`
+    # but async-openai hasn't migrated. Tracked as part of the async-openai
+    # client polish + see GH #178 (we intend to disable async-openai's retry
+    # logic for transcription anyway, which removes the runtime dep).
+    { id = "RUSTSEC-2025-0012", reason = "backoff: async-openai 0.36 transitive; replacement tracked in #178" },
+    # instant — unmaintained; transitive via backoff. Same chain as above.
+    { id = "RUSTSEC-2024-0384", reason = "instant: backoff transitive (via async-openai 0.36); same chain as RUSTSEC-2025-0012" },
 ]
 
 [sources]

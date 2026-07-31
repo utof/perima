@@ -24,9 +24,12 @@
  * a small UX win. We keep it to a one-line click handler; no third-party
  * clipboard lib needed.
  */
-import { XIcon } from "@phosphor-icons/react";
+import { useState } from "react";
+import { XIcon, GearIcon } from "@phosphor-icons/react";
 import type { FileWithTagsPayload } from "../bindings";
 import { useComputeFullHash } from "../queries/dedup";
+import { TranscribeButton } from "./TranscribeButton";
+import { TranscribeSettingsModal } from "./TranscribeSettingsModal";
 
 /** Props for {@link FileSidebar}. */
 export interface FileSidebarProps {
@@ -44,6 +47,7 @@ export interface FileSidebarProps {
  */
 export default function FileSidebar({ file, onClose }: FileSidebarProps) {
   const compute = useComputeFullHash();
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // WHY two conditions: see module docstring.
   // hash === null → post-V012 nullable convention (forward-compat).
@@ -76,6 +80,30 @@ export default function FileSidebar({ file, onClose }: FileSidebarProps) {
         >
           <XIcon size={14} weight="bold" />
         </button>
+      </div>
+
+      {/* Transcription action row */}
+      {/* WHY adjacent to Settings gear: spec §9 places the transcribe trigger
+          beside a gear icon that will open the provider settings modal (T10).
+          The gear is a stub here — onClick is wired in T10. */}
+      <div className="flex items-center gap-2">
+        <TranscribeButton
+          fileUuid={file.file_uuid}
+          fileName={file.relative_path.split("/").pop() ?? file.relative_path}
+          source={file.absolute_path}
+        />
+        <button
+          type="button"
+          onClick={() => { setSettingsOpen(true); }}
+          aria-label="Transcription settings"
+          className="inline-flex items-center justify-center rounded-md p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted transition-colors duration-micro ease-perima focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <GearIcon size={16} weight="regular" />
+        </button>
+        <TranscribeSettingsModal
+          open={settingsOpen}
+          onClose={() => { setSettingsOpen(false); }}
+        />
       </div>
 
       {/* UUID */}

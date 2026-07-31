@@ -21,6 +21,66 @@
 use perima_core::{FileLocationRecord, FileUuid, MediaMetadata, Tag};
 use serde::Serialize;
 
+// ---------------------------------------------------------------------------
+// Transcription wire-types (T7)
+//
+// WHY a wire-type mirror for `TranscribeStartedPayload` (not specta-derive on
+// `perima_app::TranscribeOutput`):
+//
+// 1. `TranscribeOutput` is `Debug + Clone` only — no `Serialize`. Adding
+//    `Serialize` + `specta::Type` to the entire enum would also expose the
+//    `Cancelled` variant across the IPC boundary, which the `cancel_transcription`
+//    command does not need (it returns `Result<(), CoreError>`). The
+//    transcription Tauri commands surface a tightly-scoped IPC API; the wire
+//    type captures only the fields the frontend actually needs.
+// 2. `TranscribeCommand::Start { source: PathBuf, ... }` does not cross the IPC
+//    boundary at all — the Tauri handler accepts `source: String` (Tauri
+//    serializes paths as strings) and constructs the `PathBuf` shell-side
+//    before calling the use-case. So no specta-derive on the command enum is
+//    needed.
+//
+// `ListProvidersPayload` + `ProviderListEntry` are shell-private composites:
+// they query the OS keyring at construction time to set the `has_key` flag,
+// which is a Tauri-shell concern (CLI's `auth list` does the same lookup
+// shell-side). No clean core/app analogue exists.
+// ---------------------------------------------------------------------------
+
+/// Returned by the `transcribe` Tauri command — mirror of
+/// [`perima_app::TranscribeOutput::Started`].
+#[derive(Debug, Clone, Serialize, specta::Type)]
+pub struct TranscribeStartedPayload {
+    /// Per-request `UUIDv7` (lowercase-hex simple form). Pairs with every
+    /// `AppEvent::Transcription*` variant for this job.
+    pub request_uuid: String,
+    /// 1-based position in the queue at the moment of enqueue.
+    pub queue_position: u32,
+}
+
+/// Returned by the `list_providers` Tauri command. Combines the TOML config
+/// view with a per-provider keyring lookup.
+#[derive(Debug, Clone, Serialize, specta::Type)]
+pub struct ListProvidersPayload {
+    /// Active provider name from `[transcription].active_provider`, or `None`
+    /// when the user has not selected one yet.
+    pub active: Option<String>,
+    /// One entry per provider in `[transcription.providers.*]`.
+    pub providers: Vec<ProviderListEntry>,
+}
+
+/// One row in [`ListProvidersPayload::providers`].
+#[derive(Debug, Clone, Serialize, specta::Type)]
+pub struct ProviderListEntry {
+    /// Provider name (the `[transcription.providers.<name>]` key).
+    pub name: String,
+    /// Preset name (`groq`, `openai`, `custom`, ...).
+    pub preset: String,
+    /// Optional model override; `None` falls back to the preset's default.
+    pub model: Option<String>,
+    /// Whether a keyring entry exists for this provider on this device.
+    /// Computed via [`keyring::Entry::get_password`] at command-handler time.
+    pub has_key: bool,
+}
+
 /// Flattened `(FileLocationRecord, Option<MediaMetadata>)` pair for the
 /// frontend.
 ///
@@ -88,6 +148,22 @@ pub struct FileWithMetadataPayload {
     /// Thumbnail lifecycle: `"pending"`, `"ready"`, `"failed"`, or
     /// `None` if the metadata row predates v0.4.1.
     pub thumbnail_status: Option<String>,
+    /// Absolute on-disk path joining the volume's current mount root
+    /// with [`Self::relative_path`]. `None` when the volume is not
+    /// currently mounted on this machine.
+    ///
+    /// WHY exposed here (T9 review fix): the desktop transcribe
+    /// command (and any future open-file / preview / export action)
+    /// must hand ffmpeg / the OS an absolute path — relative paths
+    /// resolve against the desktop process cwd, which is rarely the
+    /// volume root, producing silent ENOENT. Pre-fix the frontend was
+    /// passing `relative_path` to `transcribe`, which forwards to
+    /// ffmpeg unchanged.
+    ///
+    /// WHY `Option<String>`: a volume that is currently unmounted has
+    /// no `volume_mounts` row → SQL produces NULL → frontend disables
+    /// the dependent action with a "Volume not mounted" tooltip.
+    pub absolute_path: Option<String>,
 }
 
 /// File-with-metadata plus its attached tags.
@@ -109,9 +185,21 @@ pub struct FileWithTagsPayload {
     pub tags: Vec<Tag>,
 }
 
-impl From<(FileLocationRecord, Option<MediaMetadata>, Option<String>)> for FileWithMetadataPayload {
+impl
+    From<(
+        FileLocationRecord,
+        Option<MediaMetadata>,
+        Option<String>,
+        Option<String>,
+    )> for FileWithMetadataPayload
+{
     fn from(
-        (loc, meta, quick_hash): (FileLocationRecord, Option<MediaMetadata>, Option<String>),
+        (loc, meta, quick_hash, mount_path): (
+            FileLocationRecord,
+            Option<MediaMetadata>,
+            Option<String>,
+            Option<String>,
+        ),
     ) -> Self {
         // WHY unzip via `meta.map(...)`: the nine optional metadata
         // fields each need independent `None` defaults when the
@@ -149,6 +237,18 @@ impl From<(FileLocationRecord, Option<MediaMetadata>, Option<String>)> for FileW
                 None, None, None, None, None, None, None, None, None, None, None,
             ),
         };
+        // WHY compute absolute_path here (not in SQL): the join already
+        // produces `mount_path`; combining with `relative_path` is a
+        // platform-sensitive `PathBuf::push` that belongs in Rust (SQL
+        // string concatenation would produce a forward-slash string on
+        // Windows, breaking ffmpeg + the OS open-file APIs). When
+        // `mount_path` is None the volume is unmounted — the frontend
+        // disables the dependent UI control.
+        let absolute_path = mount_path.as_ref().map(|mp| {
+            let mut p = std::path::PathBuf::from(mp);
+            p.push(loc.relative_path.as_str());
+            p.to_string_lossy().into_owned()
+        });
         Self {
             file_uuid: loc.file_uuid,
             hash: loc.hash.map(|h| h.to_hex()),
@@ -169,6 +269,7 @@ impl From<(FileLocationRecord, Option<MediaMetadata>, Option<String>)> for FileW
             mime_type,
             thumbnail_path,
             thumbnail_status,
+            absolute_path,
         }
     }
 }

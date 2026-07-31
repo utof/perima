@@ -26,6 +26,15 @@ cognitive_complexity = "warn"
 too_many_lines = "warn"
 excessive_nesting = "warn"
 module_name_repetitions = "allow"
+# WHY allow: `doc_markdown` demands backticks around any mixed-case token it
+# mistakes for an identifier — "OpenAI", "JavaScript", "GitHub", product names,
+# vendor names. It fires constantly on ordinary English prose in doc comments,
+# every fire is a pure-churn edit with no correctness value, and clippy's
+# default `doc-valid-idents` allowlist can't keep up with the proper nouns this
+# codebase actually uses. Real doc-quality enforcement lives in
+# `rustdoc::broken_intra_doc_links` (deny) + `missing_docs` (deny), which catch
+# links and coverage — the things that actually break readers.
+doc_markdown = "allow"
 missing_errors_doc = "warn"
 # --- Restriction lints (wave 1, 2026-04-20) ---
 # Zero fires on HEAD; pure forward-insurance against AI-slop patterns.
@@ -102,6 +111,39 @@ nom-exif     = "2.7"
 mp4parse     = "0.17"
 mime_guess   = "2"
 minijinja    = { version = "2", default-features = false, features = ["macros", "loader"] }
+# WHY async-openai 0.36 (plan spec'd 0.32; 0.36 is latest stable as of 2026-05):
+# The `audio` feature gates the Transcriptions/Speech/Translations API groups;
+# default-features disabled to avoid pulling in `assistant` + `batch` + etc.
+async-openai      = { version = "0.36", default-features = false, features = ["audio"] }
+# WHY which 8: cross-platform PATH binary discovery for CliFfmpegInvoker.
+which             = "8"
+# WHY keyring 3.6 (not 4.0): keyring 4.0 removed the compile-time feature flags
+# (apple-native, windows-native, linux-native-sync-persistent) in favour of
+# runtime `use_native_store()` calls — a breaking API change. The T4 adapter
+# slice targets the 3.6 feature-flag API; upgrading to 4.0 is a separate
+# migration tracked alongside T4.
+keyring           = { version = "3.6", features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }
+# WHY dialoguer 0.12: interactive CLI prompts; `password` gates the hidden-input
+# widget for API key entry.
+dialoguer         = { version = "0.12", features = ["password"] }
+# WHY wiremock 0.6 (plan spec'd 0.7; 0.6.5 is latest stable as of 2026-05, 0.7
+# does not exist on crates.io): HTTP mock server for openai-compat tests.
+wiremock          = "0.6"
+# WHY hound 3.5: WAV read/write used by audio fixture helpers in tests.
+hound             = "3.5"
+# WHY regex 1: BCP-47 language-code shape validation in CLI `transcribe --language`.
+# Loose validator (RFC 5646 subset); promote to `unic-langid` if/when full
+# Unicode-language-tag handling is needed.
+regex             = "1"
+# WHY toml 1 (plan spec'd 0.10; 1.1 is latest stable as of 2026-05): used by
+# transcription config loader in the adapters slice.
+toml              = "1"
+# WHY tauri-plugin-shell 2: needed by desktop shell for DesktopFfmpegInvoker
+# to locate the bundled sidecar binary path.
+tauri-plugin-shell  = "2"
+# WHY ffmpeg-sidecar 2: workspace dep so desktop crate can reference the
+# sidecar binary management helpers without re-pinning.
+ffmpeg-sidecar    = "2"
 
 [profile.release]
 lto = "thin"

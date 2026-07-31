@@ -55,6 +55,15 @@ pub enum BodyKind {
     TagsSoftDeleteOrRestore,
     /// `search_after_tags_delete` — refresh tags agg for every holder (post-DELETE OLD.id).
     TagsDelete,
+    /// `transcript_search_after_segment_insert` — populate `transcript_search` on new live segment.
+    TranscriptSegmentAfterInsert,
+    /// `transcript_search_after_segment_delete` — remove from `transcript_search` on hard delete.
+    TranscriptSegmentAfterDelete,
+    /// `transcript_search_after_segment_update` — soft-delete / restore / text-edit
+    /// arms for `transcript_search` maintenance. WHEN gates live INSIDE the body
+    /// macro (per-arm SELECT...WHERE) rather than on the outer trigger so that
+    /// one trigger can cover all three transitions.
+    TranscriptSegmentAfterUpdate,
 }
 
 /// One FTS-trigger spec entry. Drives the template render loop.
@@ -89,11 +98,13 @@ pub const LEGACY_TRIGGER_NAMES: &[&str] = &[
     "search_after_location_hash_change_retire",
 ];
 
-/// The 15 trigger entries the codegen renders.
+/// The 18 trigger entries the codegen renders.
 ///
 /// Order matters for fire-order on combined-transaction UPDATE statements
 /// (`SQLite` fires triggers in CREATE order). See spec §7.1 + V007 inline
-/// comment "fire-order: 2a, 2b, 2c".
+/// comment "fire-order: 2a, 2b, 2c". Transcription v1 added the final
+/// 3 (`transcript_search_after_segment_*`) on top of the post-Task-3
+/// post-pivot baseline of 15.
 pub const FTS_AGGREGATIONS: &[FtsAggregation] = &[
     // search_content → search_index sync (V007).
     FtsAggregation {
@@ -214,6 +225,34 @@ pub const FTS_AGGREGATIONS: &[FtsAggregation] = &[
         when: None,
         body: BodyKind::TagsDelete,
     },
+    // transcript_segment → transcript_search FTS5 maintenance triggers
+    // (transcription v1 slice). WHEN gates live INSIDE the body macros
+    // (SELECT...WHERE) rather than on the outer trigger, so one
+    // AFTER UPDATE trigger covers soft-delete + restore + text-changed
+    // arms in a single place. See spec
+    // `docs/superpowers/specs/2026-05-02-transcription-v1-design.md`
+    // § "Codegen: FTS5 maintenance triggers".
+    FtsAggregation {
+        name: "transcript_search_after_segment_insert",
+        source_table: "transcript_segment",
+        event: TriggerEvent::Insert,
+        when: None,
+        body: BodyKind::TranscriptSegmentAfterInsert,
+    },
+    FtsAggregation {
+        name: "transcript_search_after_segment_delete",
+        source_table: "transcript_segment",
+        event: TriggerEvent::Delete,
+        when: None,
+        body: BodyKind::TranscriptSegmentAfterDelete,
+    },
+    FtsAggregation {
+        name: "transcript_search_after_segment_update",
+        source_table: "transcript_segment",
+        event: TriggerEvent::Update,
+        when: None,
+        body: BodyKind::TranscriptSegmentAfterUpdate,
+    },
 ];
 
 #[cfg(test)]
@@ -221,14 +260,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fts_aggregations_has_fifteen_entries() {
+    fn fts_aggregations_has_eighteen_entries() {
         // Post-Task-3 pivot (spec §4.1.4): retire trigger is gone (file_uuid
         // is stable across hash changes, so the OLD-hash search_content row
         // doesn't need retiring). 16 → 15.
+        // Transcription v1 (spec 2026-05-02): +3 entries for
+        // transcript_segment → transcript_search FTS5 maintenance. 15 → 18.
         assert_eq!(
             FTS_AGGREGATIONS.len(),
-            15,
-            "expected 15 trigger entries post-Task-3 — see spec §4.1.4"
+            18,
+            "expected 18 trigger entries post-transcription-v1 — see spec §4.1.4 + 2026-05-02-transcription-v1"
         );
     }
 

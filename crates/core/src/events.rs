@@ -5,6 +5,7 @@ use serde::Serialize;
 use crate::{
     CoreError, FileUuid, MediaPath, VolumeId,
     dedup::{BatchId, FullHashOutcome},
+    transcription::TranscriptionError,
 };
 
 /// A filesystem event detected by the watcher.
@@ -120,6 +121,75 @@ pub enum AppEvent {
     VerifyComplete {
         /// The batch that has finished.
         batch_id: BatchId,
+    },
+
+    /// Transcription job has been picked up by the worker and is starting.
+    ///
+    /// Emitted once per request immediately before the adapter call. The
+    /// frontend uses this to flip the per-file UI from "queued" to "running"
+    /// without polling.
+    TranscriptionStarted {
+        /// Per-request `UUIDv7` (lowercase-hex, simple form). Pairs with the
+        /// `request_uuid` returned by `TranscribeOutput::Started`.
+        request_uuid: String,
+        /// File the job is transcribing (immutable surrogate).
+        file_uuid: String,
+        /// Display name for UI surfacing (file basename or curated label).
+        file_name: String,
+        /// Current queue size including this job (1 = this is the only job).
+        queue_size: u32,
+    },
+
+    /// Mid-flight transcription progress.
+    ///
+    /// Driven by adapter `TranscriptionProgress::Segment` and `Heartbeat`
+    /// callbacks. `processed_ms` is the cumulative ms of source media
+    /// finalized so far; `total_ms` may be `None` for backends that do not
+    /// publish a duration estimate up front.
+    TranscriptionProgress {
+        /// Per-request `UUIDv7`.
+        request_uuid: String,
+        /// Cumulative milliseconds of source media processed.
+        processed_ms: u32,
+        /// Total source duration in milliseconds, when known.
+        total_ms: Option<u32>,
+    },
+
+    /// Transcription job completed successfully; transcript persisted.
+    ///
+    /// Emitted by the writer-cmd handler AFTER `COMMIT`. The frontend uses
+    /// `transcript_id` to refetch the freshly-inserted row and `request_uuid`
+    /// to dismiss the matching in-flight slot in its job map.
+    TranscriptionCompleted {
+        /// Per-request `UUIDv7` (threaded from the use-case via
+        /// `WriteCmd::Transcript(TranscriptWriteCmd::Insert)`).
+        request_uuid: String,
+        /// Persisted transcript header row id (`UUIDv7` simple-hex).
+        transcript_id: String,
+        /// File the transcript belongs to (immutable surrogate).
+        file_uuid: String,
+        /// Number of segment rows written.
+        segment_count: u32,
+        /// Detected language (BCP-47 short code) when the backend reports one.
+        language: Option<String>,
+    },
+
+    /// Transcription job cancelled by user (token fired before commit).
+    TranscriptionCancelled {
+        /// Per-request `UUIDv7`.
+        request_uuid: String,
+    },
+
+    /// Transcription job failed (non-cancel terminal error).
+    ///
+    /// Carries the full [`TranscriptionError`] so the frontend can surface
+    /// discriminant payloads such as `RateLimited.retry_after_secs` or
+    /// `FileTooLarge.limit_bytes` without a lossy re-stringification.
+    TranscriptionFailed {
+        /// Per-request `UUIDv7`.
+        request_uuid: String,
+        /// The terminal error that ended the job.
+        error: TranscriptionError,
     },
 }
 

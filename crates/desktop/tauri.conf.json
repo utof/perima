@@ -24,5 +24,8 @@
       }
     }
   },
+  "bundle": {
+    "externalBin": ["binaries/ffmpeg"]
+  },
   "plugins": {}
 }

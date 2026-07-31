@@ -1,4 +1,9 @@
-import type { BackupFailureReason, CoreError, FullHashUnavailableReason } from "../bindings";
+import type {
+  BackupFailureReason,
+  CoreError,
+  FullHashUnavailableReason,
+  TranscriptionError,
+} from "../bindings";
 
 /**
  * Returns a human-readable string from a {@link CoreError} data payload.
@@ -15,6 +20,9 @@ export function coreErrorMessage(e: CoreError): string {
   }
   if (e.kind === "BackupFailed") {
     return backupFailureMessage(e.data.reason);
+  }
+  if (e.kind === "Transcription") {
+    return transcriptionErrorMessage(e.data);
   }
   if (typeof e.data === "string") {
     return e.data;
@@ -54,6 +62,55 @@ function backupFailureMessage(reason: BackupFailureReason): string {
     default: {
       const _exhaustive: never = reason;
       return _exhaustive;
+    }
+  }
+}
+
+/**
+ * Returns a user-friendly string for the inner {@link TranscriptionError}
+ * carried by `CoreError::Transcription`. Exhaustive `switch (e.kind)` with
+ * a TypeScript `never` default — adding a new variant in
+ * `crates/core/src/transcription.rs` without extending this switch becomes
+ * a compile-time error after `just bindings` regenerates `bindings.ts`.
+ *
+ * WHY string-form messages over raw `JSON.stringify(data)`: the discriminant
+ * payloads (e.g. `RateLimited.retry_after_secs`, `FileTooLarge.limit_bytes`)
+ * carry information the user can act on; a generic stringification would bury
+ * the actionable bit in object syntax.
+ */
+function transcriptionErrorMessage(e: TranscriptionError): string {
+  switch (e.kind) {
+    case "Network":
+      return `Network error reaching transcription provider: ${e.data}`;
+    case "Auth":
+      return "Authentication failed — provider rejected the API key. Check the Settings modal.";
+    case "RateLimited":
+      return e.data.retry_after_secs !== null
+        ? `Rate-limited by transcription provider; retry in ${String(e.data.retry_after_secs)}s.`
+        : "Rate-limited by transcription provider; retry shortly.";
+    case "QuotaExceeded":
+      return "Provider quota or billing exhausted. Check the provider's dashboard.";
+    case "ModelNotFound":
+      return `Model "${e.data.model}" not available at backend "${e.data.backend}".`;
+    case "AudioDecode":
+      return `Could not decode audio from source: ${e.data}`;
+    case "FileTooLarge": {
+      // WHY MiB rounded to whole bytes: provider limits are documented in MB
+      // (Groq/OpenAI: 25 MB), not bytes; users compare against that scale.
+      const limitMib = Math.round(e.data.limit_bytes / (1024 * 1024));
+      return `File too large for provider (limit ${String(limitMib)} MiB).`;
+    }
+    case "Cancelled":
+      return "Transcription cancelled.";
+    case "BackendUnavailable":
+      return `Transcription backend unavailable: ${e.data.reason}`;
+    case "QueueFull":
+      return `Transcription queue is full (${String(e.data.queued)} jobs queued); try again shortly.`;
+    case "Internal":
+      return `Internal transcription error: ${e.data}`;
+    default: {
+      const _exhaustive: never = e;
+      return String(_exhaustive);
     }
   }
 }

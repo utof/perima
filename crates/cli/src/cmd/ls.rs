@@ -13,9 +13,7 @@ use std::collections::HashSet;
 use std::io::Write;
 
 use perima_app::{AppContainer, MetadataCommand, MetadataOutput};
-use perima_core::{
-    BlakeHash, CoreError, DeviceId, FileLocationRecord, MediaMetadata, VolumeId, normalize_tag,
-};
+use perima_core::{BlakeHash, CoreError, DeviceId, FileLocationRecord, VolumeId, normalize_tag};
 
 /// Arguments for the ls command.
 #[derive(Debug, Clone)]
@@ -140,14 +138,14 @@ fn apply_volume_filter(
 }
 
 fn apply_metadata_volume_filter(
-    rows: Vec<(FileLocationRecord, Option<MediaMetadata>, Option<String>)>,
+    rows: Vec<perima_core::FileWithMetadataRow>,
     volume: Option<VolumeId>,
-) -> Vec<(FileLocationRecord, Option<MediaMetadata>, Option<String>)> {
+) -> Vec<perima_core::FileWithMetadataRow> {
     match volume {
         None => rows,
         Some(v) => rows
             .into_iter()
-            .filter(|(r, _, _)| r.volume_id == v)
+            .filter(|(r, _, _, _)| r.volume_id == v)
             .collect(),
     }
 }
@@ -169,14 +167,14 @@ fn apply_tag_filter(
 }
 
 fn apply_metadata_tag_filter(
-    rows: Vec<(FileLocationRecord, Option<MediaMetadata>, Option<String>)>,
+    rows: Vec<perima_core::FileWithMetadataRow>,
     filter: Option<&HashSet<BlakeHash>>,
-) -> Vec<(FileLocationRecord, Option<MediaMetadata>, Option<String>)> {
+) -> Vec<perima_core::FileWithMetadataRow> {
     match filter {
         None => rows,
         Some(set) => rows
             .into_iter()
-            .filter(|(r, _, _)| r.hash.is_some_and(|h| set.contains(&h)))
+            .filter(|(r, _, _, _)| r.hash.is_some_and(|h| set.contains(&h)))
             .collect(),
     }
 }
@@ -210,9 +208,7 @@ fn print_table(records: &[FileLocationRecord]) -> Result<(), CoreError> {
 }
 
 /// Render `ls --with-metadata` as a human-readable table.
-fn print_table_with_metadata(
-    rows: &[(FileLocationRecord, Option<MediaMetadata>, Option<String>)],
-) -> Result<(), CoreError> {
+fn print_table_with_metadata(rows: &[perima_core::FileWithMetadataRow]) -> Result<(), CoreError> {
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     writeln!(
@@ -221,7 +217,7 @@ fn print_table_with_metadata(
         "HASH", "SIZE", "VOLUME", "CAPTURED_AT", "DIMS", "CAMERA",
     )
     .map_err(CoreError::from)?;
-    for (r, meta, _quick_hash) in rows {
+    for (r, meta, _quick_hash, _mount_path) in rows {
         let hash_hex = r.hash.map(|h| h.to_hex());
         let hash_short = hash_hex.as_deref().map_or("pending ", |h| &h[..8]);
         let vol_str = r.volume_id.0.to_string();

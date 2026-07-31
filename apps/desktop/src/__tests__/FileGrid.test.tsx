@@ -32,6 +32,7 @@ function makeFile(overrides: Partial<FileWithTagsPayload>): FileWithTagsPayload 
     mime_type: null,
     thumbnail_path: null,
     thumbnail_status: null,
+    absolute_path: "/mnt/test/photos/example.jpg",
     tags: [],
     ...overrides,
   };

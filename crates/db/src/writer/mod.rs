@@ -58,6 +58,7 @@ mod file;
 mod metadata;
 mod search;
 mod tag;
+mod transcript;
 mod volume;
 
 /// Handle returned by [`SqliteWriter::start`].
@@ -274,6 +275,7 @@ fn dispatch(conn: &mut Connection, cmd: WriteCmd, bus: &Arc<dyn EventBus>) {
         WriteCmd::Search(c) => search::handle(conn, c, bus),
         WriteCmd::Cache(c) => cache::handle(conn, c, bus),
         WriteCmd::Backup(cmd) => backup::handle(conn, cmd),
+        WriteCmd::Transcript(c) => transcript::handle(conn, c, bus),
         // WHY unreachable: Shutdown is short-circuited in
         // `run_writer_loop` BEFORE this dispatch is invoked. Reaching
         // here means the loop ordering changed without updating

@@ -31,12 +31,32 @@ perima-db    = { path = "../db" }
 perima-fs    = { path = "../fs" }
 perima-hash  = { path = "../hash" }
 perima-media.workspace = true
+# WHY perima-transcribe + tempfile in desktop: the placeholder
+# MissingFfmpegPipeline (in lib.rs) implements `AudioPipeline` and returns
+# `NamedTempFile`. T7 will swap in the Tauri-resolved sidecar invoker.
+perima-transcribe = { path = "../transcribe" }
+tempfile.workspace          = true
 miette.workspace            = true
 tauri.workspace             = true
 tauri-specta.workspace      = true
 specta.workspace            = true
 specta-typescript.workspace = true
 tauri-plugin-dialog.workspace = true
+# WHY tauri-plugin-shell (T7): exposes `app.shell()` + `app.path().resolve(..)`
+# infrastructure used to locate the bundled ffmpeg sidecar binary. The plugin
+# itself is initialised in `lib.rs::run` BEFORE `.setup(...)` so the plugin
+# state is available inside the setup hook.
+tauri-plugin-shell.workspace  = true
+# WHY which (T7): when the bundled ffmpeg sidecar (T12) hasn't been wired
+# yet, we fall back to the system `ffmpeg` on PATH so transcription stays
+# usable in development builds.
+which.workspace               = true
+# WHY keyring (T7): the new provider-key Tauri commands (`set_provider_key`,
+# `delete_provider_key`, `has_provider_key`, `list_providers`) read/write OS
+# keyring entries under `KEYRING_SERVICE`. Same crate the CLI's `auth`
+# subcommand and the `AppContainer` use; keeping them aligned guarantees a
+# key set by one shell is visible to the other.
+keyring.workspace             = true
 serde.workspace             = true
 serde_json.workspace        = true
 tracing.workspace           = true

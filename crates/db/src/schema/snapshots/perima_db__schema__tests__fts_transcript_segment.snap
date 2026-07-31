@@ -1,0 +1,126 @@
+---
+source: crates/db/src/schema/mod.rs
+expression: "render_for_source(\"transcript_segment\")"
+---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+DROP TRIGGER IF EXISTS transcript_search_after_segment_insert;
+DROP TRIGGER IF EXISTS transcript_search_after_segment_delete;
+DROP TRIGGER IF EXISTS transcript_search_after_segment_update;
+
+
+
+
+
+CREATE TRIGGER transcript_search_after_segment_insert
+AFTER INSERT ON transcript_segment
+BEGIN
+INSERT INTO transcript_search(rowid, text)
+    SELECT NEW.rowid, NEW.text
+    WHERE NEW.deleted_at IS NULL;
+END;
+
+
+CREATE TRIGGER transcript_search_after_segment_delete
+AFTER DELETE ON transcript_segment
+BEGIN
+INSERT INTO transcript_search(transcript_search, rowid, text)
+        VALUES ('delete', OLD.rowid, OLD.text);
+END;
+
+
+CREATE TRIGGER transcript_search_after_segment_update
+AFTER UPDATE ON transcript_segment
+BEGIN
+-- DELETE arm: row became soft-deleted
+    INSERT INTO transcript_search(transcript_search, rowid, text)
+    SELECT 'delete', OLD.rowid, OLD.text
+    WHERE OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL;
+
+    -- RESTORE arm: row went from deleted back to live
+    INSERT INTO transcript_search(rowid, text)
+    SELECT NEW.rowid, NEW.text
+    WHERE OLD.deleted_at IS NOT NULL AND NEW.deleted_at IS NULL;
+
+    -- TEXT-CHANGED arm: row stayed live but text edited
+    INSERT INTO transcript_search(transcript_search, rowid, text)
+    SELECT 'delete', OLD.rowid, OLD.text
+    WHERE OLD.deleted_at IS NULL AND NEW.deleted_at IS NULL AND OLD.text <> NEW.text;
+    INSERT INTO transcript_search(rowid, text)
+    SELECT NEW.rowid, NEW.text
+    WHERE OLD.deleted_at IS NULL AND NEW.deleted_at IS NULL AND OLD.text <> NEW.text;
+END;

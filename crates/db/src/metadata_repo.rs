@@ -252,6 +252,18 @@ impl MetadataRepository for SqliteMetadataRepository {
         // computed). Pre-V012 blake3_hash is NOT NULL (placeholder convention),
         // so `location.hash === null` never fires; equality comparison is the
         // only reliable signal.
+        // WHY join `volume_mounts` via an aggregated subquery: the desktop
+        // frontend needs `mount_path` to compute an absolute path for actions
+        // (e.g. transcribe → ffmpeg) that cannot resolve relative paths
+        // against the volume root. Joining the raw `volume_mounts` table
+        // would multiply rows when a volume has multiple mount records (e.g.
+        // remembered mount points across machines). The `MIN(mount_path)`
+        // subquery picks one deterministically per volume, mirroring the
+        // pattern in `lookup_by_file_uuid_sql`. `None` here means the
+        // volume is not currently mounted on any known machine — the
+        // frontend disables the dependent actions in that case (T9 review
+        // fix). Filter `deleted_at IS NULL` so soft-deleted mount rows do
+        // not surface as live mounts.
         let sql: &str = if vol_filter.is_some() {
             "SELECT f.file_uuid, f.blake3_hash, f.file_size, fl.volume_id, fl.relative_path,
                     fl.status, fl.first_seen,
@@ -259,12 +271,19 @@ impl MetadataRepository for SqliteMetadataRepository {
                     fm.width, fm.height, fm.duration_ms, fm.captured_at,
                     fm.camera_make, fm.camera_model, fm.codec, fm.bitrate_bps,
                     fm.mime_type, fm.thumbnail_path, fm.thumbnail_status,
-                    f.quick_hash
+                    f.quick_hash,
+                    vm.mount_path
              FROM file_locations fl
              JOIN files f ON f.blake3_hash = fl.blake3_hash
              LEFT JOIN file_metadata fm
                ON fm.blake3_hash = fl.blake3_hash
               AND fm.deleted_at IS NULL
+             LEFT JOIN (
+               SELECT volume_id, MIN(mount_path) AS mount_path
+               FROM volume_mounts
+               WHERE deleted_at IS NULL
+               GROUP BY volume_id
+             ) vm ON vm.volume_id = fl.volume_id
              WHERE fl.deleted_at IS NULL AND fl.volume_id = ?1
              ORDER BY fl.relative_path
              LIMIT ?2"
@@ -275,12 +294,19 @@ impl MetadataRepository for SqliteMetadataRepository {
                     fm.width, fm.height, fm.duration_ms, fm.captured_at,
                     fm.camera_make, fm.camera_model, fm.codec, fm.bitrate_bps,
                     fm.mime_type, fm.thumbnail_path, fm.thumbnail_status,
-                    f.quick_hash
+                    f.quick_hash,
+                    vm.mount_path
              FROM file_locations fl
              JOIN files f ON f.blake3_hash = fl.blake3_hash
              LEFT JOIN file_metadata fm
                ON fm.blake3_hash = fl.blake3_hash
               AND fm.deleted_at IS NULL
+             LEFT JOIN (
+               SELECT volume_id, MIN(mount_path) AS mount_path
+               FROM volume_mounts
+               WHERE deleted_at IS NULL
+               GROUP BY volume_id
+             ) vm ON vm.volume_id = fl.volume_id
              WHERE fl.deleted_at IS NULL
              ORDER BY fl.relative_path
              LIMIT ?1"
@@ -316,6 +342,7 @@ impl MetadataRepository for SqliteMetadataRepository {
                 let thumbnail_path: Option<String> = row.get(17)?;
                 let thumbnail_status: Option<String> = row.get(18)?;
                 let quick_hash: Option<String> = row.get(19)?;
+                let mount_path: Option<String> = row.get(20)?;
                 Ok((
                     file_uuid_str,
                     hash_hex,
@@ -337,6 +364,7 @@ impl MetadataRepository for SqliteMetadataRepository {
                     thumbnail_path,
                     thumbnail_status,
                     quick_hash,
+                    mount_path,
                 ))
             })
             .map_err(Error::from)?;
@@ -364,6 +392,7 @@ impl MetadataRepository for SqliteMetadataRepository {
                 thumbnail_path,
                 thumbnail_status,
                 quick_hash,
+                mount_path,
             ) = row.map_err(Error::from)?;
             let file_uuid = crate::file_repo::parse_file_uuid(&file_uuid_str)?;
             let hash = crate::file_repo::parse_optional_hash(hash_hex_opt.as_deref())?;
@@ -414,7 +443,7 @@ impl MetadataRepository for SqliteMetadataRepository {
                 })
             };
 
-            out.push((location, metadata, quick_hash));
+            out.push((location, metadata, quick_hash, mount_path));
         }
         Ok(out)
     }
@@ -678,12 +707,21 @@ mod tests {
 
         // Assert: one row, metadata is None.
         assert_eq!(rows.len(), 1, "expected exactly one (file_loc, meta) pair");
-        let (loc, meta, _quick_hash) = &rows[0];
+        let (loc, meta, _quick_hash, mount_path) = &rows[0];
         assert_eq!(loc.hash, Some(f.hash));
         assert_eq!(loc.relative_path.as_str(), "no_meta.txt");
         assert!(
             meta.is_none(),
             "file without file_metadata row must yield None"
+        );
+        // WHY mount_path is None here: this fixture upserts a file_location
+        // for a fresh `VolumeId::new()` without registering a mount via
+        // `volume_repo::upsert_mount`. The LEFT JOIN therefore yields NULL,
+        // matching the "volume not currently mounted" frontend signal that
+        // gates absolute-path-dependent actions (T9 review fix).
+        assert!(
+            mount_path.is_none(),
+            "no volume_mounts row → mount_path must be None",
         );
     }
 
@@ -715,7 +753,7 @@ mod tests {
 
         // Assert
         assert_eq!(rows.len(), 1);
-        let (loc, got_meta, _quick_hash) = &rows[0];
+        let (loc, got_meta, _quick_hash, _mount_path) = &rows[0];
         assert_eq!(loc.hash, Some(f.hash));
         let got = got_meta
             .as_ref()
@@ -733,6 +771,55 @@ mod tests {
         assert_eq!(
             got, &expected,
             "round-tripped metadata must match (with insert-seeded 'pending')",
+        );
+    }
+
+    /// T9 review fix: rows from a volume with a registered mount must
+    /// surface `mount_path = Some(...)` so the desktop frontend can
+    /// materialise an absolute path. Soft-deleted mount rows must not
+    /// leak through (they would falsely re-enable disabled actions).
+    #[test]
+    fn list_with_metadata_surfaces_mount_path_when_volume_is_mounted() {
+        use crate::volume_repo::SqliteVolumeRepository;
+        use perima_core::VolumeRepository as _;
+
+        let (td, repo, writer) = metadata_repo();
+        let db_path = td.path().join("test.db");
+        let dev = device();
+        let vol = VolumeId::new();
+        let f = sample_hashed_file(b"mounted", "with_mount.txt");
+
+        // Seed file + location.
+        {
+            let seed_reads = ReadPool::open(&db_path).expect("seed pool");
+            let file_repo = SqliteFileRepository::new(writer.sender(), seed_reads);
+            file_repo.upsert_file(&f, dev).expect("upsert file");
+            file_repo
+                .upsert_location(&f.hash, vol, &f.discovered.relative_path, dev)
+                .expect("upsert location");
+        }
+
+        // Register a mount for the volume on this device.
+        {
+            let mount_reads = ReadPool::open(&db_path).expect("mount pool");
+            let vol_repo = SqliteVolumeRepository::new(writer.sender(), mount_reads);
+            vol_repo
+                .record_mount(vol, dev, std::path::Path::new("/mnt/perima-test"))
+                .expect("record_mount");
+        }
+
+        // Act.
+        let rows = repo
+            .list_with_metadata(100, None)
+            .expect("list_with_metadata");
+
+        // Assert: mount_path threaded through.
+        assert_eq!(rows.len(), 1, "expected exactly one row");
+        let (_loc, _meta, _quick_hash, mount_path) = &rows[0];
+        assert_eq!(
+            mount_path.as_deref(),
+            Some("/mnt/perima-test"),
+            "mount_path must reflect the registered volume_mounts row",
         );
     }
 

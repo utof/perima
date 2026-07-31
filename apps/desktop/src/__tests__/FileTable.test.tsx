@@ -9,6 +9,7 @@ const makeEntry = (n: number): FileWithTagsPayload => ({
   // per-fixture so the table doesn't collapse rows on a duplicate key.
   file_uuid: `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`,
   hash: "a".repeat(62) + String(n).padStart(2, "0"),
+  quick_hash: null,
   size: 1024 * n,
   volume_id: "00000000-0000-0000-0000-00000000000" + n,
   relative_path: `/photos/img_${n}.jpg`,
@@ -25,6 +26,7 @@ const makeEntry = (n: number): FileWithTagsPayload => ({
   mime_type: null,
   thumbnail_path: null,
   thumbnail_status: null,
+  absolute_path: `/mnt/test/photos/img_${n}.jpg`,
   tags: [],
 });
 

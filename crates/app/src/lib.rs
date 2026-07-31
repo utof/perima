@@ -37,12 +37,13 @@ pub mod scan;
 pub mod search;
 pub mod tag;
 pub mod telemetry;
+pub mod transcription;
 pub mod volume;
 
 pub use backfill::{BackfillRate, BackfillReport, BackfillRow, QuickHashBackfillWorker};
 pub use backup::{BackupCommand, BackupDatabaseUseCase, BackupOutput};
 pub use bus::Bus;
-pub use container::{AppContainer, AppDeps};
+pub use container::{AppContainer, AppDeps, KEYRING_SERVICE};
 pub use dedup::{ComputeFullHashUseCase, DedupUseCase};
 pub use events::EventHandler;
 pub use metadata::{MetadataCommand, MetadataOutput, MetadataUseCase};
@@ -53,4 +54,5 @@ pub use scan::{
 pub use search::{SearchCommand, SearchOutput, SearchUseCase};
 pub use tag::{FileWithTags, TagCommand, TagFilter, TagOutput, TagUseCase};
 pub use telemetry::LogEventHandler;
+pub use transcription::{TranscribeCommand, TranscribeOutput, TranscriptionUseCase};
 pub use volume::{VolumeCommand, VolumeOutput, VolumeUseCase};

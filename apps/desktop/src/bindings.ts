@@ -87,7 +87,45 @@ export type AppEvent =
         latest_outcome: FullHashOutcome;
       };
     }
-  | { kind: "VerifyComplete"; data: { batch_id: BatchId } };
+  | { kind: "VerifyComplete"; data: { batch_id: BatchId } }
+  // T8 (transcription-v1): 5 channel-only variants emitted by the
+  // transcription worker. Hand-crafted (channel events bypass tauri-specta);
+  // shapes mirror crates/core/src/events.rs::AppEvent::Transcription*.
+  | {
+      kind: "TranscriptionStarted";
+      data: {
+        request_uuid: string;
+        file_uuid: string;
+        file_name: string;
+        queue_size: number;
+      };
+    }
+  | {
+      kind: "TranscriptionProgress";
+      data: {
+        request_uuid: string;
+        processed_ms: number;
+        total_ms: number | null;
+      };
+    }
+  | {
+      kind: "TranscriptionCompleted";
+      data: {
+        request_uuid: string;
+        transcript_id: string;
+        file_uuid: string;
+        segment_count: number;
+        language: string | null;
+      };
+    }
+  | { kind: "TranscriptionCancelled"; data: { request_uuid: string } }
+  | {
+      kind: "TranscriptionFailed";
+      data: {
+        request_uuid: string;
+        error: TranscriptionError;
+      };
+    };
 
 /**
  * Categorical reason an index was invalidated. Inner field of
@@ -149,7 +187,38 @@ export type CoreError =
   | { kind: "Unsupported"; data: string }
   | { kind: "Internal"; data: string }
   | { kind: "FullHashUnavailable"; data: { reason: FullHashUnavailableReason } }
-  | { kind: "BackupFailed"; data: { reason: BackupFailureReason } };
+  | { kind: "BackupFailed"; data: { reason: BackupFailureReason } }
+  /**
+   * Transcription failure (cloud or local STT backend). Inner payload is the
+   * full `TranscriptionError` with its own `kind` discriminant.
+   * Rust: `CoreError::Transcription(#[from] TranscriptionError)`.
+   */
+  | { kind: "Transcription"; data: TranscriptionError };
+
+/**
+ * All transcription-adapter failure modes.
+ *
+ * Rust: `crates/core/src/transcription.rs::TranscriptionError` with
+ * `#[serde(tag = "kind", content = "data")]` and `#[non_exhaustive]`.
+ *
+ * WHY hand-crafted: this enum is a transitive field of
+ * `CoreError::Transcription` and `AppEvent::TranscriptionFailed`. Both surfaces
+ * cross the IPC boundary; `tauri-specta` walks command-return types but not
+ * channel-only types — this enum needs to be in the committed bindings until
+ * tauri-specta gains a registered-events emitter.
+ */
+export type TranscriptionError =
+  | { kind: "Network"; data: string }
+  | { kind: "Auth" }
+  | { kind: "RateLimited"; data: { retry_after_secs: number | null } }
+  | { kind: "QuotaExceeded" }
+  | { kind: "ModelNotFound"; data: { backend: string; model: string } }
+  | { kind: "AudioDecode"; data: string }
+  | { kind: "FileTooLarge"; data: { limit_bytes: number } }
+  | { kind: "Cancelled" }
+  | { kind: "BackendUnavailable"; data: { reason: string } }
+  | { kind: "QueueFull"; data: { queued: number } }
+  | { kind: "Internal"; data: string };
 
 // ── Structs ──────────────────────────────────────────────────────────
 
@@ -281,6 +350,18 @@ export type FileWithMetadataPayload = {
   mime_type: string | null;
   thumbnail_path: string | null;
   thumbnail_status: string | null;
+  /**
+   * Absolute on-disk path joining the volume's current mount root with
+   * `relative_path`. `null` when the volume is not currently mounted on
+   * this machine — UI controls that need an on-disk path (transcribe,
+   * open-file, preview) must be disabled in that case.
+   *
+   * T9 review fix: pre-fix the frontend passed `relative_path` to the
+   * backend `transcribe` command, which forwards untouched to ffmpeg.
+   * ffmpeg resolves relative paths against the desktop process cwd,
+   * producing silent ENOENT in any normal install.
+   */
+  absolute_path: string | null;
 };
 
 /**
@@ -370,4 +451,75 @@ export type BackupOutput = {
   absolute_path: string;
   /** Size in bytes of the freshly written backup file. */
   size_bytes: number;
+};
+
+// ── Transcription types (T7) ─────────────────────────────────────────
+
+/**
+ * Returned by the `transcribe` Tauri command — wire-mirror of
+ * `perima_app::TranscribeOutput::Started`.
+ * Rust: `crates/desktop/src/payloads.rs::TranscribeStartedPayload`.
+ */
+export type TranscribeStartedPayload = {
+  /** Per-request UUIDv7 (lowercase-hex simple form). Pairs with every
+   * `AppEvent::Transcription*` variant for this job. */
+  request_uuid: string;
+  /** 1-based position in the queue at the moment of enqueue. */
+  queue_position: number;
+};
+
+/**
+ * One entry in `ListProvidersPayload.providers`.
+ * Rust: `crates/desktop/src/payloads.rs::ProviderListEntry`.
+ */
+export type ProviderListEntry = {
+  /** Provider name (the `[transcription.providers.<name>]` key). */
+  name: string;
+  /** Preset name (`groq`, `openai`, `custom`, ...). */
+  preset: string;
+  /** Optional model override; null falls back to the preset's default. */
+  model: string | null;
+  /** Whether a keyring entry exists for this provider on this device. */
+  has_key: boolean;
+};
+
+/**
+ * Returned by the `list_providers` Tauri command.
+ * Rust: `crates/desktop/src/payloads.rs::ListProvidersPayload`.
+ */
+export type ListProvidersPayload = {
+  /** Active provider name from `[transcription].active_provider`, or null. */
+  active: string | null;
+  /** One entry per provider in `[transcription.providers.*]`. */
+  providers: ProviderListEntry[];
+};
+
+/**
+ * One provider's TOML entry.
+ * Rust: `perima_app::config::transcription::ProviderEntry`.
+ */
+export type ProviderEntry = {
+  /** Preset name from `KNOWN_PROVIDERS` (`groq`, `openai`, `custom`). */
+  preset: string;
+  /** Optional model override; falls back to the preset's default. */
+  model: string | null;
+  /** Optional `base_url` override (required for `preset = "custom"`). */
+  base_url: string | null;
+  /** Auth scheme override for custom providers. */
+  auth_scheme: string | null;
+};
+
+/**
+ * Top-level transcription config (one TOML table).
+ * Rust: `perima_app::config::transcription::TranscriptionConfig`.
+ *
+ * Lives at `<config_dir>/config.toml` under the `[transcription]` table.
+ * Returned by `get_transcription_config`; accepted by
+ * `update_transcription_config`.
+ */
+export type TranscriptionConfig = {
+  /** Active provider name (must match one of `providers.*` keys). */
+  active_provider: string | null;
+  /** Per-provider configuration table. Empty = no providers wired up yet. */
+  providers: { [key: string]: ProviderEntry };
 };

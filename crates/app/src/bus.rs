@@ -118,5 +118,10 @@ const fn event_kind(e: &AppEvent) -> &'static str {
         AppEvent::IndexInvalidated { .. } => "IndexInvalidated",
         AppEvent::VerifyProgress { .. } => "VerifyProgress",
         AppEvent::VerifyComplete { .. } => "VerifyComplete",
+        AppEvent::TranscriptionStarted { .. } => "TranscriptionStarted",
+        AppEvent::TranscriptionProgress { .. } => "TranscriptionProgress",
+        AppEvent::TranscriptionCompleted { .. } => "TranscriptionCompleted",
+        AppEvent::TranscriptionCancelled { .. } => "TranscriptionCancelled",
+        AppEvent::TranscriptionFailed { .. } => "TranscriptionFailed",
     }
 }

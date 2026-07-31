@@ -48,6 +48,8 @@ pub enum WriteCmd {
     /// WHY no `force` field: existence-check + pre-removal happens in
     /// `BackupDatabaseUseCase::execute`. The writer never sees `force`.
     Backup(BackupWriteCmd),
+    /// Transcript-repo writes (introduced by transcription v1 slice).
+    Transcript(TranscriptWriteCmd),
     /// Cooperative shutdown signal — when the writer thread receives
     /// this it exits its loop. Sent by `SqliteWriterHandle::join` and
     /// the `Drop` impl.
@@ -78,6 +80,7 @@ impl WriteCmd {
             Self::Search(_) => "search",
             Self::Cache(c) => c.kind_str(),
             Self::Backup(_) => "backup",
+            Self::Transcript(_) => "transcript",
             Self::Shutdown => "shutdown",
         }
     }
@@ -457,4 +460,47 @@ pub struct BackupWriteCmd {
     pub target: std::path::PathBuf,
     /// Reply channel; writer sends `Ok(size_bytes)` on success.
     pub reply: flume::Sender<Result<u64, perima_core::CoreError>>,
+}
+
+/// Transcript-repo write commands.
+///
+/// Introduced by the transcription v1 slice. See spec
+/// `docs/superpowers/specs/2026-05-02-transcription-v1-design.md`
+/// § "Writer-cmd handler shape".
+#[derive(Debug)]
+pub enum TranscriptWriteCmd {
+    /// Insert a fully-formed transcript + all segments atomically.
+    ///
+    /// Cancel-aware: if `cancel.is_cancelled()` after `BEGIN IMMEDIATE`
+    /// or before any per-segment INSERT, the writer rolls back without
+    /// writing anything and replies with
+    /// `Err(CoreError::Transcription(TranscriptionError::Cancelled))`.
+    /// This closes the cancel-after-adapter-success window between
+    /// the adapter returning `Ok` and the writer committing.
+    Insert {
+        /// The transcript header row to insert.
+        transcript: crate::transcript_repo::TranscriptRow,
+        /// All segments to insert in the same transaction. Each row's
+        /// `transcript_id` field is overridden by the writer with
+        /// `transcript.id` so callers don't have to plumb it manually.
+        segments: Vec<crate::transcript_repo::TranscriptSegmentRow>,
+        /// Device ID stamped on every row (CRDT discipline).
+        device: String,
+        /// Optional cancel token threaded through from
+        /// `TranscribeRequest`. The writer handler checks this after
+        /// `BEGIN IMMEDIATE` and before each segment INSERT; on fire
+        /// it rolls back and returns `Cancelled`.
+        cancel: Option<tokio_util::sync::CancellationToken>,
+        /// Per-request `UUIDv7` minted by the use-case.
+        ///
+        /// WHY threaded through to the writer: the post-COMMIT
+        /// `AppEvent::TranscriptionCompleted` carries `request_uuid` so the
+        /// frontend can correlate the event back to the in-flight job slot
+        /// it created from `TranscribeOutput::Started`. The writer is the
+        /// only place that knows when persistence succeeded, so it owns
+        /// the emit and therefore must receive `request_uuid` here.
+        request_uuid: String,
+        /// Reply channel for the inserted transcript's UUID.
+        reply: ReplyTx<crate::transcript_repo::TranscriptId>,
+    },
 }

@@ -280,6 +280,43 @@ UPDATE search_content
     {{ refresh_tags_for_holders('OLD.id') }}
 {%- endmacro %}
 
+{# transcript_segment -> transcript_search FTS5 maintenance (transcription v1).
+   The three macros below mirror the V008 deleted_at-aware shape used for
+   search_index, with WHEN gates inlined as SELECT...WHERE inside the body
+   so that ONE AFTER UPDATE trigger covers soft-delete + restore + text-edit.
+   See spec docs/superpowers/specs/2026-05-02-transcription-v1-design.md. #}
+
+{% macro body_transcript_segment_after_insert() -%}
+    INSERT INTO transcript_search(rowid, text)
+    SELECT NEW.rowid, NEW.text
+    WHERE NEW.deleted_at IS NULL;
+{%- endmacro %}
+
+{% macro body_transcript_segment_after_delete() -%}
+    INSERT INTO transcript_search(transcript_search, rowid, text)
+        VALUES ('delete', OLD.rowid, OLD.text);
+{%- endmacro %}
+
+{% macro body_transcript_segment_after_update() -%}
+    -- DELETE arm: row became soft-deleted
+    INSERT INTO transcript_search(transcript_search, rowid, text)
+    SELECT 'delete', OLD.rowid, OLD.text
+    WHERE OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL;
+
+    -- RESTORE arm: row went from deleted back to live
+    INSERT INTO transcript_search(rowid, text)
+    SELECT NEW.rowid, NEW.text
+    WHERE OLD.deleted_at IS NOT NULL AND NEW.deleted_at IS NULL;
+
+    -- TEXT-CHANGED arm: row stayed live but text edited
+    INSERT INTO transcript_search(transcript_search, rowid, text)
+    SELECT 'delete', OLD.rowid, OLD.text
+    WHERE OLD.deleted_at IS NULL AND NEW.deleted_at IS NULL AND OLD.text <> NEW.text;
+    INSERT INTO transcript_search(rowid, text)
+    SELECT NEW.rowid, NEW.text
+    WHERE OLD.deleted_at IS NULL AND NEW.deleted_at IS NULL AND OLD.text <> NEW.text;
+{%- endmacro %}
+
 {# === Prologue: drop legacy + current names (idempotent) =================== #}
 
 {% for name in legacy_trigger_names -%}
@@ -336,6 +373,12 @@ BEGIN
 {{ body_tags_soft_delete_or_restore() }}
 {%- elif agg.body == "TagsDelete" %}
 {{ body_tags_delete() }}
+{%- elif agg.body == "TranscriptSegmentAfterInsert" %}
+{{ body_transcript_segment_after_insert() }}
+{%- elif agg.body == "TranscriptSegmentAfterDelete" %}
+{{ body_transcript_segment_after_delete() }}
+{%- elif agg.body == "TranscriptSegmentAfterUpdate" %}
+{{ body_transcript_segment_after_update() }}
 {%- endif %}
 END;
 

@@ -26,8 +26,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use perima_app::{
-    EventHandler, FullScan, MetadataCommand, MetadataOutput, ScanCommand, ScanReport,
-    SearchCommand, SearchOutput, TagCommand, TagFilter, TagOutput, VolumeCommand, VolumeOutput,
+    EventHandler, FullScan, KEYRING_SERVICE, MetadataCommand, MetadataOutput, ScanCommand,
+    ScanReport, SearchCommand, SearchOutput, TagCommand, TagFilter, TagOutput, TranscribeCommand,
+    TranscribeOutput, VolumeCommand, VolumeOutput, config::transcription::TranscriptionConfig,
 };
 use perima_core::{
     AppEvent, BatchHandle, BatchId, BlakeHash, CollisionGroup, CoreError, DeviceId, EventBus,
@@ -43,7 +44,10 @@ use perima_media::{
 use rayon::prelude::*;
 use tokio_util::sync::CancellationToken;
 
-use crate::payloads::{FileWithMetadataPayload, FileWithTagsPayload};
+use crate::payloads::{
+    FileWithMetadataPayload, FileWithTagsPayload, ListProvidersPayload, ProviderListEntry,
+    TranscribeStartedPayload,
+};
 use crate::state::{AppState, WatcherState};
 
 /// Parses a string into a `VolumeId`, wrapping a `Uuid` parse failure
@@ -536,7 +540,7 @@ pub async fn list_files_with_metadata(
     // `list_files` for maintainability.
     let filtered: Vec<FileWithMetadataPayload> = rows
         .into_iter()
-        .filter(|(loc, _, _)| volume_id.is_none_or(|v| loc.volume_id == v))
+        .filter(|(loc, _, _, _)| volume_id.is_none_or(|v| loc.volume_id == v))
         .map(FileWithMetadataPayload::from)
         .collect();
     Ok(filtered)
@@ -1092,7 +1096,12 @@ pub async fn list_files_with_tags(
     Ok(files
         .into_iter()
         .map(|fwt| FileWithTagsPayload {
-            file: FileWithMetadataPayload::from((fwt.location, fwt.metadata, fwt.quick_hash)),
+            file: FileWithMetadataPayload::from((
+                fwt.location,
+                fwt.metadata,
+                fwt.quick_hash,
+                fwt.mount_path,
+            )),
             tags: fwt.tags,
         })
         .collect())
@@ -1126,15 +1135,15 @@ where
     // surface as the empty Vec below. To attach tags to pending files use the
     // `attach_tag_by_uuid` IPC command.
     let hashes: Vec<perima_core::BlakeHash> =
-        rows.iter().filter_map(|(loc, _, _)| loc.hash).collect();
+        rows.iter().filter_map(|(loc, _, _, _)| loc.hash).collect();
     let tag_map = tag_repo.tags_for_hashes(&hashes)?;
     Ok(rows
         .into_iter()
-        .map(|(loc, meta, quick_hash)| {
+        .map(|(loc, meta, quick_hash, mount_path)| {
             let tags = loc
                 .hash
                 .map_or_else(Vec::new, |h| tag_map.get(&h).cloned().unwrap_or_default());
-            let file = FileWithMetadataPayload::from((loc, meta, quick_hash));
+            let file = FileWithMetadataPayload::from((loc, meta, quick_hash, mount_path));
             FileWithTagsPayload { file, tags }
         })
         .collect())
@@ -1641,4 +1650,302 @@ pub async fn backup_database(
         .backup
         .execute(perima_app::BackupCommand { target, force })
         .await
+}
+
+// ---------------------------------------------------------------------------
+// Transcription commands (T7)
+//
+// All eight handlers return `Result<T, CoreError>` per the Batch D IPC contract
+// (CLAUDE.md). Wire-types crossing IPC derive `specta::Type`; see
+// `crates/desktop/src/payloads.rs` for the wire-type WHY-block.
+//
+// Keyring posture mirrors the CLI `auth` subcommand
+// (`crates/cli/src/cmd/auth.rs`): same `KEYRING_SERVICE` constant, same
+// idempotent-delete semantics, same `NoEntry`-as-success policy on lookups.
+// ---------------------------------------------------------------------------
+
+/// Construct a [`keyring::Entry`] for the given provider, mapping construction
+/// failures to [`CoreError::Internal`]. Mirrors `cli/src/cmd/auth.rs`.
+fn provider_keyring_entry(provider: &str) -> Result<keyring::Entry, CoreError> {
+    keyring::Entry::new(KEYRING_SERVICE, provider)
+        .map_err(|e| CoreError::Internal(format!("keyring entry: {e}")))
+}
+
+/// Start a new transcription job.
+///
+/// Returns immediately with the freshly-minted `request_uuid` and 1-based
+/// queue position; the worker picks up the job asynchronously and publishes
+/// [`perima_core::AppEvent::TranscriptionStarted`] on the shared bus when
+/// it begins (the Tauri channel `"app-event"` carries every `AppEvent`).
+///
+/// `source` is a [`String`] (not `PathBuf`) because Tauri serializes
+/// paths as strings; the handler converts to [`PathBuf`] before invoking
+/// the use-case.
+///
+/// # Errors
+/// Returns [`CoreError::Transcription`] wrapping
+/// [`perima_core::transcription::TranscriptionError::QueueFull`] when the
+/// bounded queue is at capacity; or other [`CoreError`] variants from the
+/// transcription use-case.
+// WHY allow: Tauri owns `State` + `String`/`Option<String>` params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn transcribe(
+    file_uuid: String,
+    file_name: String,
+    source: String,
+    language_hint: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<TranscribeStartedPayload, CoreError> {
+    let out = state
+        .container
+        .transcription
+        .execute(TranscribeCommand::Start {
+            file_uuid,
+            file_name,
+            source: PathBuf::from(source),
+            language_hint,
+        })
+        .await?;
+    // WHY explicit match (not `let TranscribeOutput::Started { .. } = out else
+    // ...`): the `Cancelled` variant must never appear in response to a
+    // `Start` command. Surfacing it as `CoreError::Internal` keeps the IPC
+    // contract typed without widening `TranscribeStartedPayload` to also
+    // model the cancelled case.
+    match out {
+        TranscribeOutput::Started {
+            request_uuid,
+            queue_position,
+        } => Ok(TranscribeStartedPayload {
+            request_uuid,
+            queue_position,
+        }),
+        TranscribeOutput::Cancelled { .. } => Err(CoreError::Internal(
+            "TranscribeCommand::Start returned Cancelled output".into(),
+        )),
+    }
+}
+
+/// Cancel an in-flight or queued transcription job by `request_uuid`.
+///
+/// Idempotent — cancelling an unknown id is a no-op (the use-case removes
+/// the entry from its cancel map and returns Cancelled either way).
+///
+/// # Errors
+/// Returns a [`CoreError`] only if the use-case itself fails; the typical
+/// path returns `Ok(())`.
+// WHY allow: Tauri owns `State` and `String` params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+pub async fn cancel_transcription(
+    request_uuid: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CoreError> {
+    let _ = state
+        .container
+        .transcription
+        .execute(TranscribeCommand::Cancel { request_uuid })
+        .await?;
+    Ok(())
+}
+
+/// Store an API key under the given provider name in the OS keyring under
+/// service [`perima_app::KEYRING_SERVICE`] (`"perima.transcription"`).
+///
+/// Overwrites any existing key for the same provider (matches the CLI
+/// `auth set` semantics).
+///
+/// # Errors
+/// Returns [`CoreError::Internal`] on keyring failures.
+// WHY allow: Tauri owns `State` and `String` params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::unused_async)]
+// WHY allow unused_async: keyring operations are sync, but the Tauri command
+// surface is async-by-convention to match every other handler in this module.
+pub async fn set_provider_key(
+    provider: String,
+    api_key: String,
+    _state: tauri::State<'_, AppState>,
+) -> Result<(), CoreError> {
+    let entry = provider_keyring_entry(&provider)?;
+    entry
+        .set_password(&api_key)
+        .map_err(|e| CoreError::Internal(format!("keyring set: {e}")))
+}
+
+/// Remove the keyring entry for `provider`. Idempotent — returns `Ok(())`
+/// when no entry exists (matches CLI `auth delete`).
+///
+/// # Errors
+/// Returns [`CoreError::Internal`] on keyring failures other than
+/// [`keyring::Error::NoEntry`].
+// WHY allow: Tauri owns `State` and `String` params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::unused_async)]
+pub async fn delete_provider_key(
+    provider: String,
+    _state: tauri::State<'_, AppState>,
+) -> Result<(), CoreError> {
+    let entry = provider_keyring_entry(&provider)?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(CoreError::Internal(format!("keyring delete: {e}"))),
+    }
+}
+
+/// Return `true` if a keyring entry exists for `provider`, `false` otherwise.
+///
+/// # Errors
+/// Returns [`CoreError::Internal`] on keyring failures other than
+/// [`keyring::Error::NoEntry`] (which maps to `Ok(false)`).
+// WHY allow: Tauri owns `State` and `String` params.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::unused_async)]
+pub async fn has_provider_key(
+    provider: String,
+    _state: tauri::State<'_, AppState>,
+) -> Result<bool, CoreError> {
+    let entry = provider_keyring_entry(&provider)?;
+    match entry.get_password() {
+        Ok(_) => Ok(true),
+        Err(keyring::Error::NoEntry) => Ok(false),
+        Err(e) => Err(CoreError::Internal(format!("keyring get: {e}"))),
+    }
+}
+
+/// List every configured transcription provider with its preset, optional
+/// model override, and a `has_key` flag computed via a per-provider keyring
+/// lookup.
+///
+/// `active` echoes [`TranscriptionConfig::active_provider`].
+///
+/// # Errors
+/// Returns [`CoreError::Internal`] when [`TranscriptionConfig::load`] fails
+/// (malformed `config.toml`).
+///
+/// # Panics
+/// Panics only on logic-bug paths inside the `HashMap::get(name)` lookup
+/// — `name` was just enumerated from `cfg.providers.keys()`, so the entry
+/// must exist. Treated as an unrecoverable bug if it ever fires.
+// WHY allow: Tauri owns `State`.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::unused_async)]
+pub async fn list_providers(
+    state: tauri::State<'_, AppState>,
+) -> Result<ListProvidersPayload, CoreError> {
+    // WHY load via state.data_dir.parent(): config_dir is not on AppState; the
+    // Tauri shell stores it implicitly via `resolve_with_app_data_dir` —
+    // `data_dir` lives at `<config_dir>/perima/`, so config_dir is its
+    // parent. This avoids widening AppState mid-task.
+    let config_dir = state
+        .data_dir
+        .parent()
+        .ok_or_else(|| CoreError::Internal("data_dir has no parent (config_dir)".into()))?;
+    let cfg = TranscriptionConfig::load(config_dir)?;
+
+    // Sort provider names for deterministic output (matches CLI `auth list`).
+    let mut names: Vec<&String> = cfg.providers.keys().collect();
+    names.sort();
+
+    let providers = names
+        .into_iter()
+        .map(|name| {
+            let entry = cfg.providers.get(name).expect("name was just enumerated");
+            // WHY treat construction failure as "no key": surfacing the
+            // raw keyring error here would block the whole settings
+            // panel; the user's recovery path is to set the key
+            // (which goes through `set_provider_key` and surfaces its
+            // own error if construction fails again). Log the
+            // construction failure so a system-keyring outage is
+            // diagnosable without piecing together other commands' errors.
+            let has_key = match provider_keyring_entry(name) {
+                Ok(entry) => entry.get_password().is_ok(),
+                Err(e) => {
+                    tracing::warn!(provider = %name, error = %e, "keyring entry construction failed in list_providers; reporting has_key=false");
+                    false
+                }
+            };
+            ProviderListEntry {
+                name: name.clone(),
+                preset: entry.preset.clone(),
+                model: entry.model.clone(),
+                has_key,
+            }
+        })
+        .collect();
+
+    Ok(ListProvidersPayload {
+        active: cfg.active_provider,
+        providers,
+    })
+}
+
+/// Persist `config` to `<config_dir>/config.toml` via [`TranscriptionConfig::save`].
+///
+/// **Hot reload not implemented in T7.** Rebuilding the active
+/// [`perima_app::TranscriptionUseCase`] in-place would require swapping the
+/// `Arc<TranscriptionUseCase>` field on `AppContainer` (which is currently
+/// immutable after construction) and gracefully draining the existing worker
+/// task. That refactor is deferred — for now we save the file and emit a
+/// `tracing::warn!` instructing the user to relaunch the app for the new
+/// provider config to take effect. The frontend should surface a banner with
+/// the same message.
+///
+/// # Errors
+/// Returns [`CoreError::Internal`] on filesystem or TOML serialization
+/// failures.
+// WHY allow: Tauri owns `State` and the value-param `config`.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::unused_async)]
+pub async fn update_transcription_config(
+    config: TranscriptionConfig,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CoreError> {
+    let config_dir = state
+        .data_dir
+        .parent()
+        .ok_or_else(|| CoreError::Internal("data_dir has no parent (config_dir)".into()))?;
+    // WHY sync I/O on a Tauri worker thread (no spawn_blocking): TOML
+    // serialize + write of a tiny config file (<2 KiB) completes in
+    // sub-ms on every realistic disk; the runtime cost of spawn_blocking
+    // (thread handoff + cache miss) would dwarf the I/O it dispatches.
+    config.save(config_dir)?;
+    tracing::warn!(
+        "transcription config updated; restart perima for the new provider \
+         configuration to take effect"
+    );
+    Ok(())
+}
+
+/// Read the current [`TranscriptionConfig`] from `<config_dir>/config.toml`.
+/// Returns the default (no providers, no active) when the file is missing.
+///
+/// # Errors
+/// Returns [`CoreError::Internal`] when the config file exists but is
+/// malformed TOML.
+// WHY allow: Tauri owns `State`.
+#[allow(clippy::needless_pass_by_value)]
+#[tauri::command]
+#[specta::specta]
+#[allow(clippy::unused_async)]
+pub async fn get_transcription_config(
+    state: tauri::State<'_, AppState>,
+) -> Result<TranscriptionConfig, CoreError> {
+    let config_dir = state
+        .data_dir
+        .parent()
+        .ok_or_else(|| CoreError::Internal("data_dir has no parent (config_dir)".into()))?;
+    TranscriptionConfig::load(config_dir)
 }

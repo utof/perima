@@ -8,5 +8,15 @@
 // below makes the intent explicit.
 #![allow(missing_docs)]
 fn main() {
+    // WHY: forward cargo's TARGET env var (e.g. "x86_64-unknown-linux-gnu")
+    // into the compiled binary so the runtime can resolve the bundled
+    // ffmpeg sidecar at the path Tauri's `externalBin` rewriter actually
+    // uses (`binaries/ffmpeg-{target-triple}`). std::env::consts::ARCH
+    // gives only the architecture ("x86_64"), which would never match the
+    // sidecar filename and silently break the T12 bundling story.
+    println!(
+        "cargo:rustc-env=TARGET={}",
+        std::env::var("TARGET").expect("cargo always sets TARGET for build scripts")
+    );
     tauri_build::build();
 }

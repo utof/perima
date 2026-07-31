@@ -40,6 +40,7 @@ use perima_fs::WalkdirScanner;
 use perima_hash::Blake3Service;
 use perima_media::ThumbnailGenerator;
 use tauri::Manager;
+use tauri::path::BaseDirectory;
 use tauri_specta::{Builder, collect_commands};
 
 use crate::commands::DbEventHandler;
@@ -57,6 +58,23 @@ struct LocalNoopBus;
 impl EventBus for LocalNoopBus {
     fn emit(&self, _: &perima_core::AppEvent) -> Result<(), perima_core::CoreError> {
         Ok(())
+    }
+}
+
+/// Stub `AudioPipeline` used until T7 wires the Tauri-resolved bundled
+/// ffmpeg sidecar. Surfaces a typed `BinaryNotFound` only if a transcription
+/// job actually runs; non-transcription handlers proceed normally.
+struct MissingFfmpegPipeline;
+
+impl perima_transcribe::audio::AudioPipeline for MissingFfmpegPipeline {
+    fn remux_for_upload(
+        &self,
+        _input: &Path,
+        _cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<tempfile::NamedTempFile, perima_transcribe::audio::AudioError> {
+        Err(perima_transcribe::audio::AudioError::BinaryNotFound(
+            "bundled ffmpeg sidecar not yet wired (T7); transcription will be available in a later release".to_owned(),
+        ))
     }
 }
 
@@ -90,6 +108,12 @@ pub type RunError = Box<dyn std::error::Error + Send + Sync>;
 /// export fails when the `specta-export` feature is enabled, or if the Tauri
 /// event loop exits with an error. No panic paths remain; all previously
 /// `.expect()`-ed sites now propagate via `?`.
+// WHY allow too_many_lines: `run()` is the single Tauri startup-sequence
+// function; splitting it would require threading half a dozen locals
+// (specta_builder, log_guard, app_handle) through helper signatures with
+// no real readability gain. The 100-line cap was crossed by T7's audio
+// pipeline + container-bus refactor; tracked as cosmetic, not structural.
+#[allow(clippy::too_many_lines)]
 pub fn run() -> Result<(), RunError> {
     // WHY: tauri-specta Builder collects #[specta::specta]-annotated commands
     // and generates TypeScript bindings when the `specta-export` feature is
@@ -118,6 +142,15 @@ pub fn run() -> Result<(), RunError> {
         commands::list_quick_hash_collisions,
         commands::mark_verified_distinct,
         commands::backup_database,
+        // T7: transcription commands.
+        commands::transcribe,
+        commands::cancel_transcription,
+        commands::set_provider_key,
+        commands::delete_provider_key,
+        commands::has_provider_key,
+        commands::list_providers,
+        commands::update_transcription_config,
+        commands::get_transcription_config,
     ]);
 
     // Export TypeScript bindings when the `specta-export` feature is
@@ -140,6 +173,14 @@ pub fn run() -> Result<(), RunError> {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // WHY tauri-plugin-shell init BEFORE .setup(...) (T7): the plugin
+        // wires the `app.shell()` extension trait + `app.path().resolve(...)`
+        // helpers used by the ffmpeg sidecar path discovery inside `.setup`.
+        // Initialising it after `.setup` would leave `app.shell()` unresolved
+        // at the moment we need it. Future T12 (sidecar bundling) consumes
+        // the same plugin to actually launch the sidecar binary; T7 only
+        // resolves the path.
+        .plugin(tauri_plugin_shell::init())
         .manage(state::WatcherState::new())
         .invoke_handler(specta_builder.invoke_handler())
         .setup(move |app| {
@@ -184,6 +225,19 @@ pub fn run() -> Result<(), RunError> {
             // (DbEventHandler) and for build_container (primary writer).
             let db_path = cfg.data_dir.join("perima.db");
 
+            // WHY resolve ffmpeg sidecar path here (T7): the audio pipeline
+            // adapter constructor requires a `PathBuf`. We try the bundled
+            // sidecar first (`app.path().resolve("ffmpeg-{target-triple}",
+            // BaseDirectory::Resource)`); if T12 hasn't bundled the sidecar
+            // yet (Resource path missing/inaccessible) we fall back to
+            // PATH-discovered system ffmpeg via `which::which`. Either way
+            // the resolved `PathBuf` is wrapped in
+            // `DesktopFfmpegInvoker` + `FfmpegAudioPipeline`. If both fail,
+            // we install the deferred-error `MissingFfmpegPipeline` so
+            // non-transcription commands continue working and only
+            // `transcribe` surfaces `BinaryNotFound` to the UI.
+            let audio_pipeline = resolve_audio_pipeline(app.handle());
+
             // WHY build the AppContainer here, not per-command: a single
             // container is reused across every Tauri command dispatch via
             // `manage(state)`. CLI builds one per dispatch (short-lived
@@ -226,8 +280,13 @@ pub fn run() -> Result<(), RunError> {
                 }),
             ];
 
-            let (container, writer_handle, tag_repo, metadata_repo, search_repo) =
-                build_container(&db_path, handlers)?;
+            let (container, writer_handle, tag_repo, metadata_repo, search_repo) = build_container(
+                &db_path,
+                &cfg.config_dir,
+                cfg.device_id,
+                handlers,
+                audio_pipeline,
+            )?;
 
             // WHY `manage(writer_handle)`: the writer thread stays
             // alive as long as at least one `flume::Sender<WriteCmd>`
@@ -346,16 +405,27 @@ fn spawn_backfill_desktop(
 /// retains concrete-typed `Arc`s for the `_inner` test-helper seam — those
 /// helpers construct their own repos per-call and need the concrete type for
 /// methods not exposed by the trait object.
+///
+/// WHY [`AppContainer::new_with_bus`] (T7): the writer actor must publish to
+/// the SAME [`perima_app::Bus`] that the use-cases publish to, otherwise
+/// `AppEvent::TranscriptionCompleted` (writer-side, post-COMMIT) never reaches
+/// the [`crate::events::TauriEventHandler`] and the frontend's settle-state
+/// callback for a transcription job never fires. Mirrors the
+/// `crates/cli/src/main.rs::build_container` posture.
 fn build_container(
     db_path: &Path,
+    config_dir: &Path,
+    device_id: perima_core::DeviceId,
     handlers: Vec<Box<dyn EventHandler>>,
+    audio_pipeline: Arc<dyn perima_transcribe::audio::AudioPipeline>,
 ) -> Result<BuildContainerOutput, perima_core::CoreError> {
-    // WHY a `NoopBus` to the writer: the writer's after-COMMIT emission
-    // path is scaffolded but `AppEvent` emission is handled by
-    // `AppContainer`'s `Bus` (Batch E). Batch E's `async-broadcast`
-    // will re-plumb this once the single-construction-site invariant is
-    // relaxed. Spec §§3.3 + 4.8 (A4.8 first bullet).
-    let writer_bus: Arc<dyn EventBus> = Arc::new(LocalNoopBus);
+    // WHY construct the Bus here (not inside AppContainer::new): the writer
+    // actor needs the SAME bus the use-cases publish to. T6 introduced
+    // `AppContainer::new_with_bus` for this — the bus stays the single
+    // construction site per process; the construction site simply moves
+    // from inside `AppContainer::new` into the shell.
+    let bus = perima_app::Bus::new();
+    let writer_bus: Arc<dyn EventBus> = bus.clone();
     let writer = SqliteWriter::start(db_path, writer_bus)?;
     let reads = ReadPool::open(db_path)?;
 
@@ -406,6 +476,11 @@ fn build_container(
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
 
+    // Transcript repo for the transcription use-case.
+    let transcript_repo: Arc<perima_db::SqliteTranscriptRepository> = Arc::new(
+        perima_db::SqliteTranscriptRepository::new(writer.sender(), ReadPool::open(db_path)?),
+    );
+
     let deps = AppDeps {
         admin,
         data_dir,
@@ -418,13 +493,80 @@ fn build_container(
         hasher,
         scanner,
         thumbnailer,
+        transcript_repo,
+        audio_pipeline,
+        config_dir: config_dir.to_path_buf(),
+        device_id,
     };
 
     Ok((
-        AppContainer::new(deps, handlers),
+        AppContainer::new_with_bus(deps, handlers, bus),
         writer,
         tag_repo,
         metadata_repo,
         search_repo,
     ))
+}
+
+/// Resolve the audio pipeline used by the transcription use-case.
+///
+/// T7 wiring strategy: try the Tauri-bundled ffmpeg sidecar first
+/// (`app.path().resolve("ffmpeg-{target-triple}", BaseDirectory::Resource)`),
+/// fall back to PATH-discovered system ffmpeg via [`which::which`], and last
+/// of all wire the deferred-error [`MissingFfmpegPipeline`] so non-transcription
+/// commands stay functional. Logging discriminates the three branches so the
+/// install state is obvious from `tracing` output.
+///
+/// WHY this layered fallback (rather than bundled-only): T12 has not yet
+/// landed the per-platform binary copy step, so a release build today has no
+/// `ffmpeg-{target-triple}` resource. Falling back to system PATH keeps the
+/// transcription pipeline usable in development + on machines where the user
+/// has installed ffmpeg via apt/brew/winget, while bundled builds (post-T12)
+/// transparently prefer the sidecar.
+fn resolve_audio_pipeline(
+    app: &tauri::AppHandle,
+) -> Arc<dyn perima_transcribe::audio::AudioPipeline> {
+    // WHY the resource literal name: `tauri build` rewrites
+    // `bundle.externalBin = ["binaries/ffmpeg"]` to per-target resource files
+    // named `ffmpeg-{target-triple}` (e.g. `ffmpeg-x86_64-unknown-linux-gnu`).
+    // T12 will land the actual binaries; T7 only resolves the path so the
+    // wiring is in place when those binaries appear. TARGET is captured at
+    // build time by build.rs (see WHY there) — std::env::consts::ARCH would
+    // give only "x86_64" and never match the sidecar filename.
+    let target_triple = env!("TARGET");
+    let bundled_name = format!("binaries/ffmpeg-{target_triple}");
+    if let Ok(bundled_path) = app.path().resolve(&bundled_name, BaseDirectory::Resource)
+        && bundled_path.exists()
+    {
+        tracing::info!(
+            path = %bundled_path.display(),
+            "using Tauri-bundled ffmpeg sidecar",
+        );
+        return Arc::new(perima_transcribe::audio::FfmpegAudioPipeline::new(
+            Arc::new(perima_transcribe::audio::DesktopFfmpegInvoker::new(
+                bundled_path,
+            )),
+        ));
+    }
+    match which::which("ffmpeg") {
+        Ok(system_path) => {
+            tracing::info!(
+                path = %system_path.display(),
+                "ffmpeg sidecar not bundled (T12 pending); falling back to system ffmpeg on PATH",
+            );
+            Arc::new(perima_transcribe::audio::FfmpegAudioPipeline::new(
+                Arc::new(perima_transcribe::audio::DesktopFfmpegInvoker::new(
+                    system_path,
+                )),
+            ))
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "no bundled ffmpeg sidecar AND no system ffmpeg on PATH; \
+                 transcription will fail with BinaryNotFound until one is provided",
+            );
+            Arc::new(MissingFfmpegPipeline)
+        }
+    }
 }

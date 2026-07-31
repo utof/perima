@@ -100,6 +100,24 @@ jobs:
             librsvg2-dev \
             patchelf
 
+      # WHY (T12): tauri-build validates `bundle.externalBin` paths
+      # during EVERY cargo compile of `perima-desktop` (not just
+      # `tauri build` — issue tauri-apps/tauri#14602). With
+      # `externalBin = ["binaries/ffmpeg"]` declared in tauri.conf.json,
+      # `cargo {build,clippy,test} -p perima-desktop` fails immediately
+      # without `crates/desktop/binaries/ffmpeg-{target-triple}` on
+      # disk. The fetch script downloads a pinned static build on Linux
+      # (johnvansickle.com release-amd64-static) and writes a
+      # zero-byte stub on macOS+Windows so the compile passes; runtime
+      # transcription on those platforms surfaces a clear
+      # `BinaryNotFound` until the T12-followup macOS+Windows fetchers
+      # land. The script is idempotent (skips download if the binary is
+      # already present) so Swatinem/rust-cache hits don't redo work.
+      # MUST run BEFORE `just ci` — otherwise tauri-build aborts.
+      - name: Fetch ffmpeg sidecar
+        shell: bash
+        run: just sidecar
+
       - name: Run just ci
         shell: bash
         run: just ci
@@ -128,6 +146,13 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             patchelf
+
+      # WHY (T12): same rationale as the matrix job's sidecar fetch —
+      # `just bindings` runs `cargo build -p perima-desktop --features
+      # specta-export`, which compiles tauri-build, which validates the
+      # externalBin path. Must run before `just bindings`.
+      - name: Fetch ffmpeg sidecar
+        run: just sidecar
 
       # WHY: regenerate bindings.ts via the specta-export feature and
       # fail the job if `git diff` shows the committed copy is stale.
