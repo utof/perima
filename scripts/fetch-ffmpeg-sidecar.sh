@@ -47,9 +47,24 @@ case "$(uname -s)" in
       echo "ffmpeg sidecar already present at $out_path; skipping fetch."
       exit 0
     fi
-    # WHY johnvansickle release-amd64-static: well-known stable static
-    # build, no glibc dependency surprises across Ubuntu releases.
-    url="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+    # WHY a mirror list rather than one URL: johnvansickle.com is a
+    # single small host, and CI hits it 4x per run (3-platform matrix +
+    # bindings-drift). Observed 2026-08-01, in escalating severity
+    # within one hour: first a rate-limit page served with HTTP 200
+    # (see the size gate below), then outright connection timeouts —
+    # `curl: (28) Failed to connect ... after 30002 ms`. Retrying cannot
+    # fix a host that has stopped accepting the connection, so the fetch
+    # needs a second source that does not throttle GitHub Actions egress.
+    #
+    # Order: johnvansickle first (41 MB, smallest download), then BtbN's
+    # FFmpeg-Builds on GitHub Releases (127 MB, served from GitHub's own
+    # CDN — the one host Actions runners can always reach). Both are GPL
+    # static builds, so this is a like-for-like fallback with no change
+    # to the licensing posture of what gets bundled.
+    urls=(
+      "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+      "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+    )
     tmp_dir="$(mktemp -d)"
     trap 'rm -rf "$tmp_dir"' EXIT
     archive="$tmp_dir/ffmpeg.tar.xz"
@@ -67,45 +82,63 @@ case "$(uname -s)" in
     # bindings-drift got a 0.3-second "download" minutes later.
     # So: validate the payload ourselves, and treat a too-small body as a
     # retryable condition.
-    min_bytes=10000000   # real tarball is ~41 MB; anything smaller is a server message
-    max_attempts=5
-    attempt=1
-    while true; do
-      echo "Downloading ffmpeg static build from $url (attempt $attempt/$max_attempts) ..."
-      # `|| true` so a curl-level failure falls through to the same
-      # size check + backoff path rather than tripping `set -e`.
-      curl --fail --location --silent --show-error \
-        --connect-timeout 30 --output "$archive" "$url" || true
+    min_bytes=10000000   # smallest real tarball is ~41 MB; less is a server message
+    attempts_per_url=3
+    fetched=0
 
-      archive_bytes=0
-      [[ -f "$archive" ]] && archive_bytes="$(wc -c < "$archive")"
+    for url in "${urls[@]}"; do
+      attempt=1
+      while (( attempt <= attempts_per_url )); do
+        echo "Downloading ffmpeg from $url (attempt $attempt/$attempts_per_url) ..."
+        rm -f "$archive"
+        # `|| true` so a curl-level failure (connect timeout, 4xx) falls
+        # through to the same size check + backoff path instead of
+        # tripping `set -e` and skipping the remaining mirrors.
+        curl --fail --location --silent --show-error \
+          --connect-timeout 20 --max-time 600 --output "$archive" "$url" || true
 
-      if (( archive_bytes >= min_bytes )); then
+        archive_bytes=0
+        [[ -f "$archive" ]] && archive_bytes="$(wc -c < "$archive")"
+
+        if (( archive_bytes >= min_bytes )); then
+          fetched=1
+          break
+        fi
+
+        echo "WARNING: got ${archive_bytes} bytes, expected >= ${min_bytes}." >&2
+        if [[ -s "$archive" ]]; then
+          echo "         First bytes of the response:" >&2
+          head -c 200 "$archive" >&2 || true
+          echo >&2
+        fi
+
+        backoff=$(( attempt * 5 ))
+        echo "         Retrying in ${backoff}s ..." >&2
+        sleep "$backoff"
+        attempt=$(( attempt + 1 ))
+      done
+
+      # WHY `if` and not `(( fetched )) && break`: under `set -e` an
+      # AND-list whose first command fails takes down the script.
+      if (( fetched )); then
         break
       fi
-
-      echo "WARNING: got ${archive_bytes} bytes, expected >= ${min_bytes}." >&2
-      if [[ -s "$archive" ]]; then
-        echo "         First bytes of the response:" >&2
-        head -c 200 "$archive" >&2 || true
-        echo >&2
-      fi
-
-      if (( attempt >= max_attempts )); then
-        echo "ERROR: $url did not serve the tarball after $max_attempts attempts." >&2
-        echo "       Most likely rate-limited. See GH #183 (sha256-pin + mirror)." >&2
-        exit 1
-      fi
-
-      backoff=$(( attempt * 10 ))
-      echo "         Retrying in ${backoff}s ..." >&2
-      sleep "$backoff"
-      attempt=$(( attempt + 1 ))
+      echo "NOTICE: $url exhausted; falling through to the next mirror." >&2
     done
+
+    if (( ! fetched )); then
+      echo "ERROR: no mirror served the ffmpeg tarball." >&2
+      echo "       Tried: ${urls[*]}" >&2
+      echo "       See GH #183 (sha256-pin + mirror consolidation)." >&2
+      exit 1
+    fi
 
     echo "Extracting ($archive_bytes bytes) ..."
     tar -xJf "$archive" -C "$tmp_dir"
-    extracted_bin="$(find "$tmp_dir" -maxdepth 2 -type f -name ffmpeg | head -n1)"
+    # WHY maxdepth 4: the mirrors nest differently — johnvansickle
+    # unpacks to <dir>/ffmpeg (depth 2), BtbN to <dir>/bin/ffmpeg
+    # (depth 3). A depth-2 search silently finds nothing on BtbN.
+    extracted_bin="$(find "$tmp_dir" -maxdepth 4 -type f -name ffmpeg | head -n1)"
     if [[ -z "$extracted_bin" ]]; then
       echo "ERROR: could not find ffmpeg binary in extracted tarball" >&2
       exit 1
