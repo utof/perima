@@ -26,6 +26,15 @@ cognitive_complexity = "warn"
 too_many_lines = "warn"
 excessive_nesting = "warn"
 module_name_repetitions = "allow"
+# WHY allow: `doc_markdown` demands backticks around any mixed-case token it
+# mistakes for an identifier — "OpenAI", "JavaScript", "GitHub", product names,
+# vendor names. It fires constantly on ordinary English prose in doc comments,
+# every fire is a pure-churn edit with no correctness value, and clippy's
+# default `doc-valid-idents` allowlist can't keep up with the proper nouns this
+# codebase actually uses. Real doc-quality enforcement lives in
+# `rustdoc::broken_intra_doc_links` (deny) + `missing_docs` (deny), which catch
+# links and coverage — the things that actually break readers.
+doc_markdown = "allow"
 missing_errors_doc = "warn"
 # --- Restriction lints (wave 1, 2026-04-20) ---
 # Zero fires on HEAD; pure forward-insurance against AI-slop patterns.
