@@ -29,6 +29,16 @@ test:
 no-cargo-test:
     ./scripts/no-cargo-test.sh
 
+# Every tracked shell script must be mode 100755 in the git INDEX. A 100644
+# script is invisible on clones with core.fileMode=false and only surfaces as
+# "permission denied" on a runner. See scripts/check-exec-bits.sh + GH #183.
+#
+# WHY `sh scripts/...` and not `./scripts/...` like no-cargo-test above: this
+# is the one script whose own exec bit must not gate it, or a missing bit on
+# the checker produces the same bare "permission denied" it exists to explain.
+exec-bits:
+    sh scripts/check-exec-bits.sh
+
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
@@ -79,11 +89,11 @@ typos:
     typos
 
 # Thin gate — per-commit surface (matches lefthook pre-commit).
-ci-fast: fmt-check typos lint-frontend
+ci-fast: fmt-check typos exec-bits lint-frontend
 
 # Thick gate — pre-push + manual surface. Equivalent to old `ci`;
 # kept for back-compat so `just ci` still runs the full pipeline.
-ci: fmt-check clippy test no-cargo-test doctest docs-coverage deny typos build-frontend test-frontend lint-frontend
+ci: fmt-check clippy test no-cargo-test exec-bits doctest docs-coverage deny typos build-frontend test-frontend lint-frontend
 
 verify:
     @if command -v cargo-kani >/dev/null 2>&1; then \
