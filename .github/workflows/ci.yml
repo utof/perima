@@ -10,6 +10,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # WHY a standalone job with no toolchain: this guards scripts that CI
+  # invokes directly (`just sidecar` -> `./scripts/fetch-ffmpeg-sidecar.sh`).
+  # A script committed non-executable fails with "permission denied" — but
+  # only after the matrix job has already paid for toolchain install and
+  # Tauri system deps. Checking it in a bare checkout fails in seconds.
+  #
+  # WHY duplicated from the lefthook pre-commit hook: lefthook is opt-in
+  # per clone (`just install-hooks`) and `LEFTHOOK=0` bypasses it, so the
+  # hook alone does not cover contributors or bypassed commits.
+  exec-bits:
+    name: shell scripts executable
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # WHY `sh scripts/...` and not `./scripts/...`: this is the one
+      # script whose own exec bit must not gate it. Invoking it through
+      # the interpreter means a missing bit on the checker itself still
+      # produces the explanatory message below instead of the bare
+      # "permission denied" this job exists to eliminate.
+      - run: sh scripts/check-exec-bits.sh
+
   build:
     name: just ci (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -106,8 +128,11 @@ jobs:
       # `externalBin = ["binaries/ffmpeg"]` declared in tauri.conf.json,
       # `cargo {build,clippy,test} -p perima-desktop` fails immediately
       # without `crates/desktop/binaries/ffmpeg-{target-triple}` on
-      # disk. The fetch script downloads a pinned static build on Linux
-      # (johnvansickle.com release-amd64-static) and writes a
+      # disk. The fetch script downloads a version-locked static build on
+      # Linux (johnvansickle.com 7.0.2-amd64-static, verified against a
+      # hardcoded sha256 before extraction — the binary runs at compile
+      # time, so an unverified mirror is RCE during `cargo build`; see
+      # GH #183) and writes a
       # zero-byte stub on macOS+Windows so the compile passes; runtime
       # transcription on those platforms surfaces a clear
       # `BinaryNotFound` until the T12-followup macOS+Windows fetchers

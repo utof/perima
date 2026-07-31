@@ -41,6 +41,29 @@ pre-commit:
       root: apps/desktop
       glob: "*.{ts,tsx,js,jsx}"
       run: bun run lint
+    exec-bits:
+      # WHY glob: a 100644 shell script can only enter the index via a
+      # commit that stages a shell script, so gating on that extension
+      # catches every introduction path at zero cost on other commits.
+      # Globs are calculated from the repo root, so this covers scripts
+      # anywhere — scripts/, .github/, or elsewhere.
+      #
+      # WHY the script then checks the whole index rather than just the
+      # staged paths: it is the same single `git ls-files` either way, and
+      # the wider check also catches drift that predates this hook.
+      #
+      # WHY this needs a hook at all — the failure is invisible locally:
+      # clones with `core.fileMode = false` ignore the on-disk permission
+      # bit, so the script looks executable, `ls -l` agrees, and it still
+      # lands as 100644. It only surfaces as "permission denied" on a CI
+      # runner. See scripts/check-exec-bits.sh.
+      #
+      # WHY `sh scripts/...` and not `./scripts/...` like no-cargo-test:
+      # this is the one script whose own exec bit must not gate it, or a
+      # missing bit on the checker yields the same bare "permission
+      # denied" it exists to explain. It still checks itself.
+      glob: "*.{sh,bash}"
+      run: sh scripts/check-exec-bits.sh
 
 pre-push:
   # WHY parallel:false — steps share the incremental compile cache;
