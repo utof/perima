@@ -82,6 +82,23 @@ bindings:
 sidecar:
     ./scripts/fetch-ffmpeg-sidecar.sh
 
+# WHY `cd crates/desktop`: the Tauri CLI resolves tauri.conf.json relative
+# to its own cwd, and this repo keeps that file in crates/desktop rather
+# than the conventional src-tauri/. Running it from anywhere else fails
+# with a config-not-found error.
+#
+# WHY the node_modules path rather than a bare `tauri`: @tauri-apps/cli is
+# a devDependency of apps/desktop, so the binary is never on PATH. The
+# relative form is safe here because just always runs recipes from the
+# justfile's directory regardless of the caller's cwd — which is exactly
+# the trap when typing this by hand from a subdirectory.
+#
+# The vite dev server starts itself via `beforeDevCommand` in
+# tauri.conf.json, so this is the only command needed.
+# Launch the desktop app in dev mode (vite + Tauri).
+dev:
+    cd crates/desktop && ../../apps/desktop/node_modules/.bin/tauri dev
+
 deny:
     cargo deny check
 
