@@ -95,8 +95,28 @@ sidecar:
 #
 # The vite dev server starts itself via `beforeDevCommand` in
 # tauri.conf.json, so this is the only command needed.
+#
+# WHY the pkill first: `beforeDevCommand` runs with `"wait": false`, so
+# Tauri spawns `bun run dev` and does not reap it. `bun` in turn spawns
+# `vite` as a grandchild, which survives Tauri's exit still holding port
+# 5173 — and because `devUrl` pins that exact port, the NEXT `just dev`
+# dies with "Port 5173 is already in use" rather than reusing or moving.
+# The pattern is the repo-local vite binary path, so this cannot touch a
+# dev server belonging to another project on the same machine.
+#
+# WHY the leading `-`: just aborts a recipe on the first non-zero exit,
+# and pkill exits 1 when it matches nothing — which is the common case.
+#
+# WHY `[v]ite` and not `vite`: `pkill -f` matches against the FULL command
+# line of every process, including the shell running this very recipe —
+# whose argv contains this pattern verbatim. Spelled `vite`, pkill matches
+# its own shell and kills it (observed: recipe dies with exit 144 before
+# reaching the next line). The bracket expression still matches the string
+# "vite" in the target process, but the literal text here reads "[v]ite",
+# which the regex does not match. Standard `ps | grep` self-match dodge.
 # Launch the desktop app in dev mode (vite + Tauri).
 dev:
+    -@pkill -f 'apps/desktop/node_modules/.bin/[v]ite' 2>/dev/null
     cd crates/desktop && ../../apps/desktop/node_modules/.bin/tauri dev
 
 deny:
