@@ -147,23 +147,44 @@ impl OpenAICompatibleTranscriber {
             CoreError::Transcription(TranscriptionError::Internal(format!("request build: {e}")))
         })?;
 
-        // WHY .audio().transcription().create_verbose_json: async-openai 0.36
-        // names this differently than spec/plan (which referenced a 0.32-era
-        // `audio().transcribe_verbose_json` shortcut). 0.36 splits the audio
-        // group into nested `Audio -> Transcriptions -> create_verbose_json`.
-        let response = self
+        // WHY `create_raw` + our own deserialization instead of
+        // `create_verbose_json`: async-openai 0.36 models the verbose response
+        // on OpenAI's current schema, where `usage` is a REQUIRED field
+        // (`pub usage: TranscriptTextUsageDuration`, no Option). Groq's
+        // OpenAI-compatible endpoint does not send `usage`, so serde fails
+        // with `missing field 'usage'` AFTER a fully successful transcription
+        // — the text came back, we threw it away. See GH #190.
+        //
+        // Owning the response type also makes the adapter tolerant of the
+        // extra fields providers add (Groq sends `x_groq`, `task`, per-segment
+        // `tokens`/`avg_logprob`/…): serde ignores unknown fields by default,
+        // so provider-side additions can never break us again. This is the
+        // adapter's whole reason to exist — every provider here is
+        // "OpenAI-compatible" only approximately.
+        //
+        // WHY this keeps typed error mapping: `create_raw` goes through the
+        // same `execute_raw` path, which converts any non-2xx into
+        // `OpenAIError::ApiError` (5xx as `backoff::Error::Transient`) before
+        // returning. Auth/rate-limit/quota mapping is unaffected.
+        let raw = self
             .client
             .audio()
             .transcription()
-            .create_verbose_json(request)
+            .create_raw(request)
             .await
             .map_err(|e| {
                 map_async_openai_error(e, &self.id, &self.model, self.file_size_limit_bytes)
             })?;
 
+        let response: VerboseTranscription = serde_json::from_slice(&raw).map_err(|e| {
+            CoreError::Transcription(TranscriptionError::Internal(format!(
+                "deserialize response: {e} (body: {})",
+                String::from_utf8_lossy(&raw)
+            )))
+        })?;
+
         let segments = response
             .segments
-            .unwrap_or_default()
             .into_iter()
             .map(|s| {
                 // WHY explicit f32 casts: TranscriptionSegment fields are
@@ -202,6 +223,38 @@ impl OpenAICompatibleTranscriber {
             backend: self.id.clone(),
         })
     }
+}
+
+/// Verbose-JSON transcription response, owned by this adapter.
+///
+/// WHY not `async_openai::types::audio::CreateTranscriptionResponseVerboseJson`:
+/// that type requires `usage`, which OpenAI sends and Groq does not — see the
+/// comment at the `create_raw` call site and GH #190. Only the fields this
+/// adapter actually maps are declared; serde ignores everything else, so a
+/// provider adding fields can never break deserialization.
+#[derive(serde::Deserialize)]
+struct VerboseTranscription {
+    /// Detected (or hinted) language, surfaced as `TranscriptionResult::language`.
+    language: String,
+    /// Total media duration in seconds; converted to ms by the caller.
+    duration: f32,
+    /// WHY `#[serde(default)]`: a provider may omit `segments` entirely for
+    /// empty/silent audio. An absent list is zero segments, not an error.
+    #[serde(default)]
+    segments: Vec<VerboseSegment>,
+}
+
+/// One timestamped segment. Fields beyond these (`tokens`, `avg_logprob`,
+/// `compression_ratio`, `no_speech_prob`, `seek`, `id`) are provider telemetry
+/// this adapter does not consume.
+#[derive(serde::Deserialize)]
+struct VerboseSegment {
+    /// Segment start in seconds.
+    start: f32,
+    /// Segment end in seconds.
+    end: f32,
+    /// Segment text.
+    text: String,
 }
 
 impl Transcriber for OpenAICompatibleTranscriber {
