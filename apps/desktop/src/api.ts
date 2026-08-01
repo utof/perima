@@ -388,10 +388,10 @@ export function transcribe(args: {
   languageHint: string | null;
 }): ResultAsync<TranscribeStartedPayload, CoreError> {
   return fromInvoke<TranscribeStartedPayload>("transcribe", {
-    file_uuid: args.fileUuid,
-    file_name: args.fileName,
+    fileUuid: args.fileUuid,
+    fileName: args.fileName,
     source: args.source,
-    language_hint: args.languageHint,
+    languageHint: args.languageHint,
   });
 }
 
@@ -402,7 +402,7 @@ export function transcribe(args: {
 export function cancelTranscription(
   requestUuid: string,
 ): ResultAsync<void, CoreError> {
-  return fromInvoke("cancel_transcription", { request_uuid: requestUuid });
+  return fromInvoke("cancel_transcription", { requestUuid });
 }
 
 /**
@@ -416,7 +416,7 @@ export function setProviderKey(
   provider: string,
   apiKey: string,
 ): ResultAsync<void, CoreError> {
-  return fromInvoke("set_provider_key", { provider, api_key: apiKey });
+  return fromInvoke("set_provider_key", { provider, apiKey });
 }
 
 /**
