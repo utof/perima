@@ -13,8 +13,8 @@
 use flume::Sender;
 use perima_core::{
     BackfillFileRow, BlakeHash, CollisionGroup, CoreError, DeviceId, FileLocationRecord,
-    FileRepository, FileSize, FileUuid, HashedFile, LocationStatus, MediaPath, UpsertOutcome,
-    VerifiedState, VolumeId,
+    FileRepository, FileSize, FileUuid, HashedFile, LocationStatus, LocationStatusUpdate,
+    LocationToVerify, MediaPath, UpsertOutcome, VerifiedState, VerifyCandidates, VolumeId,
 };
 use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
@@ -371,6 +371,63 @@ impl FileRepository for SqliteFileRepository {
         Ok(())
     }
 
+    fn list_locations_for_verify(&self, device: DeviceId) -> Result<VerifyCandidates, CoreError> {
+        // WHY a pool checkout (no writer hop): pure SELECT, same as
+        // `list_file_locations` and `VolumeRepository::list`.
+        let conn = self.reads.get()?;
+        list_locations_for_verify_sql(&conn, device)
+    }
+
+    fn update_location_statuses(
+        &self,
+        updates: &[LocationStatusUpdate],
+        device: DeviceId,
+    ) -> Result<u64, CoreError> {
+        // WHY short-circuit before the writer hop: an unchanged sweep is
+        // the steady state, and a no-op round-trip through the actor
+        // would still serialise behind every queued write.
+        if updates.is_empty() {
+            return Ok(0);
+        }
+        let (reply_tx, reply_rx) = flume::bounded::<Result<u64, CoreError>>(1);
+        self.writer
+            .send(WriteCmd::File(FileWriteCmd::UpdateLocationStatuses {
+                updates: updates.to_vec(),
+                device,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
+    }
+
+    fn count_missing_locations(&self) -> Result<u64, CoreError> {
+        let conn = self.reads.get()?;
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_locations
+                 WHERE status = 'missing' AND deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(Error::from)?;
+        u64::try_from(n).map_err(|_| CoreError::Internal(format!("count {n} is negative")))
+    }
+
+    fn soft_delete_missing_locations(&self, device: DeviceId) -> Result<u64, CoreError> {
+        let (reply_tx, reply_rx) = flume::bounded::<Result<u64, CoreError>>(1);
+        self.writer
+            .send(WriteCmd::File(FileWriteCmd::SoftDeleteMissingLocations {
+                device,
+                reply: reply_tx,
+            }))
+            .map_err(|e| CoreError::Internal(format!("writer send: {e}")))?;
+        reply_rx
+            .recv()
+            .map_err(|e| CoreError::Internal(format!("writer recv: {e}")))?
+    }
+
     fn list_files_pending_full_hash(&self, limit: usize) -> Result<Vec<FileUuid>, CoreError> {
         // WHY pool-only: pure SELECT; no write needed.
         let conn = self.reads.get()?;
@@ -543,6 +600,124 @@ fn lookup_by_file_uuid_sql(
     };
 
     Ok(Some((hash, abs_path, size_bytes)))
+}
+
+/// SELECT body for [`SqliteFileRepository::list_locations_for_verify`].
+///
+/// Returns one row per active location that resolves to a real absolute
+/// path on `device`.
+///
+/// # Two joins that must not be relaxed
+///
+/// **`vm.machine_id = ?1`** — `volume_mounts` is keyed on
+/// `(volume_id, machine_id)`; the same volume mounts at different paths
+/// on different machines. Without this predicate the join can pair a
+/// local row with another computer's mount path, and the sweep would
+/// stat a path that means nothing here. The index
+/// `idx_volume_mounts_volume_machine (volume_id, machine_id)` exists for
+/// exactly this access pattern. Three older queries in this file omit
+/// the predicate — that is #195, deliberately not fixed here so the
+/// trait-signature change lands as its own reviewable commit.
+///
+/// **`INNER JOIN volume_mounts`** (not `LEFT JOIN`) — an unmounted
+/// volume must drop out of the result set entirely rather than surface
+/// with a NULL `mount_path`. The sweep marks every row it receives and
+/// cannot stat as `Missing`; a row for an unplugged external drive that
+/// leaks through becomes a false `Missing`, and prune then deletes a
+/// catalogue whose files are intact. Making absence structural means no
+/// caller can forget the rule. Sibling queries use `LEFT JOIN` because
+/// they want the row regardless and filter later — that is correct for
+/// them and wrong here.
+fn list_locations_for_verify_sql(
+    conn: &Connection,
+    device: DeviceId,
+) -> Result<VerifyCandidates, perima_core::CoreError> {
+    let sql = "
+        SELECT fl.volume_id, fl.relative_path, fl.status, vm.mount_path
+        FROM file_locations fl
+        JOIN volume_mounts vm
+          ON vm.volume_id = fl.volume_id
+         AND vm.machine_id = ?1
+         AND vm.deleted_at IS NULL
+        WHERE fl.deleted_at IS NULL
+        ORDER BY fl.volume_id, fl.relative_path
+    ";
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(Error::from)
+        .map_err(perima_core::CoreError::from)?;
+    let rows = stmt
+        .query_map(rusqlite::params![device.0.to_string()], |row| {
+            let vol: String = row.get(0)?;
+            let rel: String = row.get(1)?;
+            let status: String = row.get(2)?;
+            let mount: String = row.get(3)?;
+            Ok((vol, rel, status, mount))
+        })
+        .map_err(Error::from)
+        .map_err(perima_core::CoreError::from)?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (vol, rel, status, mount) = row
+            .map_err(Error::from)
+            .map_err(perima_core::CoreError::from)?;
+        let volume_uuid = uuid::Uuid::parse_str(&vol)
+            .map_err(|e| perima_core::CoreError::Internal(format!("parse volume_id: {e}")))?;
+        // WHY PathBuf::push rather than string concatenation: this must
+        // match the reconstruction the read path performs in
+        // `crates/desktop/src/payloads.rs`, which is a platform-sensitive
+        // push. Concatenating with '/' would produce a path that works on
+        // Unix and fails the stat on Windows.
+        let mut absolute_path = std::path::PathBuf::from(mount);
+        absolute_path.push(&rel);
+        out.push(LocationToVerify {
+            volume: VolumeId(volume_uuid),
+            path: MediaPath::new(&rel),
+            absolute_path,
+            status: str_to_status(&status),
+        });
+    }
+
+    // WHY a second COUNT rather than deriving the number from the row
+    // set: the excluded rows are excluded by the JOIN, so they are not
+    // observable from `out`. Counting all non-deleted locations and
+    // subtracting is the only way to report what the sweep could not
+    // look at. Both statements run on the same pooled read connection
+    // inside the same implicit read snapshot.
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM file_locations WHERE deleted_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(Error::from)
+        .map_err(perima_core::CoreError::from)?;
+    let total = usize::try_from(total).unwrap_or(0);
+    let skipped_unmounted = total.saturating_sub(out.len());
+
+    Ok(VerifyCandidates {
+        locations: out,
+        skipped_unmounted,
+    })
+}
+
+/// Parse a `file_locations.status` string back into [`LocationStatus`].
+///
+/// WHY `Active` for an unrecognised value rather than an error: the
+/// column is written only by `status_to_str` in the writer, so an
+/// unknown string means either a hand-edited database or a future
+/// variant this build predates. Failing the whole sweep over one odd row
+/// would be worse than treating it as a normal row — the sweep's own
+/// stat decides the outcome regardless, so a wrong guess here is
+/// self-correcting on the next pass.
+fn str_to_status(s: &str) -> perima_core::LocationStatus {
+    match s {
+        "missing" => perima_core::LocationStatus::Missing,
+        "moved" => perima_core::LocationStatus::Moved,
+        "stale" => perima_core::LocationStatus::Stale,
+        _ => perima_core::LocationStatus::Active,
+    }
 }
 
 /// SELECT body for [`SqliteFileRepository::list_files_pending_full_hash`].

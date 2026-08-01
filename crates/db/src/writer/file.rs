@@ -21,8 +21,14 @@
 //! - `file_locations.hlc` bumps on INSERT and on UPDATE in
 //!   [`crate::cmd::FileWriteCmd::UpsertLocation`],
 //!   [`crate::cmd::FileWriteCmd::UpdateLocationStatus`],
+//!   [`crate::cmd::FileWriteCmd::UpdateLocationStatuses`],
+//!   [`crate::cmd::FileWriteCmd::SoftDeleteMissingLocations`],
 //!   [`crate::cmd::FileWriteCmd::UpdateLocationPath`], and
 //!   [`crate::cmd::FileWriteCmd::MigrateSentinelRow`].
+//! - `UpdateLocationStatuses` binds ONE `hlc` across the whole batch:
+//!   a verify sweep is a single logical event ("the catalogue was
+//!   reconciled at time T"), not N independent ones, and every row it
+//!   touches observed the same filesystem state.
 //! - The `Unchanged` arm in `UpsertFile` and `UpsertLocation` skips
 //!   every write; no `hlc` is consumed and the prior value is preserved
 //!   (same logical event did not fire).
@@ -49,16 +55,16 @@
 //! cache-invalidation hint for query-state, not a re-broadcast of
 //! the underlying filesystem change.
 //!
-//! WHY emit on every variant: all five `FileWriteCmd` variants
-//! mutate `files` or `file_locations` — both are read by the
-//! frontend file grid + location list. Coarse invalidation is the
-//! v1 contract; per-row surgical invalidation is a Batch H decision.
+//! WHY emit on every variant: every `FileWriteCmd` variant mutates
+//! `files` or `file_locations` — both are read by the frontend file
+//! grid + location list. Coarse invalidation is the v1 contract;
+//! per-row surgical invalidation is a Batch H decision.
 
 use std::sync::Arc;
 
 use perima_core::{
     AppEvent, BlakeHash, CoreError, DeviceId, EventBus, FileUuid, HashedFile, Hlc,
-    InvalidationReason, LocationStatus, MediaPath, UpsertOutcome, VolumeId,
+    InvalidationReason, LocationStatus, LocationStatusUpdate, MediaPath, UpsertOutcome, VolumeId,
 };
 use rusqlite::{Connection, OptionalExtension};
 
@@ -87,7 +93,8 @@ use crate::errors::Error;
 // cognitive_complexity above. Splitting the variants into helpers either
 // inflates parameter counts past `too_many_arguments` or sacrifices the
 // consume-on-send reply-channel semantics. The arms grow strictly with the
-// number of `FileWriteCmd` variants (now 7 post-Task-9).
+// number of `FileWriteCmd` variants (now 9, after the verify/prune slice
+// added `UpdateLocationStatuses` + `SoftDeleteMissingLocations`).
 #[allow(clippy::too_many_lines)]
 pub(super) fn handle(conn: &mut Connection, cmd: FileWriteCmd, bus: &Arc<dyn EventBus>) {
     // WHY one HLC per command (not per row): the "one HLC per
@@ -148,6 +155,33 @@ pub(super) fn handle(conn: &mut Connection, cmd: FileWriteCmd, bus: &Arc<dyn Eve
             }
             if reply.send(out).is_err() {
                 tracing::debug!("file update_location_status reply channel closed before send");
+            }
+        }
+        FileWriteCmd::UpdateLocationStatuses {
+            updates,
+            device,
+            reply,
+        } => {
+            let out = update_location_statuses_impl(conn, &updates, device, hlc);
+            // WHY emit gated on rows > 0: a sweep that finds nothing
+            // changed writes zero rows and must not invalidate every
+            // file-shaped query index for no reason.
+            if matches!(&out, Ok(rows) if *rows > 0) {
+                emit_files_changed(bus, "update_location_statuses");
+            }
+            if reply.send(out).is_err() {
+                tracing::debug!("file update_location_statuses reply channel closed before send");
+            }
+        }
+        FileWriteCmd::SoftDeleteMissingLocations { device, reply } => {
+            let out = soft_delete_missing_locations_impl(conn, device, hlc);
+            if matches!(&out, Ok(rows) if *rows > 0) {
+                emit_files_changed(bus, "soft_delete_missing_locations");
+            }
+            if reply.send(out).is_err() {
+                tracing::debug!(
+                    "file soft_delete_missing_locations reply channel closed before send"
+                );
             }
         }
         FileWriteCmd::UpdateLocationPath {
@@ -505,6 +539,111 @@ fn update_location_status_impl(
     tx.commit().map_err(Error::from)?;
 
     // WHY: at most 1 active row per (volume, path) by app-level invariant.
+    u64::try_from(n).map_err(|_| CoreError::Internal(format!("rows_changed {n} is negative")))
+}
+
+/// Writer-side body for [`FileWriteCmd::UpdateLocationStatuses`].
+///
+/// Applies every transition inside ONE transaction. Same UPDATE as
+/// [`update_location_status_impl`], including the `hlc` binding — the
+/// difference is transaction count, not row semantics.
+///
+/// WHY a single `hlc` for the whole batch (rather than one per row): the
+/// sweep is one logical event ("the catalogue was reconciled against the
+/// filesystem at time T"), not N independent ones. Every row it touches
+/// observed the same filesystem state, so they share a timestamp. This
+/// also keeps the batch atomic under CRDT merge: a peer either sees the
+/// whole reconciliation or none of it.
+///
+/// Returns the total number of rows updated across the batch. Rows whose
+/// `(volume, path)` no longer matches an active location contribute 0 and
+/// are not an error — the sweep races against the watcher by nature.
+fn update_location_statuses_impl(
+    conn: &mut Connection,
+    updates: &[LocationStatusUpdate],
+    device: DeviceId,
+    hlc: i64,
+) -> Result<u64, CoreError> {
+    // WHY early return: `BEGIN IMMEDIATE` takes the write lock, so an
+    // empty sweep would still contend with concurrent writers for no
+    // reason. A clean library is the common case once steady-state.
+    if updates.is_empty() {
+        return Ok(0);
+    }
+
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(Error::from)?;
+
+    let dev_str = device.0.to_string();
+    let now = now_iso();
+    let mut total: u64 = 0;
+    {
+        // WHY a prepared statement hoisted out of the loop: the batch is
+        // the same UPDATE N times with different bindings; preparing once
+        // avoids re-parsing the SQL per row.
+        let mut stmt = tx
+            .prepare(
+                "UPDATE file_locations
+                 SET status = ?1, updated_at = ?2, device_id = ?3, hlc = ?4
+                 WHERE volume_id = ?5 AND relative_path = ?6 AND deleted_at IS NULL",
+            )
+            .map_err(Error::from)?;
+        for u in updates {
+            let n = stmt
+                .execute(rusqlite::params![
+                    status_to_str(u.status),
+                    now,
+                    dev_str,
+                    hlc,
+                    u.volume.0.to_string(),
+                    u.path.as_str(),
+                ])
+                .map_err(Error::from)?;
+            total += u64::try_from(n)
+                .map_err(|_| CoreError::Internal(format!("rows_changed {n} is negative")))?;
+        }
+    }
+
+    tx.commit().map_err(Error::from)?;
+    Ok(total)
+}
+
+/// Writer-side body for [`FileWriteCmd::SoftDeleteMissingLocations`].
+///
+/// Retires every active `missing` location in one statement.
+///
+/// WHY `status = 'missing'` is the sole predicate and no filesystem
+/// check happens here: the writer actor owns a database connection, not
+/// a view of the disk. Deciding what is missing is the verify sweep's
+/// job; conflating the two would put a `stat()` inside a write
+/// transaction, holding the write lock across filesystem I/O.
+///
+/// WHY `deleted_at` rather than `DELETE FROM`: `file_locations` is
+/// CRDT-replicated. A hard delete has no merge representation and would
+/// resurrect on the next sync from a peer that still holds the row.
+///
+/// Returns the number of rows retired.
+fn soft_delete_missing_locations_impl(
+    conn: &mut Connection,
+    device: DeviceId,
+    hlc: i64,
+) -> Result<u64, CoreError> {
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(Error::from)?;
+
+    let now = now_iso();
+    let n = tx
+        .execute(
+            "UPDATE file_locations
+             SET deleted_at = ?1, updated_at = ?1, device_id = ?2, hlc = ?3
+             WHERE status = 'missing' AND deleted_at IS NULL",
+            rusqlite::params![now, device.0.to_string(), hlc],
+        )
+        .map_err(Error::from)?;
+
+    tx.commit().map_err(Error::from)?;
     u64::try_from(n).map_err(|_| CoreError::Internal(format!("rows_changed {n} is negative")))
 }
 
