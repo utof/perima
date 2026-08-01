@@ -2,6 +2,11 @@
   "productName": "perima",
   "identifier": "dev.perima.desktop",
   "build": {
+    "beforeDevCommand": {
+      "script": "bun run dev",
+      "cwd": "../../apps/desktop",
+      "wait": false
+    },
     "devUrl": "http://localhost:5173",
     "frontendDist": "../../apps/desktop/dist"
   },
