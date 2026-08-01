@@ -471,13 +471,35 @@ impl ScanUseCase {
             Some((vol_id, label, detected.mount_point))
         };
 
+        // WHY the mount point (not `canonical_root`) as `volume_root`:
+        // `Scanner::walk`'s second parameter is the prefix each file's
+        // `relative_path` is recorded against, and `record_mount` above
+        // stores `detected.mount_point` as `volume_mounts.mount_path`.
+        // The two must agree or `mount_path + relative_path` does not
+        // reconstruct the file — passing `canonical_root` for both
+        // silently dropped the scan-root-minus-mount-point segment from
+        // every row, so scanning `/mnt/data/Videos` recorded `clip.mp4`
+        // instead of `Videos/clip.mp4`. See GH #191.
+        //
+        // `detect_volume` picks its mount by `canonical.starts_with(mp)`
+        // (longest-prefix wins), so the mount point is guaranteed to be
+        // an ancestor of `canonical_root` and `relativize`'s
+        // `strip_prefix` cannot fail as a result of this.
+        //
+        // Dry-run resolves no volume, so it falls back to the scan root
+        // — it prints hashes and persists nothing, so no row can be
+        // written with a root-relative path.
+        let volume_root = volume_info
+            .as_ref()
+            .map_or(canonical_root.as_path(), |(_, _, mount)| mount.as_path());
+
         // Collect up-front so rayon can parallelize hashing; the walker
         // iterator itself isn't Send across the par_iter boundary. The
         // inner `take_while` polls between yielded items so a Ctrl-C
         // during walk short-circuits quickly.
         let discovered: Vec<DiscoveredFile> = self
             .scanner
-            .walk(&canonical_root, &canonical_root)?
+            .walk(&canonical_root, volume_root)?
             .take_while(|_| !cancel.is_cancelled())
             .collect();
 
@@ -1104,6 +1126,74 @@ mod tests {
             h.recording_metadata.upserts.lock().unwrap().is_empty(),
             "with_metadata=false must not invoke the metadata repo",
         );
+    }
+
+    /// GH #191 regression: every recorded `relative_path` must resolve
+    /// against the recorded mount point.
+    ///
+    /// WHY assert the reconstruction rather than the `relative_path`
+    /// string: `mount_path + relative_path` is the reconstruction the
+    /// read path actually performs (`crates/desktop/src/payloads.rs`),
+    /// so asserting it here pins the invariant that matters instead of
+    /// a literal that changes with the fixture layout.
+    ///
+    /// WHY this bug survived the rest of this module: every other test
+    /// scans a `tempfile` root, and a temp dir sits *under* a mount
+    /// rather than being one. Passing the scan root as `volume_root`
+    /// therefore produced paths relative to the scan root — which no
+    /// existing assertion looked at, because none of them joined the
+    /// two halves back together.
+    #[tokio::test]
+    async fn persisted_relative_paths_resolve_against_the_recorded_mount() {
+        let h = harness();
+        let cmd = ScanCommand::Full(FullScan {
+            path: h.fixture.path().to_path_buf(),
+            device_id: DeviceId::new(),
+            with_metadata: false,
+            dry_run: false,
+            no_wait_metadata: true,
+            no_thumbnails: true,
+            cancel: CancellationToken::new(),
+            on_persist: None,
+        });
+        let report = h.uc.execute(cmd).await.unwrap();
+
+        let (_, mount) = report
+            .volume_mount
+            .clone()
+            .expect("non-dry-run records a volume mount");
+
+        // Guard against a vacuous pass: if the fixture root happened to
+        // be its own mount point, `walk(root, root)` would be correct
+        // and this test would prove nothing. Fail loudly instead.
+        let canonical_fixture = perima_fs::platform_path::canonicalize(h.fixture.path()).unwrap();
+        assert_ne!(
+            mount, canonical_fixture,
+            "test is vacuous when the scan root is itself the mount point",
+        );
+        assert!(
+            canonical_fixture.starts_with(&mount),
+            "detect_volume must return an ancestor of the scan root; got mount {} for root {}",
+            mount.display(),
+            canonical_fixture.display(),
+        );
+
+        assert_eq!(
+            report.per_file_entries.len(),
+            3,
+            "all three fixture files must be reported",
+        );
+        for entry in &report.per_file_entries {
+            let reconstructed = mount.join(entry.relative_path.as_str());
+            assert!(
+                reconstructed.is_file(),
+                "mount_path + relative_path must reconstruct a real file: \
+                 {} + {} = {} (not found)",
+                mount.display(),
+                entry.relative_path.as_str(),
+                reconstructed.display(),
+            );
+        }
     }
 
     #[tokio::test]

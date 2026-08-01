@@ -713,9 +713,16 @@ pub async fn start_watch(
 
     // WHY 1 s production debounce: short enough for responsive feedback,
     // long enough to coalesce rapid saves (e.g. editors that write-then-chmod).
+    // WHY `detected.mount_point` as `volume_root` (not `canonical_root`):
+    // the watched path and the prefix that relative paths are recorded
+    // against are different things. `RecordMount` above stores
+    // `detected.mount_point`, and watcher-emitted `FileEvent`s carry
+    // paths relativized against this argument — they must share a root
+    // or the events address rows that scan never wrote. Mirrors the CLI
+    // `watch` shell. See GH #191.
     let watcher = DebouncedWatcher::start(
         std::slice::from_ref(&canonical_root),
-        &canonical_root,
+        &detected.mount_point,
         volume_id,
         bus,
         cancel.clone(),

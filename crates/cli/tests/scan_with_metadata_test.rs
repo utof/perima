@@ -96,10 +96,35 @@ fn scan_persists_metadata_rows_for_images() {
     );
 
     // Verify the PNG row has captured dimensions (ImageExtractor ran).
+    //
+    // WHY suffix-match instead of `relative_path = 'red.png'`: locations
+    // are recorded relative to the VOLUME root, not the scan root (GH
+    // #191). The stored value is therefore the fixture temp dir's path
+    // relative to whatever mount `/tmp` lives on, plus `/red.png` —
+    // environment-dependent by construction. The basename is the only
+    // stable part.
+    //
+    // The equality form previously passed only because scan recorded
+    // paths against the scan root, which was the bug: `mount_path +
+    // relative_path` did not reconstruct the file. This assertion moved
+    // with the fix rather than being weakened for convenience.
+    let png_match_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM file_locations
+             WHERE relative_path LIKE '%red.png' AND deleted_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .expect("count png locations");
+    assert_eq!(
+        png_match_count, 1,
+        "suffix match must identify exactly one location row, else the \
+         hash lookup below is ambiguous",
+    );
     let png_hash: String = conn
         .query_row(
             "SELECT fl.blake3_hash FROM file_locations fl
-             WHERE fl.relative_path = 'red.png' AND fl.deleted_at IS NULL",
+             WHERE fl.relative_path LIKE '%red.png' AND fl.deleted_at IS NULL",
             [],
             |r| r.get(0),
         )
