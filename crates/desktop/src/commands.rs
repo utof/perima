@@ -1956,3 +1956,72 @@ pub async fn get_transcription_config(
         .ok_or_else(|| CoreError::Internal("data_dir has no parent (config_dir)".into()))?;
     TranscriptionConfig::load(config_dir)
 }
+
+// ---------------------------------------------------------------------------
+// Location verification + prune
+// ---------------------------------------------------------------------------
+
+/// Reconcile catalogued locations against the filesystem.
+///
+/// Marks vanished files `missing` and restores ones that came back.
+/// Locations on volumes not mounted on this device are skipped entirely
+/// and reported via `VerifyReport::skipped_unmounted` — they are never
+/// marked missing (an unplugged drive must not empty the library).
+///
+/// # Errors
+/// Propagates `CoreError` from the repository.
+#[tauri::command]
+#[specta::specta]
+pub async fn verify_locations(
+    dry_run: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<perima_app::VerifyReport, CoreError> {
+    // WHY `spawn_blocking`: the sweep issues one `symlink_metadata`
+    // syscall per catalogued file. On a large library that is a long
+    // run of blocking filesystem I/O, which would stall the async
+    // runtime thread the Tauri command is polled on.
+    let verify = Arc::clone(&state.container.verify);
+    let device_id = state.device_id;
+    tokio::task::spawn_blocking(move || {
+        verify.execute(&perima_app::VerifyCommand {
+            device_id,
+            dry_run,
+            cancel: tokio_util::sync::CancellationToken::new(),
+        })
+    })
+    .await
+    .map_err(|e| CoreError::Internal(format!("verify task join: {e}")))?
+}
+
+/// Count locations currently marked `missing`.
+///
+/// Lets the UI label a destructive confirm with the real number before
+/// the user commits to it.
+///
+/// # Errors
+/// Propagates `CoreError` from the repository.
+#[tauri::command]
+#[specta::specta]
+pub async fn count_missing_locations(state: tauri::State<'_, AppState>) -> Result<u64, CoreError> {
+    state.container.prune.count_missing()
+}
+
+/// Remove catalogue entries for locations marked `missing`.
+///
+/// Soft-deletes the rows (CRDT-replicated data cannot be hard-deleted).
+/// Trusts `status = missing` and performs no filesystem check of its
+/// own — callers should run [`verify_locations`] first.
+///
+/// # Errors
+/// Propagates `CoreError` from the repository.
+#[tauri::command]
+#[specta::specta]
+pub async fn prune_missing_locations(
+    dry_run: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<perima_app::PruneReport, CoreError> {
+    state.container.prune.execute(&perima_app::PruneCommand {
+        device_id: state.device_id,
+        dry_run,
+    })
+}

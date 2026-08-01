@@ -23,12 +23,14 @@ import type {
   FileWithMetadataPayload,
   FileWithTagsPayload,
   ListProvidersPayload,
+  PruneReport,
   ScanReport,
   SearchHit,
   Tag,
   TranscribeStartedPayload,
   TranscriptionConfig,
   VolumeRecord,
+  VerifyReport,
 } from "./bindings";
 
 // ── Error parsing ─────────────────────────────────────────────────────
@@ -465,4 +467,41 @@ export function updateTranscriptionConfig(
  */
 export function getTranscriptionConfig(): ResultAsync<TranscriptionConfig, CoreError> {
   return fromInvoke<TranscriptionConfig>("get_transcription_config", {});
+}
+
+/**
+ * Reconcile catalogued locations against the filesystem.
+ *
+ * Marks vanished files `missing` and restores ones that came back.
+ *
+ * IMPORTANT for callers: `skipped_unmounted > 0` means the sweep could
+ * not see part of the library (a volume is not mounted). Those rows were
+ * left untouched and are NOT missing. Do not present the result as a
+ * complete picture, and do not offer `pruneMissingLocations` off the
+ * back of it without saying so — pruning after a partial sweep is still
+ * safe (skipped rows are never marked missing) but the count shown to
+ * the user would be misleading.
+ */
+export function verifyLocations(dryRun: boolean): ResultAsync<VerifyReport, CoreError> {
+  return fromInvoke<VerifyReport>("verify_locations", { dryRun });
+}
+
+/**
+ * Count locations currently marked `missing` — i.e. what a prune would
+ * remove. Use it to label a confirmation with the real number before the
+ * user commits.
+ */
+export function countMissingLocations(): ResultAsync<number, CoreError> {
+  return fromInvoke<number>("count_missing_locations", {});
+}
+
+/**
+ * Remove catalogue entries for locations marked `missing`.
+ *
+ * Destructive: soft-deletes the rows. Trusts `status = missing` and does
+ * no filesystem check of its own, so run {@link verifyLocations} first or
+ * the set may be stale. Pass `dryRun` to get the count without writing.
+ */
+export function pruneMissingLocations(dryRun: boolean): ResultAsync<PruneReport, CoreError> {
+  return fromInvoke<PruneReport>("prune_missing_locations", { dryRun });
 }
