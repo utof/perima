@@ -316,6 +316,32 @@ export type ScanReport = {
 };
 
 /**
+ * Outcome of a location verify sweep.
+ * Rust: `crates/app/src/verify.rs::VerifyReport`.
+ *
+ * `skipped_unmounted` counts locations on volumes not mounted on this
+ * device. They were NOT checked and their status was NOT changed — a
+ * non-zero value means this report describes only part of the library.
+ */
+export type VerifyReport = {
+  checked: number;
+  newly_missing: number;
+  recovered: number;
+  skipped_unmounted: number;
+  rows_written: number;
+  completed: boolean;
+};
+
+/**
+ * Outcome of a prune.
+ * Rust: `crates/app/src/verify.rs::PruneReport`.
+ */
+export type PruneReport = {
+  missing_found: number;
+  rows_pruned: number;
+};
+
+/**
  * File location joined with extracted media metadata.
  * Rust: `crates/desktop/src/payloads.rs::FileWithMetadataPayload`.
  * Shell-side flat composite — all fields present, metadata fields

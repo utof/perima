@@ -151,6 +151,10 @@ pub fn run() -> Result<(), RunError> {
         commands::list_providers,
         commands::update_transcription_config,
         commands::get_transcription_config,
+        // Location verification + prune.
+        commands::verify_locations,
+        commands::count_missing_locations,
+        commands::prune_missing_locations,
     ]);
 
     // Export TypeScript bindings when the `specta-export` feature is

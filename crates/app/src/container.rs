@@ -169,6 +169,13 @@ pub struct AppContainer {
     /// [`TranscriptionUseCase`] — provider registry + queue + worker
     /// orchestration. Owns the single `tokio::spawn`-backed worker task.
     pub transcription: Arc<TranscriptionUseCase>,
+    /// [`crate::VerifyUseCase`] — reconcile catalogued locations against
+    /// the filesystem (mark vanished files `Missing`, restore returned ones).
+    pub verify: Arc<crate::VerifyUseCase>,
+    /// [`crate::PruneUseCase`] — retire catalogue entries that a verify
+    /// sweep found missing. Destructive; see the type docs for why it
+    /// must follow a complete sweep.
+    pub prune: Arc<crate::PruneUseCase>,
     /// Shared event bus — same `Arc` used inside every `UseCase`.
     pub events: Arc<dyn EventBus>,
     /// Direct handle to the volume repository port.
@@ -393,6 +400,12 @@ impl AppContainer {
         // needs `quick_hash_prefix_suffix` without re-constructing
         // a Blake3Service. Arc::clone is refcount-only.
         let hasher = Arc::clone(&deps.hasher);
+        // WHY the verify use case is built here rather than by each
+        // shell: both the CLI subcommand and the Tauri command need the
+        // identical wiring, and constructing it per-shell is how the two
+        // drift apart. Holds only an `Arc` clone of the file repo.
+        let verify = Arc::new(crate::VerifyUseCase::new(Arc::clone(&deps.files)));
+        let prune = Arc::new(crate::PruneUseCase::new(Arc::clone(&deps.files)));
 
         Arc::new(Self {
             backup,
@@ -404,6 +417,8 @@ impl AppContainer {
             compute_full_hash,
             dedup,
             transcription,
+            verify,
+            prune,
             events,
             volumes,
             tags,

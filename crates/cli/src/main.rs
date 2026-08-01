@@ -190,6 +190,31 @@ enum Command {
     /// quota errors, 3 on queue full, 130 on Ctrl-C, 1 otherwise.
     Transcribe(cmd::transcribe::TranscribeArgs),
 
+    /// Reconcile the catalogue against the filesystem.
+    ///
+    /// Checks every indexed file on a currently-mounted volume and marks
+    /// vanished ones `missing` (and restores ones that came back).
+    /// Locations on unmounted volumes are skipped, never marked missing.
+    Verify {
+        /// Report what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    /// Remove catalogue entries for files that `verify` found missing.
+    ///
+    /// Soft-deletes `file_locations` rows whose status is `missing`.
+    /// Run `perima verify` first so that set reflects the filesystem as
+    /// it is now. Requires `--yes` unless `--dry-run` is given.
+    Prune {
+        /// Show what would be removed without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Confirm the removal. Required for a live run.
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Manage transcription-provider API keys (keyring entries).
     ///
     /// `set` prompts for a key with hidden input; `delete` removes an
@@ -299,6 +324,10 @@ async fn main() -> ExitCode {
         } => dispatch_debug_report(path, include_rotated),
 
         Command::MigrateDataDir(args) => dispatch_migrate_data_dir(&args),
+
+        Command::Verify { dry_run } => dispatch_verify(dry_run, &config, &cancel),
+
+        Command::Prune { dry_run, yes } => dispatch_prune(dry_run, yes, &config),
 
         Command::Transcribe(args) => dispatch_transcribe(args, &config, &cancel).await,
 
@@ -987,6 +1016,46 @@ fn dispatch_auth(args: &cmd::auth::AuthArgs, config: &Config) -> ExitCode {
 }
 
 /// Run the `volumes` subcommand.
+fn dispatch_verify(dry_run: bool, config: &Config, cancel: &Cancellation) -> ExitCode {
+    let db_path = config.data_dir.join("perima.db");
+    let container = match build_container(&db_path, &config.config_dir, config.device_id, vec![]) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("perima: database: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match cmd::verify::run(&container, config.device_id, dry_run, &cancel.token()) {
+        // WHY exit 0 even when files are missing: `verify` reports the
+        // state of the world; missing files are a finding, not a command
+        // failure. Scripts that want to act on the count should read the
+        // output rather than branch on the exit code.
+        Ok(_) => ExitCode::from(0),
+        Err(e) => {
+            eprintln!("perima: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn dispatch_prune(dry_run: bool, yes: bool, config: &Config) -> ExitCode {
+    let db_path = config.data_dir.join("perima.db");
+    let container = match build_container(&db_path, &config.config_dir, config.device_id, vec![]) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("perima: database: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match cmd::prune::run(&container, config.device_id, dry_run, yes) {
+        Ok(_) => ExitCode::from(0),
+        Err(e) => {
+            eprintln!("perima: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 async fn dispatch_volumes(config: &Config) -> ExitCode {
     let db_path = config.data_dir.join("perima.db");
     let container = match build_container(&db_path, &config.config_dir, config.device_id, vec![]) {

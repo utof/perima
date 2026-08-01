@@ -19,6 +19,7 @@
 import { useShallow } from "zustand/shallow";
 import { useUiStore } from "../stores/ui";
 import { useCollisions } from "../queries/dedup";
+import LibraryHealthPill from "./LibraryHealthPill";
 import { useBackupDatabase } from "../queries/backup";
 import CollisionPill from "./CollisionPill";
 import { TranscriptionPill } from "./TranscriptionPill";
@@ -147,6 +148,7 @@ export default function StatusBar() {
         >
           {backupMutation.isPending ? "Backing up…" : "Backup"}
         </button>
+        <LibraryHealthPill />
         <CollisionPill groups={collisions} />
         <TranscriptionPill />
       </div>

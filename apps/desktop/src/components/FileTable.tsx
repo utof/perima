@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { FileWithTagsPayload, Tag } from "../bindings";
 import TagChip from "./TagChip";
+import { LocationStatusBadge, isUnavailable } from "./LocationStatusBadge";
 import {
   useAttachTag,
   useAttachTagByUuid,
@@ -208,7 +209,15 @@ export default function FileTable({ files, loading }: FileTableProps) {
                     selectedFileUuid === f.file_uuid ? null : f.file_uuid,
                   );
                 }}
+                // WHY dim the whole row rather than only badge the cell:
+                // the status column is one of six and easy to miss when
+                // scanning by filename. Desaturating the entire row makes
+                // "this file is not on disk" legible peripherally, while the
+                // badge carries the precise verdict. Opacity only — the row
+                // stays selectable so the user can inspect or prune it.
                 className={`border-b border-border cursor-pointer transition-colors duration-micro ${
+                  isUnavailable(f.status) ? "opacity-50" : ""
+                } ${
                   selectedFileUuid === f.file_uuid
                     ? "bg-accent text-accent-foreground"
                     : "hover:bg-muted"
@@ -231,7 +240,9 @@ export default function FileTable({ files, loading }: FileTableProps) {
                 <td className="px-4 py-2 mono-metadata text-muted-foreground max-w-xs truncate">
                   {f.relative_path}
                 </td>
-                <td className="px-4 py-2">{f.status}</td>
+                <td className="px-4 py-2">
+                  <LocationStatusBadge status={f.status} />
+                </td>
                 <td className="px-4 py-2">
                   <RowTagsCell
                     fileUuid={f.file_uuid}

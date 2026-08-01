@@ -16,7 +16,8 @@ use flume::Sender;
 
 use perima_core::{
     BlakeHash, CacheEntry, CacheKey, CoreError, DeviceId, HashedFile, LocationStatus,
-    MediaMetadata, MediaPath, Tag, UpsertOutcome, VolumeId, VolumeIdentifiers,
+    LocationStatusUpdate, MediaMetadata, MediaPath, Tag, UpsertOutcome, VolumeId,
+    VolumeIdentifiers,
 };
 use uuid::Uuid;
 
@@ -296,6 +297,38 @@ pub enum FileWriteCmd {
         /// Device that initiated the update.
         device: DeviceId,
         /// Reply channel carrying `rows_changed` (`0` or `1`).
+        reply: ReplyTx<u64>,
+    },
+    /// Soft-delete every active location whose status is `missing`.
+    ///
+    /// WHY a dedicated variant rather than reusing a generic bulk
+    /// update: this is the only destructive location command, and
+    /// keeping it named makes it greppable and reviewable on its own.
+    /// Binds `file_locations.hlc` on the UPDATE.
+    SoftDeleteMissingLocations {
+        /// Device that initiated the prune.
+        device: DeviceId,
+        /// Reply channel carrying the number of rows retired.
+        reply: ReplyTx<u64>,
+    },
+    /// Apply many location-status transitions in a single transaction.
+    ///
+    /// WHY a batch variant alongside the single-row `UpdateLocationStatus`:
+    /// the verify sweep flips the status of every location it finds
+    /// missing (or recovered). Routing those through the single-row
+    /// variant would open one `BEGIN IMMEDIATE` per changed file — the
+    /// write-amplification shape that provoked the SQLite lock-order
+    /// inversion in #131. The watcher keeps using the single-row variant
+    /// because it genuinely handles one filesystem event at a time.
+    ///
+    /// Binds `file_locations.hlc` on every UPDATE, exactly as the
+    /// single-row path does.
+    UpdateLocationStatuses {
+        /// Transitions to apply, in order.
+        updates: Vec<LocationStatusUpdate>,
+        /// Device that initiated the updates.
+        device: DeviceId,
+        /// Reply channel carrying the total `rows_changed` across the batch.
         reply: ReplyTx<u64>,
     },
     /// Rename a `file_locations` row and reset status to `active`.

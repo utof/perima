@@ -4,8 +4,63 @@ use std::path::PathBuf;
 
 use crate::{
     BlakeHash, CollisionGroup, CoreError, DeviceId, FileLocationRecord, FileUuid, HashedFile,
-    MediaPath, UpsertOutcome, VolumeId,
+    LocationStatus, MediaPath, UpsertOutcome, VolumeId,
 };
+
+/// One `file_locations` row paired with the absolute path it resolves to
+/// on **this** machine. Produced by
+/// [`FileRepository::list_locations_for_verify`].
+///
+/// WHY the absolute path is built in the adapter rather than by the
+/// caller: reconstructing it requires the `volume_mounts` join, and
+/// joining on the wrong machine's mount silently yields a path that
+/// belongs to a different computer. Keeping the join inside the query
+/// means the verify sweep cannot get it wrong by construction.
+#[derive(Debug, Clone)]
+pub struct LocationToVerify {
+    /// Volume the location lives on.
+    pub volume: VolumeId,
+    /// Path relative to the volume root.
+    pub path: MediaPath,
+    /// Absolute path on this machine (`mount_path` + `relative_path`).
+    pub absolute_path: PathBuf,
+    /// Status currently recorded in the database.
+    ///
+    /// The sweep compares this against what it observes on disk so it
+    /// can write only the rows that actually changed.
+    pub status: LocationStatus,
+}
+
+/// Result of [`FileRepository::list_locations_for_verify`]: the rows the
+/// sweep can actually check, plus a count of the ones it cannot.
+///
+/// WHY the skipped count travels with the rows instead of being a
+/// separate optional query: a sweep that silently omits every location
+/// on an unmounted drive reports "checked 78, all present" for a library
+/// of 500 and reads as a clean bill of health. Carrying the number the
+/// caller is NOT allowed to conclude anything about, in the same value,
+/// makes an honest report the path of least resistance.
+#[derive(Debug, Clone)]
+pub struct VerifyCandidates {
+    /// Locations on volumes mounted right now on this device.
+    pub locations: Vec<LocationToVerify>,
+    /// Non-deleted locations excluded because their volume has no active
+    /// mount on this device. These are NOT missing — their status must
+    /// be left exactly as it is.
+    pub skipped_unmounted: usize,
+}
+
+/// A single `(volume, path) -> status` transition for
+/// [`FileRepository::update_location_statuses`].
+#[derive(Debug, Clone)]
+pub struct LocationStatusUpdate {
+    /// Volume the location lives on.
+    pub volume: VolumeId,
+    /// Path relative to the volume root.
+    pub path: MediaPath,
+    /// Status to write.
+    pub status: LocationStatus,
+}
 
 /// One row returned by [`FileRepository::list_files_needing_backfill`].
 ///
@@ -201,5 +256,112 @@ pub trait FileRepository: Send + Sync {
     fn list_files_pending_full_hash(&self, limit: usize) -> Result<Vec<FileUuid>, CoreError> {
         let _ = limit;
         Ok(Vec::new())
+    }
+
+    /// Return every non-deleted `file_locations` row that sits on a volume
+    /// **currently mounted on `device`**, paired with its absolute path.
+    ///
+    /// Used by `perima_app::VerifyUseCase` to reconcile the catalogue
+    /// against the filesystem.
+    ///
+    /// # The unmounted-volume contract
+    ///
+    /// Rows whose volume has no active mount on this device are **not
+    /// returned at all** — they are not returned with a `None` path for
+    /// the caller to filter. This is deliberate and load-bearing: the
+    /// verify sweep marks everything it receives and cannot see as
+    /// `Missing`, so a row that leaks through for an unplugged drive
+    /// becomes a false `Missing`, and the prune path then deletes a
+    /// catalogue whose files are perfectly intact on a disk sitting in a
+    /// drawer. Absence from this result set is what makes "skip
+    /// unmounted volumes" unforgettable rather than a rule each caller
+    /// has to remember.
+    ///
+    /// The mount join MUST be constrained to `device` for the same
+    /// reason — a mount row recorded by a different machine yields a
+    /// path that is meaningless locally. See #195.
+    ///
+    /// # Default implementation
+    ///
+    /// Returns empty candidates so non-SQLite adapters compile unchanged.
+    ///
+    /// # Errors
+    /// Adapter-level errors become `CoreError::Internal`.
+    fn list_locations_for_verify(&self, device: DeviceId) -> Result<VerifyCandidates, CoreError> {
+        let _ = device;
+        Ok(VerifyCandidates {
+            locations: Vec::new(),
+            skipped_unmounted: 0,
+        })
+    }
+
+    /// Apply many `(volume, path) -> status` transitions in one transaction.
+    ///
+    /// Returns the number of rows actually updated.
+    ///
+    /// WHY batched rather than a loop over a single-row update: each
+    /// single-row call is its own `BEGIN IMMEDIATE` round-trip through
+    /// the writer actor, so a sweep over a large library would open one
+    /// transaction per changed file. The repo has prior form here — the
+    /// SQLite lock-order inversion behind #131 was provoked by exactly
+    /// this kind of write amplification.
+    ///
+    /// # Default implementation
+    ///
+    /// Returns `Ok(0)` (no-op) so non-SQLite adapters compile unchanged.
+    ///
+    /// # Errors
+    /// Adapter-level errors become `CoreError::Internal`.
+    fn update_location_statuses(
+        &self,
+        updates: &[LocationStatusUpdate],
+        device: DeviceId,
+    ) -> Result<u64, CoreError> {
+        let _ = (updates, device);
+        Ok(0)
+    }
+
+    /// Count non-deleted locations currently recorded as `Missing`.
+    ///
+    /// This is what a prune would remove. Exposed separately from the
+    /// delete so a caller can show the number *before* asking the user
+    /// to confirm, rather than reporting a count after the fact.
+    ///
+    /// # Default implementation
+    ///
+    /// Returns `Ok(0)` so non-SQLite adapters compile unchanged.
+    ///
+    /// # Errors
+    /// Adapter-level errors become `CoreError::Internal`.
+    fn count_missing_locations(&self) -> Result<u64, CoreError> {
+        Ok(0)
+    }
+
+    /// Soft-delete every non-deleted location recorded as `Missing`,
+    /// returning the number of rows retired.
+    ///
+    /// WHY soft-delete rather than `DELETE FROM`: `file_locations` is a
+    /// mutable CRDT-replicated row. A hard delete cannot be represented
+    /// as a merge and would resurrect on the next sync from any peer
+    /// that still has the row. Setting `deleted_at` is the repo-wide
+    /// convention for retiring one (see `update_location_path`'s
+    /// collision branch).
+    ///
+    /// # Safety contract
+    ///
+    /// This trusts `status = 'missing'` completely — it performs no
+    /// filesystem check of its own. Whatever set that status decides
+    /// what gets deleted. `perima_app::VerifyUseCase` is the intended
+    /// producer, and it never marks rows on unmounted volumes.
+    ///
+    /// # Default implementation
+    ///
+    /// Returns `Ok(0)` so non-SQLite adapters compile unchanged.
+    ///
+    /// # Errors
+    /// Adapter-level errors become `CoreError::Internal`.
+    fn soft_delete_missing_locations(&self, device: DeviceId) -> Result<u64, CoreError> {
+        let _ = device;
+        Ok(0)
     }
 }

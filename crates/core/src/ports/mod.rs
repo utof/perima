@@ -11,7 +11,9 @@ pub mod tag_repo;
 pub mod volume_repo;
 
 pub use database_admin::DatabaseAdmin;
-pub use file_repo::{BackfillFileRow, FileRepository};
+pub use file_repo::{
+    BackfillFileRow, FileRepository, LocationStatusUpdate, LocationToVerify, VerifyCandidates,
+};
 pub use hash::HashService;
 pub use identity_cache::{CacheEntry, CacheKey, IdentityCacheRepository};
 pub use metadata_repo::{FileWithMetadataRow, MetadataRepository};
