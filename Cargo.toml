@@ -114,7 +114,23 @@ minijinja    = { version = "2", default-features = false, features = ["macros", 
 # WHY async-openai 0.36 (plan spec'd 0.32; 0.36 is latest stable as of 2026-05):
 # The `audio` feature gates the Transcriptions/Speech/Translations API groups;
 # default-features disabled to avoid pulling in `assistant` + `batch` + etc.
-async-openai      = { version = "0.36", default-features = false, features = ["audio"] }
+#
+# WHY `rustls` must be listed explicitly: async-openai's `default` feature is
+# `["rustls"]`, which forwards to `reqwest/rustls`. Turning defaults off to
+# drop the unused API groups ALSO dropped the TLS backend, leaving reqwest
+# compiled with no HTTPS support at all — every request to a real provider
+# failed at the connector before opening a socket, surfacing as the useless
+# `TranscriptionError::Network("error sending request for url (...)")`.
+#
+# WHY this was invisible to the test suite: the wiremock stubs in
+# `crates/transcribe/tests` and `crates/cli/tests` serve plain HTTP on
+# 127.0.0.1, which needs no TLS backend. Only a real `https://` provider
+# exercises this. See GH #189.
+#
+# WHY `rustls` and not `native-tls`: matches the upstream default and avoids a
+# system OpenSSL dependency across the windows/macos/linux CI matrix and the
+# bundled Tauri desktop binary.
+async-openai      = { version = "0.36", default-features = false, features = ["audio", "rustls"] }
 # WHY which 8: cross-platform PATH binary discovery for CliFfmpegInvoker.
 which             = "8"
 # WHY keyring 3.6 (not 4.0): keyring 4.0 removed the compile-time feature flags
